@@ -31,24 +31,19 @@ enum show_key_e {
 
 /* Built-in false color bands, bottom to top; must match falsecolor.effect. */
 #define FC_N_BANDS 12
-static const struct {
-	float y_max; // band holds luma below this (the last band is 100 % and above)
+static const struct
+{
+	float y_max;    // band holds luma below this (the last band is 100 % and above)
 	uint32_t color; // 0xAARRGGBB
 	const char *range;
 	const char *label_key;
 } fc_bands[FC_N_BANDS] = {
-	{0.02f, 0xFFD938FF, "0-2%", "FC.Band.BlackClip"},
-	{0.10f, 0xFF0000FF, "2-10%", "FC.Band.DeepShadow"},
-	{0.20f, 0xFF548CFF, "10-20%", "FC.Band.Shadow"},
-	{0.42f, 0xFF4D4D4D, "20-42%", "FC.Band.Dark"},
-	{0.48f, 0xFF99FF00, "42-48%", "FC.Band.MidGrey"},
-	{0.52f, 0xFF808080, "48-52%", "FC.Band.Mid"},
-	{0.58f, 0xFFF29E9E, "52-58%", "FC.Band.Skin"},
-	{0.78f, 0xFFB3B3B3, "58-78%", "FC.Band.Bright"},
-	{0.84f, 0xFFB3B300, "78-84%", "FC.Band.Highlight"},
-	{0.94f, 0xFFFFFF00, "84-94%", "FC.Band.BrightHighlight"},
-	{1.00f, 0xFFE68000, "94-100%", "FC.Band.NearClip"},
-	{2.00f, 0xFFE63300, ">100%", "FC.Band.Clip"},
+	{0.02f, 0xFFD938FF, "0-2%", "FC.Band.BlackClip"},   {0.10f, 0xFF0000FF, "2-10%", "FC.Band.DeepShadow"},
+	{0.20f, 0xFF548CFF, "10-20%", "FC.Band.Shadow"},    {0.42f, 0xFF4D4D4D, "20-42%", "FC.Band.Dark"},
+	{0.48f, 0xFF99FF00, "42-48%", "FC.Band.MidGrey"},   {0.52f, 0xFF808080, "48-52%", "FC.Band.Mid"},
+	{0.58f, 0xFFF29E9E, "52-58%", "FC.Band.Skin"},      {0.78f, 0xFFB3B3B3, "58-78%", "FC.Band.Bright"},
+	{0.84f, 0xFFB3B300, "78-84%", "FC.Band.Highlight"}, {0.94f, 0xFFFFFF00, "84-94%", "FC.Band.BrightHighlight"},
+	{1.00f, 0xFFE68000, "94-100%", "FC.Band.NearClip"}, {2.00f, 0xFFE63300, ">100%", "FC.Band.Clip"},
 };
 
 // common structure for source and filter
@@ -730,8 +725,7 @@ static void zb_render_table(float x0, float tw, float height, float total_width,
 		if (coverage) {
 			char pct[16];
 			snprintf(pct, sizeof(pct), "%.1f%%", share * 100.0f);
-			text_draw(&ts, pct, x_right, y_mid, font_px, text_color, TEXT_ALIGN_RIGHT,
-				  TEXT_VALIGN_MIDDLE);
+			text_draw(&ts, pct, x_right, y_mid, font_px, text_color, TEXT_ALIGN_RIGHT, TEXT_VALIGN_MIDDLE);
 		}
 	}
 

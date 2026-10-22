@@ -20,10 +20,8 @@ static obs_properties_t *scopewidget_properties(const obs_source_t *source)
 	return props;
 }
 
-ScopeWidgetProperties::ScopeWidgetProperties(QWidget *parent, obs_source_t *source_, const QString &title,
-					     bool is_roi)
-	: QDialog(parent),
-	  source(source_)
+ScopeWidgetProperties::ScopeWidgetProperties(QWidget *parent, obs_source_t *source_, const QString &title, bool is_roi)
+	: QDialog(parent), source(source_)
 {
 	setWindowTitle(title);
 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);

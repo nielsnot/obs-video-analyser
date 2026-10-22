@@ -121,7 +121,7 @@ static void shapes_load(struct roi_source *src, obs_data_t *settings)
 		obs_data_t *item = obs_data_array_item(array, i);
 		struct roi_shape s = {
 			.type = (int)obs_data_get_int(item, "type") == ROI_SHAPE_ELLIPSE ? ROI_SHAPE_ELLIPSE
-										  : ROI_SHAPE_RECT,
+											 : ROI_SHAPE_RECT,
 			.x0 = clamp01((float)obs_data_get_double(item, "x0")),
 			.y0 = clamp01((float)obs_data_get_double(item, "y0")),
 			.x1 = clamp01((float)obs_data_get_double(item, "x1")),

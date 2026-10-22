@@ -63,7 +63,15 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "diamond_source", "diamond", "Diamond", FIT_SQUARE},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
-enum { TYPE_WAVEFORM = 0, TYPE_VECTORSCOPE, TYPE_HISTOGRAM, TYPE_ZEBRA, TYPE_FALSECOLOR, TYPE_FOCUSPEAKING, TYPE_DIAMOND };
+enum {
+	TYPE_WAVEFORM = 0,
+	TYPE_VECTORSCOPE,
+	TYPE_HISTOGRAM,
+	TYPE_ZEBRA,
+	TYPE_FALSECOLOR,
+	TYPE_FOCUSPEAKING,
+	TYPE_DIAMOND
+};
 
 static int type_from_key(const char *key)
 {
@@ -1134,7 +1142,8 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.grid")));
 			act->setCheckable(true);
 			act->setChecked(grid_visible(src, keys));
-			connect(act, &QAction::toggled, this, [src, keys](bool checked) { set_grid_visible(src, keys, checked); });
+			connect(act, &QAction::toggled, this,
+				[src, keys](bool checked) { set_grid_visible(src, keys, checked); });
 		}
 		{
 			obs_properties_t *props = obs_source_properties(src);
@@ -1172,7 +1181,8 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 			connect(act, &QAction::triggered, this, [this, tile]() { moveScope(tile, +1); });
 
 			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.remove")));
-			connect(act, &QAction::triggered, this, [this, tile]() { removeScope(tile); },
+			connect(
+				act, &QAction::triggered, this, [this, tile]() { removeScope(tile); },
 				Qt::QueuedConnection);
 		}
 
@@ -1427,17 +1437,17 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 			slider->setEnabled(enabled);
 			slider->setRange(0, (int)std::lround((hi - lo) / step));
 			slider->setValue((int)std::lround((cur - lo) / step));
-			QObject::connect(slider, &QSlider::valueChanged, panel,
-					 [src, key, is_int, lo, step, value](int pos) {
-						 const double v = lo + pos * step;
-						 value->setText(QString::number(v));
-						 update_one(src, [&](obs_data_t *d) {
-							 if (is_int)
-								 obs_data_set_int(d, key.c_str(), (long long)std::lround(v));
-							 else
-								 obs_data_set_double(d, key.c_str(), v);
-						 });
-					 });
+			QObject::connect(
+				slider, &QSlider::valueChanged, panel, [src, key, is_int, lo, step, value](int pos) {
+					const double v = lo + pos * step;
+					value->setText(QString::number(v));
+					update_one(src, [&](obs_data_t *d) {
+						if (is_int)
+							obs_data_set_int(d, key.c_str(), (long long)std::lround(v));
+						else
+							obs_data_set_double(d, key.c_str(), v);
+					});
+				});
 			vbox->addWidget(slider);
 			break;
 		}
@@ -1510,8 +1520,8 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	// header: title and the full dock menu
 	{
 		auto *head = new QHBoxLayout();
-		const QString type_name = QString::fromUtf8(
-			is_roi ? obs_module_text("ROI") : obs_module_text(scope_types[e->type].name_key));
+		const QString type_name = QString::fromUtf8(is_roi ? obs_module_text("ROI")
+								   : obs_module_text(scope_types[e->type].name_key));
 		auto *title = new QLabel(QString::fromUtf8(obs_module_text("Options.Title")).arg(type_name), panel);
 		title->setObjectName("Title");
 		head->addWidget(title);
@@ -1566,7 +1576,8 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 				const char *v = obs_property_list_item_string(tp, i);
 				if (!v || v == roi_name || is_roi_source_name(v))
 					continue; // the dock's own ROI is the first entry
-				combo->addItem(QString::fromUtf8(obs_property_list_item_name(tp, i)), QString::fromUtf8(v));
+				combo->addItem(QString::fromUtf8(obs_property_list_item_name(tp, i)),
+					       QString::fromUtf8(v));
 				if (!(e && e->use_roi) && cur && strcmp(cur, v) == 0)
 					current = combo->count() - 1;
 			}
@@ -1612,9 +1623,11 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	// graticule switch and the scope's own options
 	if (e) {
 		if (const grid_key_s *keys = grid_keys_for(e->type)) {
-			auto *cb = new QCheckBox(QString::fromUtf8(obs_module_text("dock.menu.grid")).remove('&'), panel);
+			auto *cb =
+				new QCheckBox(QString::fromUtf8(obs_module_text("dock.menu.grid")).remove('&'), panel);
 			cb->setChecked(grid_visible(src, keys));
-			connect(cb, &QCheckBox::toggled, this, [src, keys](bool on) { set_grid_visible(src, keys, on); });
+			connect(cb, &QCheckBox::toggled, this,
+				[src, keys](bool on) { set_grid_visible(src, keys, on); });
 			vbox->addWidget(cb);
 		}
 	}
@@ -1660,22 +1673,24 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	// view actions
 	{
 		auto *row = new QHBoxLayout();
-		auto *solo = new QPushButton(QString::fromUtf8(obs_module_text(data->solo >= 0 ? "dock.menu.solo.exit"
-											       : "dock.menu.solo"))
-						     .remove('&'),
-					     panel);
+		auto *solo = new QPushButton(
+			QString::fromUtf8(obs_module_text(data->solo >= 0 ? "dock.menu.solo.exit" : "dock.menu.solo"))
+				.remove('&'),
+			panel);
 		solo->setObjectName("Flat");
 		connect(solo, &QPushButton::clicked, this, [this, tile, popup]() {
 			popup->close();
 			toggleSolo(data->solo >= 0 ? -1 : tile);
 		});
-		auto *proj = new QPushButton(QString::fromUtf8(obs_module_text("dock.menu.projector")).remove('&'), panel);
+		auto *proj =
+			new QPushButton(QString::fromUtf8(obs_module_text("dock.menu.projector")).remove('&'), panel);
 		proj->setObjectName("Flat");
 		connect(proj, &QPushButton::clicked, this, [src, popup]() {
 			popup->close();
 			obs_frontend_open_projector("Source", -1, "", obs_source_get_name(src));
 		});
-		auto *all = new QPushButton(QString::fromUtf8(obs_module_text("dock.menu.settings")).remove('&'), panel);
+		auto *all =
+			new QPushButton(QString::fromUtf8(obs_module_text("dock.menu.settings")).remove('&'), panel);
 		all->setObjectName("Flat");
 		connect(all, &QPushButton::clicked, this, [this, tile, popup]() {
 			popup->close();
@@ -1812,7 +1827,7 @@ void ScopeWidget::loadActive(obs_data_t *state)
 	if (data->layout < SCOPE_LAYOUT_AUTO || data->layout > SCOPE_LAYOUT_HORIZONTAL)
 		data->layout = SCOPE_LAYOUT_AUTO;
 	data->roi_shown = state && obs_data_has_user_value(state, "roi-shown") ? obs_data_get_bool(state, "roi-shown")
-										  : true;
+									       : true;
 	pthread_mutex_unlock(&data->mutex);
 
 	if (state && obs_data_has_user_value(state, "scopes")) {
@@ -1862,7 +1877,8 @@ void ScopeWidget::switchView(int index)
 static std::string next_view_name(const scope_widget_s *data)
 {
 	for (int i = (int)data->views.size() + 1;; i++) {
-		const std::string name = QString::fromUtf8(obs_module_text("dock.view.default_name")).arg(i).toStdString();
+		const std::string name =
+			QString::fromUtf8(obs_module_text("dock.view.default_name")).arg(i).toStdString();
 		bool used = false;
 		for (const auto &v : data->views)
 			used = used || v.name == name;

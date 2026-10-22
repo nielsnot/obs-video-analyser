@@ -133,7 +133,8 @@ extern "C" void text_render_init(void)
 	// Format_ARGB32 is laid out as BGRA bytes on little-endian machines, matching GS_BGRA.
 	atlas.pixels.resize((size_t)atlas.width * atlas.height * 4);
 	for (int y = 0; y < atlas.height; y++)
-		memcpy(atlas.pixels.data() + (size_t)y * atlas.width * 4, img.constScanLine(y), (size_t)atlas.width * 4);
+		memcpy(atlas.pixels.data() + (size_t)y * atlas.width * 4, img.constScanLine(y),
+		       (size_t)atlas.width * 4);
 
 	atlas.ready = true;
 }

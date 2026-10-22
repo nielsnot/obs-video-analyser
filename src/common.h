@@ -25,10 +25,10 @@ static inline bool is_preview_name(const char *name)
  * Pixels outside the mask get alpha 0, which the scopes skip. */
 struct cm_mask
 {
-	gs_texture_t *tex; // R8 shape mask over the captured frame; NULL means no shapes
-	bool qualifier;    // hue/saturation/luma qualifier enabled
-	float hue_center;     // degrees
-	float hue_half_width; // degrees; 180 or more passes every hue
+	gs_texture_t *tex;        // R8 shape mask over the captured frame; NULL means no shapes
+	bool qualifier;           // hue/saturation/luma qualifier enabled
+	float hue_center;         // degrees
+	float hue_half_width;     // degrees; 180 or more passes every hue
 	float sat_min, sat_max;   // 0..1
 	float luma_min, luma_max; // 0..1
 };

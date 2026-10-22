@@ -382,7 +382,10 @@ static void render_waveform(struct wvs_source *src)
 			h *= n;
 			break;
 		case DISP_PARADE:
-			name = n == 4 ? "DrawParadeYRGB" : n == 3 ? "DrawParade" : n == 2 ? "DrawParadeUV" : "DrawOverlay";
+			name = n == 4   ? "DrawParadeYRGB"
+			       : n == 3 ? "DrawParade"
+			       : n == 2 ? "DrawParadeUV"
+					: "DrawOverlay";
 			w *= n;
 			break;
 		default:
