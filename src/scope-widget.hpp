@@ -16,6 +16,7 @@ class ScopeWidget : public NorisQTDisplay {
 	QWidget *toolbar = nullptr;
 	class QToolButton *btnRect = nullptr;
 	class QToolButton *btnEllipse = nullptr;
+	class QToolButton *btnPin = nullptr;
 	bool toolbarVisible = true;
 	int drawMode = 0;
 	class QTabBar *tabs = nullptr;

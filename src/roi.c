@@ -9,6 +9,7 @@
 #include "roi.h"
 #include "common.h"
 #include "util.h"
+#include "text-render.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -101,6 +102,7 @@ static void roi_destroy(void *data)
 	bfree(src->mask_buf);
 
 	da_free(src->shapes);
+	da_free(src->pins);
 	da_free(src->sources);
 	pthread_mutex_destroy(&src->shapes_mutex);
 	pthread_mutex_destroy(&src->sources_mutex);
@@ -132,6 +134,20 @@ static void shapes_load(struct roi_source *src, obs_data_t *settings)
 		obs_data_release(item);
 	}
 	src->shapes_dirty = true;
+
+	obs_data_array_t *pins = obs_data_get_array(settings, "pins");
+	const size_t np = obs_data_array_count(pins);
+	da_resize(src->pins, 0);
+	for (size_t i = 0; i < np && src->pins.num < ROI_MAX_PINS; i++) {
+		obs_data_t *item = obs_data_array_item(pins, i);
+		struct roi_pin pin = {
+			.x = clamp01((float)obs_data_get_double(item, "x")),
+			.y = clamp01((float)obs_data_get_double(item, "y")),
+		};
+		da_push_back(src->pins, &pin);
+		obs_data_release(item);
+	}
+	obs_data_array_release(pins);
 	pthread_mutex_unlock(&src->shapes_mutex);
 
 	obs_data_array_release(array);
@@ -156,8 +172,21 @@ static void shapes_store(struct roi_source *src)
 	}
 	pthread_mutex_unlock(&src->shapes_mutex);
 
+	obs_data_array_t *pins = obs_data_array_create();
+	pthread_mutex_lock(&src->shapes_mutex);
+	for (size_t i = 0; i < src->pins.num; i++) {
+		obs_data_t *item = obs_data_create();
+		obs_data_set_double(item, "x", src->pins.array[i].x);
+		obs_data_set_double(item, "y", src->pins.array[i].y);
+		obs_data_array_push_back(pins, item);
+		obs_data_release(item);
+	}
+	pthread_mutex_unlock(&src->shapes_mutex);
+
 	obs_data_t *settings = obs_source_get_settings(src->cm.self);
 	obs_data_set_array(settings, "shapes", array);
+	obs_data_set_array(settings, "pins", pins);
+	obs_data_array_release(pins);
 	obs_data_release(settings);
 	obs_data_array_release(array);
 }
@@ -395,6 +424,115 @@ static inline int draw_mode_shape(int mode)
 	return mode == ROI_DRAW_ELLIPSE ? ROI_SHAPE_ELLIPSE : ROI_SHAPE_RECT;
 }
 
+/* ---------- pins ---------- */
+
+static void rgb_to_hsl(int r, int g, int b, int *h, int *s, int *l)
+{
+	const int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+	const int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+	const int c = mx - mn;
+	*l = (mx + mn) * 100 / 510;
+	const int denom = mx + mn <= 255 ? mx + mn : 510 - mx - mn;
+	*s = denom > 0 ? c * 100 / denom : 0;
+	if (!c) {
+		*h = 0;
+		return;
+	}
+	float hf;
+	if (mx == r)
+		hf = (float)(g - b) / c;
+	else if (mx == g)
+		hf = (float)(b - r) / c + 2.0f;
+	else
+		hf = (float)(r - g) / c + 4.0f;
+	if (hf < 0.0f)
+		hf += 6.0f;
+	*h = (int)(hf * 60.0f) % 360;
+}
+
+static void fill_quad(float x0, float y0, float x1, float y1, uint32_t color)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(x0, y0);
+		gs_vertex2f(x1, y0);
+		gs_vertex2f(x0, y1);
+		gs_vertex2f(x1, y1);
+		gs_render_stop(GS_TRISTRIP);
+	}
+}
+
+/* Each pin: a cross, a swatch of the color read and its values (RGB, luma %, HSL). */
+static void draw_pins(struct roi_source *src, float w, float h)
+{
+	struct roi_pin pins[ROI_MAX_PINS];
+	pthread_mutex_lock(&src->shapes_mutex);
+	const size_t n = src->pins.num < ROI_MAX_PINS ? src->pins.num : ROI_MAX_PINS;
+	memcpy(pins, src->pins.array, n * sizeof(struct roi_pin));
+	pthread_mutex_unlock(&src->shapes_mutex);
+	if (!n)
+		return;
+
+	const struct text_scale ts = text_scale_from_viewport(w, h);
+	const float px = 12.0f;
+	const float arm = 7.0f;
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	for (size_t i = 0; i < n; i++) {
+		const float x = pins[i].x * w, y = pins[i].y * h;
+
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF);
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			gs_vertex2f(x - arm * ts.ux, y);
+			gs_vertex2f(x + arm * ts.ux, y);
+			gs_vertex2f(x, y - arm * ts.uy);
+			gs_vertex2f(x, y + arm * ts.uy);
+			gs_render_stop(GS_LINES);
+		}
+
+		char line1[64], line2[64];
+		if (pins[i].valid) {
+			const int r = pins[i].r, g = pins[i].g, b = pins[i].b;
+			const int luma = (int)lroundf((0.2126f * r + 0.7152f * g + 0.0722f * b) / 2.55f);
+			int hh, ss, ll;
+			rgb_to_hsl(r, g, b, &hh, &ss, &ll);
+			snprintf(line1, sizeof(line1), "%d  R%d G%d B%d  Y %d%%", (int)i + 1, r, g, b, luma);
+			snprintf(line2, sizeof(line2), "H %d\xc2\xb0  S %d%%  L %d%%", hh, ss, ll);
+		} else {
+			snprintf(line1, sizeof(line1), "%d", (int)i + 1);
+			line2[0] = 0;
+		}
+
+		const float tw = fmaxf(text_width(&ts, line1, px), text_width(&ts, line2, px));
+		const float sw = 2.0f * px * ts.ux; // swatch spans both lines
+		const float pad = 4.0f * ts.ux;
+		const float box_w = sw + tw + pad * 3.0f;
+		const float box_h = (2.0f * px + 6.0f) * ts.uy;
+		// place the label beside the pin, flipped near the right or bottom edge
+		float bx = x + arm * ts.ux + pad;
+		float by = y + arm * ts.uy;
+		if (bx + box_w > w)
+			bx = x - arm * ts.ux - pad - box_w;
+		if (by + box_h > h)
+			by = y - arm * ts.uy - box_h;
+
+		fill_quad(bx, by, bx + box_w, by + box_h, 0xC0101012);
+		if (pins[i].valid) {
+			// gs_effect_set_color takes 0xAARRGGBB
+			const uint32_t c = 0xFF000000 | ((uint32_t)pins[i].r << 16) | ((uint32_t)pins[i].g << 8) |
+					   pins[i].b;
+			fill_quad(bx + pad, by + 3.0f * ts.uy, bx + pad + sw, by + box_h - 3.0f * ts.uy, c);
+		}
+		text_draw(&ts, line1, bx + pad * 2.0f + sw, by + 3.0f * ts.uy, px, 0xFFF0F0F0, TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_TOP);
+		text_draw(&ts, line2, bx + pad * 2.0f + sw, by + (3.0f + px) * ts.uy, px, 0xFFB8B8C0, TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_TOP);
+	}
+}
+
 /* ---------- rendering ---------- */
 
 bool roi_target_render(struct roi_source *src)
@@ -453,6 +591,8 @@ static void roi_render(void *data, gs_effect_t *effect)
 	}
 	pthread_mutex_unlock(&src->shapes_mutex);
 
+	draw_pins(src, w, h);
+
 	if (src->dragging) {
 		int x0, y0, x1, y1;
 		drag_box(src, &x0, &y0, &x1, &y1);
@@ -479,9 +619,46 @@ void roi_unregister_source(struct roi_source *src, struct cm_source *cm)
 	pthread_mutex_unlock(&src->sources_mutex);
 }
 
+/* Reads the color under each pin, averaged over 3x3 pixels. Pins need the whole frame,
+ * so the analysis isn't cropped while any exist (see roi_send_range). */
+static void read_pins(struct roi_source *src, const struct cm_surface_data *sd)
+{
+	if (!sd->rgb_data || !sd->width || !sd->height)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	for (size_t i = 0; i < src->pins.num; i++) {
+		struct roi_pin *pin = src->pins.array + i;
+		const int cx = (int)(pin->x * sd->width);
+		const int cy = (int)(pin->y * sd->height);
+		int sum[3] = {0, 0, 0}, n = 0;
+		for (int dy = -1; dy <= 1; dy++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				const int x = cx + dx, y = cy + dy;
+				if (x < 0 || y < 0 || x >= (int)sd->width || y >= (int)sd->height)
+					continue;
+				const uint8_t *p = sd->rgb_data + (size_t)sd->linesize * y + (size_t)x * 4;
+				sum[0] += p[2];
+				sum[1] += p[1];
+				sum[2] += p[0];
+				n++;
+			}
+		}
+		if (n) {
+			pin->r = (uint8_t)(sum[0] / n);
+			pin->g = (uint8_t)(sum[1] / n);
+			pin->b = (uint8_t)(sum[2] / n);
+			pin->valid = true;
+		}
+	}
+	pthread_mutex_unlock(&src->shapes_mutex);
+}
+
 static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 {
 	struct roi_source *src = data;
+
+	if (src->pins.num)
+		read_pins(src, surface_data);
 
 	pthread_mutex_lock(&src->sources_mutex);
 	for (size_t i = 0; i < src->sources.num; i++) {
@@ -540,6 +717,21 @@ static void finish_drag(struct roi_source *src)
 	shapes_store(src);
 }
 
+static void add_pin(struct roi_source *src, int x, int y)
+{
+	const int w = (int)roi_get_width(src);
+	const int h = (int)roi_get_height(src);
+	if (w <= 0 || h <= 0)
+		return;
+	struct roi_pin pin = {.x = clamp01((float)x / w), .y = clamp01((float)y / h)};
+	pthread_mutex_lock(&src->shapes_mutex);
+	if (src->pins.num >= ROI_MAX_PINS)
+		da_erase(src->pins, 0); // the oldest pin makes room
+	da_push_back(src->pins, &pin);
+	pthread_mutex_unlock(&src->shapes_mutex);
+	shapes_store(src);
+}
+
 static void roi_mouse_click(void *data, const struct obs_mouse_event *event, int32_t type, bool mouse_up,
 			    uint32_t click_count)
 {
@@ -555,6 +747,10 @@ static void roi_mouse_click(void *data, const struct obs_mouse_event *event, int
 	src->y_mouse = event->y;
 
 	if (!mouse_up) {
+		if (src->draw_mode == ROI_DRAW_PIN) {
+			add_pin(src, event->x, event->y);
+			return;
+		}
 		// Only draw while a shape button in the toolbar is active.
 		if (src->draw_mode == ROI_DRAW_NONE)
 			return;
@@ -574,7 +770,7 @@ void roi_set_draw_mode(struct roi_source *src, int mode)
 {
 	if (!src)
 		return;
-	if (mode != ROI_DRAW_RECT && mode != ROI_DRAW_ELLIPSE)
+	if (mode != ROI_DRAW_RECT && mode != ROI_DRAW_ELLIPSE && mode != ROI_DRAW_PIN)
 		mode = ROI_DRAW_NONE;
 	src->draw_mode = mode;
 	if (mode == ROI_DRAW_NONE)
@@ -610,6 +806,27 @@ void roi_clear_shapes(struct roi_source *src)
 	shapes_store(src);
 }
 
+void roi_undo_pin(struct roi_source *src)
+{
+	if (!src)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	if (src->pins.num)
+		da_pop_back(src->pins);
+	pthread_mutex_unlock(&src->shapes_mutex);
+	shapes_store(src);
+}
+
+void roi_clear_pins(struct roi_source *src)
+{
+	if (!src)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	da_resize(src->pins, 0);
+	pthread_mutex_unlock(&src->shapes_mutex);
+	shapes_store(src);
+}
+
 size_t roi_get_shape_count(struct roi_source *src)
 {
 	if (!src)
@@ -631,7 +848,7 @@ static void roi_send_range(struct roi_source *src)
 	int x0 = 0, y0 = 0, x1 = w, y1 = h;
 
 	pthread_mutex_lock(&src->shapes_mutex);
-	if (src->shapes.num && w > 0 && h > 0) {
+	if (src->shapes.num && !src->pins.num && w > 0 && h > 0) {
 		float bx0 = 1.0f, by0 = 1.0f, bx1 = 0.0f, by1 = 0.0f;
 		for (size_t i = 0; i < src->shapes.num; i++) {
 			const struct roi_shape *s = src->shapes.array + i;
@@ -676,6 +893,8 @@ static void roi_tick(void *data, float unused)
 		src->cm.flags |= cm->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV);
 	}
 	pthread_mutex_unlock(&src->sources_mutex);
+	if (src->pins.num)
+		src->cm.flags |= CM_FLAG_CONVERT_RGB;
 
 	roi_send_range(src);
 }

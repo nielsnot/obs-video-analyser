@@ -666,6 +666,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 
 	btnRect = make_tool_button(toolbar, "dock.toolbar.rect", "dock.toolbar.rect.tip", true);
 	btnEllipse = make_tool_button(toolbar, "dock.toolbar.ellipse", "dock.toolbar.ellipse.tip", true);
+	btnPin = make_tool_button(toolbar, "dock.toolbar.pin", "dock.toolbar.pin.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
 
@@ -692,6 +693,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addSpacing(8);
 	layout->addWidget(btnRect);
 	layout->addWidget(btnEllipse);
+	layout->addWidget(btnPin);
 	layout->addWidget(btnUndo);
 	layout->addWidget(btnReset);
 	layout->addStretch(1);
@@ -701,6 +703,8 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_RECT : ROI_DRAW_NONE); });
 	connect(btnEllipse, &QToolButton::clicked, this,
 		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_ELLIPSE : ROI_DRAW_NONE); });
+	connect(btnPin, &QToolButton::clicked, this,
+		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_PIN : ROI_DRAW_NONE); });
 	connect(btnUndo, &QToolButton::clicked, this, &ScopeWidget::undoShape);
 	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
 
@@ -720,6 +724,8 @@ void ScopeWidget::setDrawMode(int mode)
 		btnRect->setChecked(mode == ROI_DRAW_RECT);
 	if (btnEllipse)
 		btnEllipse->setChecked(mode == ROI_DRAW_ELLIPSE);
+	if (btnPin)
+		btnPin->setChecked(mode == ROI_DRAW_PIN);
 	setCursor(mode == ROI_DRAW_NONE ? Qt::ArrowCursor : Qt::CrossCursor);
 
 	roi_set_draw_mode(widget_roi(data), mode);
@@ -732,14 +738,21 @@ void ScopeWidget::setDrawMode(int mode)
 	}
 }
 
+/* Undo and Reset work on the pins while the picker is active, otherwise on the shapes. */
 void ScopeWidget::undoShape()
 {
-	roi_undo_shape(widget_roi(data));
+	if (drawMode == ROI_DRAW_PIN)
+		roi_undo_pin(widget_roi(data));
+	else
+		roi_undo_shape(widget_roi(data));
 }
 
 void ScopeWidget::resetShapes()
 {
-	roi_clear_shapes(widget_roi(data));
+	if (drawMode == ROI_DRAW_PIN)
+		roi_clear_pins(widget_roi(data));
+	else
+		roi_clear_shapes(widget_roi(data));
 }
 
 void ScopeWidget::setToolbarVisible(bool visible)

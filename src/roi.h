@@ -16,6 +16,17 @@ enum roi_draw_mode_e {
 	ROI_DRAW_NONE = 0,
 	ROI_DRAW_RECT = 1,
 	ROI_DRAW_ELLIPSE = 2,
+	ROI_DRAW_PIN = 3, // color picker: a click places a pin that reads the color under it
+};
+
+#define ROI_MAX_PINS 8
+
+/* A color picker pin; position normalized to the captured frame, color read each frame. */
+struct roi_pin
+{
+	float x, y;
+	volatile uint8_t r, g, b;
+	volatile bool valid;
 };
 
 /* One selection shape; coordinates are normalized to the captured frame (0..1),
@@ -42,6 +53,7 @@ struct roi_source
 	// selection shapes; the scopes count pixels inside any of them
 	pthread_mutex_t shapes_mutex;
 	DARRAY(struct roi_shape) shapes;
+	DARRAY(struct roi_pin) pins; // also guarded by shapes_mutex
 	volatile bool shapes_dirty;
 
 	// rasterized shapes, rebuilt in the graphics thread when shapes change
@@ -67,6 +79,8 @@ int roi_get_draw_mode(const struct roi_source *src);
 void roi_undo_shape(struct roi_source *src);
 void roi_clear_shapes(struct roi_source *src);
 size_t roi_get_shape_count(struct roi_source *src);
+void roi_undo_pin(struct roi_source *src);
+void roi_clear_pins(struct roi_source *src);
 
 #ifdef __cplusplus
 }
