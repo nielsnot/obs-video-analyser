@@ -1,0 +1,2015 @@
+#include <obs-module.h>
+#include <obs.h>
+#include <obs-frontend-api.h>
+#include <util/threading.h>
+#include <util/dstr.hpp>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <climits>
+#include <cmath>
+#include <functional>
+#include <QMenu>
+#include <QAction>
+#include <QMouseEvent>
+#include <QToolButton>
+#include <QHBoxLayout>
+#include <QTabBar>
+#include <QInputDialog>
+#include <QComboBox>
+#include <QCheckBox>
+#include <QLineEdit>
+#include <QLabel>
+#include <QPushButton>
+#include <QSlider>
+#include <QGridLayout>
+#include <QVBoxLayout>
+#include <QFrame>
+#include <QTimer>
+#include <QScreen>
+#include <QGuiApplication>
+#include "plugin-macros.generated.h"
+#include "scope-widget.hpp"
+#include "scope-widget-properties.hpp"
+#include "scope-dock.hpp"
+#include "ScopeWidgetInteractiveEventFilter.hpp"
+#include "roi.h"
+#include "text-render.h"
+
+/* ---------- scope types that can be added to a dock ---------- */
+
+enum fit_e {
+	FIT_FILL,         // stretches to the tile; reads best when wide (waveform, histogram)
+	FIT_SQUARE,       // vectorscope
+	FIT_ASPECT,       // keeps the picture's aspect ratio (zebra, false color)
+	FIT_FOCUSPEAKING, // aspect, or actual size when that property is set
+};
+
+struct scope_type_s
+{
+	const char *id;       // source type id
+	const char *key;      // saved in the dock settings
+	const char *name_key; // locale key for menus and titles
+	int fit;
+};
+
+static const scope_type_s scope_types[] = {
+	{ID_PREFIX "waveform_source", "waveform", "Waveform", FIT_FILL},
+	{ID_PREFIX "vectorscope_source", "vectorscope", "Vectorscope", FIT_SQUARE},
+	{ID_PREFIX "histogram_source", "histogram", "Histogram", FIT_FILL},
+	{ID_PREFIX "zebra_source", "zebra", "Zebra", FIT_ASPECT},
+	{ID_PREFIX "falsecolor_source", "falsecolor", "False Color", FIT_ASPECT},
+	{ID_PREFIX "focuspeaking_source", "focuspeaking", "FocusPeaking.Name", FIT_FOCUSPEAKING},
+	{ID_PREFIX "diamond_source", "diamond", "Diamond", FIT_SQUARE},
+};
+#define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
+enum { TYPE_WAVEFORM = 0, TYPE_VECTORSCOPE, TYPE_HISTOGRAM, TYPE_ZEBRA, TYPE_FALSECOLOR, TYPE_FOCUSPEAKING, TYPE_DIAMOND };
+
+static int type_from_key(const char *key)
+{
+	for (int t = 0; key && t < N_TYPES; t++)
+		if (strcmp(scope_types[t].key, key) == 0)
+			return t;
+	return -1;
+}
+
+// waveform settings used for the default dock
+#define WV_COMP_RGB 0x07
+#define WV_COMP_Y 0x20
+#define WV_DISP_PARADE 2
+
+#define ROI_ID ID_PREFIX "roi"
+#define ROI_KEY "roi" // prefix of the ROI entries in the saved dock settings
+
+/* ---------- widget state ---------- */
+
+static void draw(void *param, uint32_t cx, uint32_t cy);
+
+struct src_rect_s
+{
+	int x0 = INT_MIN, y0 = INT_MIN, x1 = INT_MIN, y1 = INT_MIN;
+	int w = 0, h = 0;
+
+	inline bool is_inside(int x, int y) const
+	{
+		return x0 <= x && x <= x1 && x0 < x1 && y0 <= y && y <= y1 && y0 < y1;
+	}
+	inline int x_from_widget(int x) const { return x1 > x0 ? (x - x0) * w / (x1 - x0) : 0; }
+	inline int y_from_widget(int y) const { return y1 > y0 ? (y - y0) * h / (y1 - y0) : 0; }
+	inline void clear() { *this = src_rect_s(); }
+};
+
+struct scope_entry
+{
+	obs_source_t *src = nullptr;
+	int type = 0;
+	volatile bool actual_size = false; // focus peaking only
+	src_rect_s rect;
+
+	// name shown on the scope (guarded by the widget mutex; read while drawing)
+	std::string label;
+	bool show_label = true;
+
+	// what the scope analyzes: the dock's ROI selection, or a source of its own
+	bool use_roi = true;
+	std::string target; // target_name when not using the ROI ("" is the program)
+};
+
+/* Tiles are numbered 0 for the ROI and 1..n for the added scopes. */
+struct scope_widget_s
+{
+	pthread_mutex_t mutex;
+
+	obs_source_t *roi = nullptr;
+	volatile bool roi_shown = true;
+	src_rect_s roi_rect;
+
+	std::vector<scope_entry *> entries;
+
+	int i_mouse_last = -1;
+	int i_menu = -1;
+
+	volatile int layout = 0; // scope_layout_e
+	volatile int solo = -1;  // maximized tile, or -1
+
+	// Views: only the active one has live sources; the others are kept as saved settings.
+	struct view_s
+	{
+		std::string name;
+		OBSData state;
+	};
+	std::vector<view_s> views;
+	int active_view = 0;
+};
+
+static inline int n_tiles(const scope_widget_s *data)
+{
+	return 1 + (int)data->entries.size();
+}
+
+static inline obs_source_t *tile_source(const scope_widget_s *data, int tile)
+{
+	if (tile == 0)
+		return data->roi;
+	if (tile > 0 && tile <= (int)data->entries.size())
+		return data->entries[tile - 1]->src;
+	return nullptr;
+}
+
+static inline src_rect_s *tile_rect(scope_widget_s *data, int tile)
+{
+	if (tile == 0)
+		return &data->roi_rect;
+	if (tile > 0 && tile <= (int)data->entries.size())
+		return &data->entries[tile - 1]->rect;
+	return nullptr;
+}
+
+static inline int tile_fit(const scope_widget_s *data, int tile, bool *actual_size)
+{
+	*actual_size = false;
+	if (tile == 0)
+		return FIT_ASPECT;
+	const scope_entry *e = data->entries[tile - 1];
+	*actual_size = e->actual_size;
+	return scope_types[e->type].fit;
+}
+
+static void generate_source_name(std::string &result, const char *id)
+{
+	DStr name;
+	dstr_init_copy(name, "dock-");
+	dstr_cat(name, id);
+	for (int inc = 0;;) {
+		OBSSourceAutoRelease source = obs_get_source_by_name(name->array);
+		if (!source) {
+			result = name->array;
+			return;
+		}
+
+		dstr_printf(name, "dock-%s-%d", id, inc++);
+	}
+}
+
+static obs_source_t *create_source(const char *id, obs_data_t *settings, const char *name)
+{
+	const char *v_id = obs_get_latest_input_type_id(id);
+	if (!v_id) {
+		blog(LOG_ERROR, "create_source(id=%s): obs_get_latest_input_type_id failed", id);
+		return NULL;
+	}
+	return obs_source_create(v_id, name, settings, NULL);
+}
+
+static void focuspeaking_update_cb(void *param, calldata_t *cd)
+{
+	auto *e = static_cast<scope_entry *>(param);
+	auto *src = static_cast<obs_source_t *>(calldata_ptr(cd, "source"));
+	OBSDataAutoRelease settings = obs_source_get_settings(src);
+	e->actual_size = obs_data_get_bool(settings, "actual_size");
+}
+
+static void release_entry(scope_entry *e)
+{
+	if (e->src) {
+		if (e->type == TYPE_FOCUSPEAKING)
+			signal_handler_disconnect(obs_source_get_signal_handler(e->src), "update",
+						  focuspeaking_update_cb, e);
+		obs_source_release(e->src);
+	}
+	delete e;
+}
+
+/* ---------- layout ---------- */
+
+enum scope_layout_e {
+	SCOPE_LAYOUT_AUTO = 0,
+	SCOPE_LAYOUT_VERTICAL = 1,
+	SCOPE_LAYOUT_HORIZONTAL = 2,
+};
+
+#define SCOPE_GAP 2
+
+static void fit_source(int fit, bool actual_size, obs_source_t *s, int cell_w, int cell_h, int *w_out, int *h_out)
+{
+	int w_src = (int)obs_source_get_width(s);
+	int h_src = (int)obs_source_get_height(s);
+	int w = cell_w;
+	int h = cell_h;
+	if (fit == FIT_FOCUSPEAKING)
+		fit = actual_size ? FIT_FILL : FIT_ASPECT;
+	switch (fit) {
+	case FIT_ASPECT:
+		if (w_src > 0 && h_src > 0) {
+			if (w * h_src > h * w_src)
+				w = h * w_src / h_src;
+			else if (h * w_src > w * h_src)
+				h = w * h_src / w_src;
+		}
+		break;
+	case FIT_SQUARE:
+		w = h = std::min(w, h);
+		break;
+	default:
+		break;
+	}
+	*w_out = std::max(w, 0);
+	*h_out = std::max(h, 0);
+}
+
+/* How useful a tile of this size is for the scope; used to pick the best grid. */
+static double layout_score(int fit, bool actual_size, obs_source_t *s, int cell_w, int cell_h)
+{
+	int w, h;
+	fit_source(fit, actual_size, s, cell_w, cell_h, &w, &h);
+	if (w <= 0 || h <= 0)
+		return 0.0;
+	double area = (double)w * h;
+	if (fit == FIT_FILL) {
+		const double preferred_aspect = 1.5;
+		double aspect = (double)w / h;
+		if (aspect < preferred_aspect)
+			area *= aspect / preferred_aspect;
+	}
+	return area;
+}
+
+static void choose_grid(const scope_widget_s *data, const std::vector<int> &tiles, int cx, int cy, int layout,
+			int *cols_out, int *rows_out)
+{
+	const int n = (int)tiles.size();
+	if (layout == SCOPE_LAYOUT_VERTICAL || n <= 1) {
+		*cols_out = 1;
+		*rows_out = std::max(n, 1);
+		return;
+	}
+	if (layout == SCOPE_LAYOUT_HORIZONTAL) {
+		*cols_out = n;
+		*rows_out = 1;
+		return;
+	}
+
+	double best = -1.0;
+	int best_cols = 1;
+	for (int cols = 1; cols <= n; cols++) {
+		int rows = (n + cols - 1) / cols;
+		if (cols > 1 && (rows - 1) * cols >= n)
+			continue; // an entire empty row; a smaller grid covers it
+		int cell_w = (cx - SCOPE_GAP * (cols - 1)) / cols;
+		int cell_h = (cy - SCOPE_GAP * (rows - 1)) / rows;
+		if (cell_w <= 0 || cell_h <= 0)
+			continue;
+		double score = 0.0;
+		for (int t : tiles) {
+			bool actual_size;
+			int fit = tile_fit(data, t, &actual_size);
+			score += layout_score(fit, actual_size, tile_source(data, t), cell_w, cell_h);
+		}
+		if (score > best * 1.0001) {
+			best = score;
+			best_cols = cols;
+		}
+	}
+	*cols_out = best_cols;
+	*rows_out = (n + best_cols - 1) / best_cols;
+}
+
+static void draw(void *param, uint32_t cx_, uint32_t cy_)
+{
+	auto *data = (struct scope_widget_s *)param;
+	const int cx = (int)cx_;
+	const int cy = (int)cy_;
+
+	if (pthread_mutex_trylock(&data->mutex))
+		return;
+
+	const int total = n_tiles(data);
+	for (int t = 0; t < total; t++)
+		tile_rect(data, t)->clear();
+
+	std::vector<int> tiles;
+	const int solo = data->solo;
+	if (solo >= 0 && solo < total && tile_source(data, solo)) {
+		tiles.push_back(solo);
+	} else {
+		if (data->roi && data->roi_shown)
+			tiles.push_back(0);
+		for (int t = 1; t < total; t++)
+			if (tile_source(data, t))
+				tiles.push_back(t);
+	}
+
+	const int n = (int)tiles.size();
+	int cols = 1, rows = 1;
+	choose_grid(data, tiles, cx, cy, data->layout, &cols, &rows);
+	const int cell_w = n ? (cx - SCOPE_GAP * (cols - 1)) / cols : 0;
+	const int cell_h = n ? (cy - SCOPE_GAP * (rows - 1)) / rows : 0;
+
+	gs_blend_state_push();
+	gs_reset_blend_state();
+
+	for (int k = 0; k < n && cell_w > 0 && cell_h > 0; k++) {
+		const int t = tiles[k];
+		obs_source_t *s = tile_source(data, t);
+		int w_src = obs_source_get_width(s);
+		int h_src = obs_source_get_height(s);
+		if (w_src <= 0 || h_src <= 0)
+			continue;
+
+		const int row = k / cols;
+		const int col = k % cols;
+		const int cols_in_row = std::min(cols, n - row * cols);
+		// Center a partly filled last row.
+		int x_cell = col * (cell_w + SCOPE_GAP) + (cols - cols_in_row) * (cell_w + SCOPE_GAP) / 2;
+		int y_cell = row * (cell_h + SCOPE_GAP);
+
+		bool actual_size;
+		int fit = tile_fit(data, t, &actual_size);
+		int w, h;
+		fit_source(fit, actual_size, s, cell_w, cell_h, &w, &h);
+		if (w <= 0 || h <= 0)
+			continue;
+		int x = x_cell + (cell_w - w) / 2;
+		int y = y_cell + (cell_h - h) / 2;
+
+		gs_projection_push();
+		gs_viewport_push();
+		gs_set_viewport(x, y, w, h);
+		gs_ortho(0.0f, (float)w_src, -1.0f, (float)h_src, -100.0f, 100.0f);
+
+		src_rect_s *r = tile_rect(data, t);
+		r->x0 = x;
+		r->y0 = y;
+		r->x1 = x + w;
+		r->y1 = y + h;
+		r->w = w_src;
+		r->h = h_src;
+
+		obs_source_video_render(s);
+
+		if (t > 0) {
+			const scope_entry *e = data->entries[t - 1];
+			if (e->show_label && !e->label.empty()) {
+				// Draw in tile pixels so the label keeps its size whatever the scope's scale.
+				gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+				const struct text_scale ts = text_scale_from_viewport((float)w, (float)h);
+				const float px = std::min(16.0f, std::max(11.0f, h / 14.0f));
+				const float tw = text_width(&ts, e->label.c_str(), px);
+				gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+				gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x99000000);
+				while (gs_effect_loop(solid, "Solid")) {
+					gs_render_start(false);
+					gs_vertex2f(4.0f, 4.0f);
+					gs_vertex2f(tw + 14.0f, 4.0f);
+					gs_vertex2f(4.0f, px + 8.0f);
+					gs_vertex2f(tw + 14.0f, px + 8.0f);
+					gs_render_stop(GS_TRISTRIP);
+				}
+				text_draw(&ts, e->label.c_str(), 9.0f, 6.0f, px, 0xE6FFFFFF, TEXT_ALIGN_LEFT,
+					  TEXT_VALIGN_TOP);
+			}
+		}
+
+		gs_viewport_pop();
+		gs_projection_pop();
+	}
+
+	gs_blend_state_pop();
+
+	pthread_mutex_unlock(&data->mutex);
+}
+
+/* ---------- widget ---------- */
+
+ScopeWidget::ScopeWidget(QWidget *parent) : NorisQTDisplay(parent)
+{
+	properties = NULL;
+	setAttribute(Qt::WA_PaintOnScreen);
+	setAttribute(Qt::WA_StaticContents);
+	setAttribute(Qt::WA_NoSystemBackground);
+	setAttribute(Qt::WA_OpaquePaintEvent);
+	setAttribute(Qt::WA_DontCreateNativeAncestors);
+	setAttribute(Qt::WA_NativeWindow);
+
+	setMouseTracking(true);
+	QObject::installEventFilter(new ScopeWidgetInteractiveEventFilter(this));
+
+	data = new scope_widget_s;
+	pthread_mutex_init(&data->mutex, NULL);
+
+	connect(this, &NorisQTDisplay::DisplayCreated, this, &ScopeWidget::RegisterCallbackToDisplay);
+}
+
+ScopeWidget::~ScopeWidget()
+{
+	disconnect(this, &NorisQTDisplay::DisplayCreated, this, &ScopeWidget::RegisterCallbackToDisplay);
+
+	scope_dock_deleted(this);
+
+	if (data) {
+		if (obs_display_t *display = GetDisplay())
+			obs_display_remove_draw_callback(display, draw, data);
+
+		pthread_mutex_lock(&data->mutex);
+		std::vector<scope_entry *> entries;
+		entries.swap(data->entries);
+		obs_source_t *roi = data->roi;
+		data->roi = nullptr;
+		pthread_mutex_unlock(&data->mutex);
+
+		for (scope_entry *e : entries)
+			release_entry(e);
+		obs_source_release(roi);
+
+		pthread_mutex_destroy(&data->mutex);
+		delete data;
+	}
+	data = NULL;
+}
+
+void ScopeWidget::RegisterCallbackToDisplay()
+{
+	obs_display_t *display = GetDisplay();
+	obs_display_add_draw_callback(display, draw, data);
+}
+
+void ScopeWidget::closeEvent(QCloseEvent *)
+{
+	DestroyDisplay();
+}
+
+void ScopeWidget::RemoveDock()
+{
+	obs_frontend_remove_dock(name.c_str());
+}
+
+/* ---------- adding and removing scopes ---------- */
+
+static std::string roi_name_of(const ScopeWidget *w)
+{
+	char roi_name[64];
+	snprintf(roi_name, sizeof(roi_name), "dock-roi-%p", (const void *)w);
+	return roi_name;
+}
+
+void ScopeWidget::addScope(int type, obs_data_t *settings)
+{
+	insertScope(type, settings, nullptr, -1);
+}
+
+/* meta (may be NULL) holds the dock-side settings of the scope: label, show_label, use_roi, target. */
+void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, int index)
+{
+	if (type < 0 || type >= N_TYPES)
+		return;
+
+	const scope_type_s &st = scope_types[type];
+
+	auto *e = new scope_entry;
+	e->type = type;
+	e->label = obs_module_text(st.name_key);
+	if (meta) {
+		if (obs_data_has_user_value(meta, "label"))
+			e->label = obs_data_get_string(meta, "label");
+		if (obs_data_has_user_value(meta, "show_label"))
+			e->show_label = obs_data_get_bool(meta, "show_label");
+		if (obs_data_has_user_value(meta, "use_roi"))
+			e->use_roi = obs_data_get_bool(meta, "use_roi");
+		e->target = obs_data_get_string(meta, "target");
+	}
+
+	OBSDataAutoRelease prop = settings ? obs_data_create_from_json(obs_data_get_json(settings)) : obs_data_create();
+	obs_data_set_string(prop, "target_name", e->use_roi ? roi_name_of(this).c_str() : e->target.c_str());
+
+	std::string name;
+	generate_source_name(name, st.id);
+	obs_source_t *src = create_source(st.id, prop, name.c_str());
+	if (!src) {
+		delete e;
+		return;
+	}
+
+	e->src = src;
+	if (type == TYPE_FOCUSPEAKING) {
+		OBSDataAutoRelease s = obs_source_get_settings(src);
+		e->actual_size = obs_data_get_bool(s, "actual_size");
+		signal_handler_connect(obs_source_get_signal_handler(src), "update", focuspeaking_update_cb, e);
+	}
+
+	pthread_mutex_lock(&data->mutex);
+	if (index < 0 || index > (int)data->entries.size())
+		data->entries.push_back(e);
+	else
+		data->entries.insert(data->entries.begin() + index, e);
+	data->solo = -1;
+	pthread_mutex_unlock(&data->mutex);
+}
+
+static void entry_meta(const scope_entry *e, obs_data_t *meta)
+{
+	obs_data_set_string(meta, "label", e->label.c_str());
+	obs_data_set_bool(meta, "show_label", e->show_label);
+	obs_data_set_bool(meta, "use_roi", e->use_roi);
+	obs_data_set_string(meta, "target", e->target.c_str());
+}
+
+void ScopeWidget::duplicateScope(int tile)
+{
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return;
+	const scope_entry *e = data->entries[tile - 1];
+	OBSDataAutoRelease prop = obs_source_get_settings(e->src);
+	OBSDataAutoRelease meta = obs_data_create();
+	entry_meta(e, meta);
+	insertScope(e->type, prop, meta, tile);
+}
+
+void ScopeWidget::changeScopeType(int tile, int type)
+{
+	if (tile <= 0 || tile > (int)data->entries.size() || type < 0 || type >= N_TYPES)
+		return;
+	const scope_entry *e = data->entries[tile - 1];
+	if (e->type == type)
+		return;
+	OBSDataAutoRelease meta = obs_data_create();
+	entry_meta(e, meta);
+	// A name that was just the old type's name follows the new type.
+	if (e->label == obs_module_text(scope_types[e->type].name_key))
+		obs_data_set_string(meta, "label", obs_module_text(scope_types[type].name_key));
+	insertScope(type, nullptr, meta, tile); // lands right after the old one
+	removeScope(tile);
+}
+
+void ScopeWidget::removeScope(int tile)
+{
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return;
+
+	pthread_mutex_lock(&data->mutex);
+	scope_entry *e = data->entries[tile - 1];
+	data->entries.erase(data->entries.begin() + (tile - 1));
+	data->solo = -1;
+	data->i_mouse_last = -1;
+	pthread_mutex_unlock(&data->mutex);
+
+	if (properties && properties->getSource() == e->src)
+		closeProperties();
+
+	release_entry(e);
+}
+
+void ScopeWidget::fillAddScopeMenu(QMenu *menu)
+{
+	for (int t = 0; t < N_TYPES; t++) {
+		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+		connect(act, &QAction::triggered, this, [this, t]() { addScope(t); });
+	}
+}
+
+/* ---------- toolbar ---------- */
+
+static QToolButton *make_tool_button(QWidget *parent, const char *text_key, const char *tip_key, bool checkable)
+{
+	auto *b = new QToolButton(parent);
+	b->setText(QString::fromUtf8(obs_module_text(text_key)));
+	b->setToolTip(QString::fromUtf8(obs_module_text(tip_key)));
+	b->setCheckable(checkable);
+	b->setAutoRaise(true);
+	b->setToolButtonStyle(Qt::ToolButtonTextOnly);
+	b->setFocusPolicy(Qt::NoFocus);
+	return b;
+}
+
+QWidget *ScopeWidget::createToolbar(QWidget *parent)
+{
+	toolbar = new QWidget(parent);
+	auto *layout = new QHBoxLayout(toolbar);
+	layout->setContentsMargins(2, 1, 2, 1);
+	layout->setSpacing(2);
+
+	auto *btnAdd = make_tool_button(toolbar, "dock.toolbar.add", "dock.toolbar.add.tip", false);
+	auto *addMenu = new QMenu(btnAdd);
+	fillAddScopeMenu(addMenu);
+	btnAdd->setMenu(addMenu);
+	btnAdd->setPopupMode(QToolButton::InstantPopup);
+
+	btnRect = make_tool_button(toolbar, "dock.toolbar.rect", "dock.toolbar.rect.tip", true);
+	btnEllipse = make_tool_button(toolbar, "dock.toolbar.ellipse", "dock.toolbar.ellipse.tip", true);
+	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
+	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
+
+	tabs = new QTabBar(toolbar);
+	tabs->setDocumentMode(true);
+	tabs->setDrawBase(false);
+	tabs->setExpanding(false);
+	tabs->setMovable(false);
+	tabs->setFocusPolicy(Qt::NoFocus);
+	tabs->setContextMenuPolicy(Qt::CustomContextMenu);
+	connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
+		if (!rebuildingTabs)
+			switchView(index);
+	});
+	connect(tabs, &QTabBar::tabBarDoubleClicked, this, &ScopeWidget::renameView);
+	connect(tabs, &QWidget::customContextMenuRequested, this, &ScopeWidget::openTabMenu);
+	auto *btnView = make_tool_button(toolbar, "dock.toolbar.addview", "dock.toolbar.addview.tip", false);
+	connect(btnView, &QToolButton::clicked, this, &ScopeWidget::addView);
+
+	layout->addWidget(tabs);
+	layout->addWidget(btnView);
+	layout->addSpacing(8);
+	layout->addWidget(btnAdd);
+	layout->addSpacing(8);
+	layout->addWidget(btnRect);
+	layout->addWidget(btnEllipse);
+	layout->addWidget(btnUndo);
+	layout->addWidget(btnReset);
+	layout->addStretch(1);
+
+	// The shape buttons behave like radio buttons that can also be switched off.
+	connect(btnRect, &QToolButton::clicked, this,
+		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_RECT : ROI_DRAW_NONE); });
+	connect(btnEllipse, &QToolButton::clicked, this,
+		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_ELLIPSE : ROI_DRAW_NONE); });
+	connect(btnUndo, &QToolButton::clicked, this, &ScopeWidget::undoShape);
+	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
+
+	toolbar->setVisible(toolbarVisible);
+	return toolbar;
+}
+
+static struct roi_source *widget_roi(struct scope_widget_s *data)
+{
+	return data->roi ? roi_from_source(data->roi) : NULL;
+}
+
+void ScopeWidget::setDrawMode(int mode)
+{
+	drawMode = mode;
+	if (btnRect)
+		btnRect->setChecked(mode == ROI_DRAW_RECT);
+	if (btnEllipse)
+		btnEllipse->setChecked(mode == ROI_DRAW_ELLIPSE);
+	setCursor(mode == ROI_DRAW_NONE ? Qt::ArrowCursor : Qt::CrossCursor);
+
+	roi_set_draw_mode(widget_roi(data), mode);
+
+	// Drawing needs the ROI view, so bring it back if it was hidden.
+	if (mode != ROI_DRAW_NONE) {
+		data->roi_shown = true;
+		if (data->solo > 0)
+			data->solo = -1;
+	}
+}
+
+void ScopeWidget::undoShape()
+{
+	roi_undo_shape(widget_roi(data));
+}
+
+void ScopeWidget::resetShapes()
+{
+	roi_clear_shapes(widget_roi(data));
+}
+
+void ScopeWidget::setToolbarVisible(bool visible)
+{
+	toolbarVisible = visible;
+	if (toolbar)
+		toolbar->setVisible(visible);
+}
+
+void ScopeWidget::toggleSolo(int tile)
+{
+	if (tile < 0 || data->solo == tile)
+		data->solo = -1;
+	else
+		data->solo = tile;
+}
+
+/* ---------- mouse ---------- */
+
+#define INTERACT_KEEP_SOURCE (1 << 30)
+
+static obs_source_t *get_source_from_mouse(struct scope_widget_s *data, int x, int y, struct obs_mouse_event *event)
+{
+	const int total = n_tiles(data);
+	int i_mouse = -1;
+	if (event->modifiers &
+	    (INTERACT_MOUSE_LEFT | INTERACT_MOUSE_MIDDLE | INTERACT_MOUSE_RIGHT | INTERACT_KEEP_SOURCE)) {
+		i_mouse = data->i_mouse_last;
+	} else {
+		for (int t = 0; t < total; t++) {
+			if (tile_rect(data, t)->is_inside(x, y)) {
+				i_mouse = t;
+				break;
+			}
+		}
+	}
+
+	if (i_mouse < 0 || total <= i_mouse) {
+		data->i_mouse_last = -1;
+		return NULL;
+	}
+	const src_rect_s *r = tile_rect(data, i_mouse);
+	event->x = r->x_from_widget(x);
+	event->y = r->y_from_widget(y);
+	data->i_mouse_last = i_mouse;
+	return tile_source(data, i_mouse);
+}
+
+static int tile_at(scope_widget_s *data, int x, int y)
+{
+	const int total = n_tiles(data);
+	for (int t = 0; t < total; t++)
+		if (tile_rect(data, t)->is_inside(x, y))
+			return t;
+	return -1;
+}
+
+static int TranslateQtKeyboardEventModifiers(QInputEvent *event, bool mouseEvent)
+{
+	int obsModifiers = INTERACT_NONE;
+
+	if (event->modifiers().testFlag(Qt::ShiftModifier))
+		obsModifiers |= INTERACT_SHIFT_KEY;
+	if (event->modifiers().testFlag(Qt::AltModifier))
+		obsModifiers |= INTERACT_ALT_KEY;
+#ifdef __APPLE__
+	// Mac: Meta = Control, Control = Command
+	if (event->modifiers().testFlag(Qt::ControlModifier))
+		obsModifiers |= INTERACT_COMMAND_KEY;
+	if (event->modifiers().testFlag(Qt::MetaModifier))
+		obsModifiers |= INTERACT_CONTROL_KEY;
+#else
+	// Handle windows key? Can a browser even trap that key?
+	if (event->modifiers().testFlag(Qt::ControlModifier))
+		obsModifiers |= INTERACT_CONTROL_KEY;
+#endif
+
+	if (!mouseEvent) {
+		if (event->modifiers().testFlag(Qt::KeypadModifier))
+			obsModifiers |= INTERACT_IS_KEY_PAD;
+	}
+
+	return obsModifiers;
+}
+
+static int TranslateQtMouseEventModifiers(QMouseEvent *event)
+{
+	int modifiers = TranslateQtKeyboardEventModifiers(event, true);
+
+	if (event->buttons().testFlag(Qt::LeftButton))
+		modifiers |= INTERACT_MOUSE_LEFT;
+	if (event->buttons().testFlag(Qt::MiddleButton))
+		modifiers |= INTERACT_MOUSE_MIDDLE;
+	if (event->buttons().testFlag(Qt::RightButton))
+		modifiers |= INTERACT_MOUSE_RIGHT;
+
+	return modifiers;
+}
+
+static inline QPointF event_pos(QWidget *w, QMouseEvent *event)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	return event->position() * w->devicePixelRatio();
+#else
+	UNUSED_PARAMETER(w);
+	return event->localPos();
+#endif
+}
+
+bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
+{
+	bool mouseUp = event->type() == QEvent::MouseButtonRelease;
+	int clickCount = 1;
+	if (event->type() == QEvent::MouseButtonDblClick)
+		clickCount = 2;
+
+	const QPointF qtPos = event_pos(this, event);
+
+	if (event->button() == Qt::RightButton) {
+		if (!mouseUp)
+			return true;
+		data->i_menu = tile_at(data, (int)qtPos.x(), (int)qtPos.y());
+		if (data->i_menu >= 0 && tile_source(data, data->i_menu)) {
+			openOptions(data->i_menu, QCursor::pos());
+			return true;
+		}
+		return openMenu(event);
+	}
+
+	if (clickCount == 2 && event->button() == Qt::LeftButton) {
+		int hit = tile_at(data, (int)qtPos.x(), (int)qtPos.y());
+		// The ROI uses clicks to draw shapes, so it is maximized from the menu instead.
+		if (hit > 0) {
+			toggleSolo(hit);
+			return true;
+		}
+	}
+
+	struct obs_mouse_event mouseEvent = {};
+
+	mouseEvent.modifiers = TranslateQtMouseEventModifiers(event);
+
+	int32_t button = 0;
+
+	switch (event->button()) {
+	case Qt::LeftButton:
+		button = MOUSE_LEFT;
+		if (mouseUp)
+			mouseEvent.modifiers |= INTERACT_KEEP_SOURCE; // Not to change i_mouse if released outside
+		break;
+	case Qt::MiddleButton:
+		button = MOUSE_MIDDLE;
+		break;
+	default:
+		return false;
+	}
+
+	obs_source_t *src = get_source_from_mouse(data, qtPos.x(), qtPos.y(), &mouseEvent);
+	mouseEvent.modifiers &= ~INTERACT_KEEP_SOURCE;
+
+	if (src)
+		obs_source_send_mouse_click(src, &mouseEvent, button, mouseUp, clickCount);
+
+	return true;
+}
+
+bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
+{
+	struct obs_mouse_event mouseEvent = {};
+
+	bool mouseLeave = event->type() == QEvent::Leave;
+
+	if (!mouseLeave)
+		mouseEvent.modifiers = TranslateQtMouseEventModifiers(event);
+
+	const QPointF qtPos = event_pos(this, event);
+
+	mouseEvent.modifiers |= INTERACT_KEEP_SOURCE;
+	obs_source_t *src0 = get_source_from_mouse(data, qtPos.x(), qtPos.y(), &mouseEvent);
+	mouseEvent.modifiers &= ~INTERACT_KEEP_SOURCE;
+
+	struct obs_mouse_event mouseEvent1 = mouseEvent;
+	obs_source_t *src1 = get_source_from_mouse(data, qtPos.x(), qtPos.y(), &mouseEvent1);
+
+	if (src0 && src0 != src1)
+		obs_source_send_mouse_move(src0, &mouseEvent, true);
+
+	if (src1)
+		obs_source_send_mouse_move(src1, &mouseEvent1, mouseLeave);
+
+	return true;
+}
+
+bool ScopeWidget::HandleMouseWheelEvent(QWheelEvent *event)
+{
+	struct obs_mouse_event mouseEvent = {};
+
+	mouseEvent.modifiers = TranslateQtKeyboardEventModifiers(event, true);
+
+	int xDelta = 0;
+	int yDelta = 0;
+
+	const QPoint angleDelta = event->angleDelta();
+	if (!event->pixelDelta().isNull()) {
+		if (angleDelta.x())
+			xDelta = event->pixelDelta().x();
+		else
+			yDelta = event->pixelDelta().y();
+	} else {
+		if (angleDelta.x())
+			xDelta = angleDelta.x();
+		else
+			yDelta = angleDelta.y();
+	}
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	QPointF qtPos = event->position() * devicePixelRatio();
+	const int x = qtPos.x();
+	const int y = qtPos.y();
+#elif QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+	const QPointF position = event->position();
+	const int x = position.x();
+	const int y = position.y();
+#else
+	const int x = event->x();
+	const int y = event->y();
+#endif
+
+	obs_source_t *src = get_source_from_mouse(data, x, y, &mouseEvent);
+	if (src)
+		obs_source_send_mouse_wheel(src, &mouseEvent, xDelta, yDelta);
+
+	return true;
+}
+
+bool ScopeWidget::HandleKeyEvent(QKeyEvent *)
+{
+	// Implement if necessary
+	return true;
+}
+
+/* ---------- quick settings in the context menu ---------- */
+
+struct grid_key_s
+{
+	const char *key;
+	bool is_double;
+};
+
+/* Settings that draw a scope's graticule; 0 means no graticule. */
+static const grid_key_s grid_keys_waveform[] = {{"graticule_lines", false}, {NULL, false}};
+static const grid_key_s grid_keys_vectorscope[] = {{"graticule", false}, {NULL, false}};
+static const grid_key_s grid_keys_histogram[] = {{"graticule_vertical_lines", false},
+						 {"graticule_horizontal_step_fixed", true},
+						 {"graticule_horizontal_step_ratio", true},
+						 {NULL, false}};
+
+static const grid_key_s *grid_keys_for(int type)
+{
+	switch (type) {
+	case TYPE_WAVEFORM:
+		return grid_keys_waveform;
+	case TYPE_VECTORSCOPE:
+		return grid_keys_vectorscope;
+	case TYPE_HISTOGRAM:
+		return grid_keys_histogram;
+	default:
+		return NULL;
+	}
+}
+
+static bool grid_visible(obs_source_t *src, const grid_key_s *keys)
+{
+	OBSDataAutoRelease settings = obs_source_get_settings(src);
+	for (const grid_key_s *k = keys; k->key; k++) {
+		if (k->is_double ? obs_data_get_double(settings, k->key) != 0.0
+				 : obs_data_get_int(settings, k->key) != 0)
+			return true;
+	}
+	return false;
+}
+
+/* Hiding remembers the current values so showing brings back the same graticule. */
+static void set_grid_visible(obs_source_t *src, const grid_key_s *keys, bool visible)
+{
+	OBSDataAutoRelease settings = obs_source_get_settings(src);
+	OBSDataAutoRelease changes = obs_data_create();
+	for (const grid_key_s *k = keys; k->key; k++) {
+		std::string prev = std::string("grid_prev_") + k->key;
+		if (k->is_double) {
+			double cur = obs_data_get_double(settings, k->key);
+			if (visible) {
+				double v = obs_data_has_user_value(settings, prev.c_str())
+						   ? obs_data_get_double(settings, prev.c_str())
+						   : obs_data_get_default_double(settings, k->key);
+				obs_data_set_double(changes, k->key, v);
+			} else {
+				if (cur != 0.0)
+					obs_data_set_double(changes, prev.c_str(), cur);
+				obs_data_set_double(changes, k->key, 0.0);
+			}
+		} else {
+			long long cur = obs_data_get_int(settings, k->key);
+			if (visible) {
+				long long v = obs_data_has_user_value(settings, prev.c_str())
+						      ? obs_data_get_int(settings, prev.c_str())
+						      : obs_data_get_default_int(settings, k->key);
+				obs_data_set_int(changes, k->key, v);
+			} else {
+				if (cur != 0)
+					obs_data_set_int(changes, prev.c_str(), cur);
+				obs_data_set_int(changes, k->key, 0);
+			}
+		}
+	}
+	obs_source_update(src, changes);
+}
+
+/* The dock always feeds its scopes from the ROI; these are handled elsewhere. */
+static bool skip_quick_property(const char *name)
+{
+	return !strcmp(name, "target_name") || !strcmp(name, "target_scale") || !strcmp(name, "bypass") ||
+	       !strncmp(name, "graticule", 9);
+}
+
+/* Adds a submenu per list setting and a check item per on/off setting, read from the scope itself. */
+static void add_quick_properties(QWidget *owner, QMenu *menu, obs_source_t *src, obs_properties_t *props,
+				 obs_data_t *settings)
+{
+	for (obs_property_t *p = obs_properties_first(props); p; obs_property_next(&p)) {
+		if (!obs_property_visible(p) || !obs_property_enabled(p))
+			continue;
+		const char *name = obs_property_name(p);
+		const QString label = QString::fromUtf8(obs_property_description(p));
+		if (!name || skip_quick_property(name))
+			continue;
+
+		switch (obs_property_get_type(p)) {
+		case OBS_PROPERTY_BOOL: {
+			QAction *act = menu->addAction(label);
+			act->setCheckable(true);
+			act->setChecked(obs_data_get_bool(settings, name));
+			std::string key = name;
+			QObject::connect(act, &QAction::toggled, owner, [src, key](bool checked) {
+				OBSDataAutoRelease d = obs_data_create();
+				obs_data_set_bool(d, key.c_str(), checked);
+				obs_source_update(src, d);
+			});
+			break;
+		}
+		case OBS_PROPERTY_LIST: {
+			const obs_combo_format fmt = obs_property_list_format(p);
+			if (fmt != OBS_COMBO_FORMAT_INT && fmt != OBS_COMBO_FORMAT_FLOAT)
+				break;
+			const size_t n = obs_property_list_item_count(p);
+			if (n < 2)
+				break;
+			QMenu *sub = menu->addMenu(label);
+			std::string key = name;
+			for (size_t i = 0; i < n; i++) {
+				if (obs_property_list_item_disabled(p, i))
+					continue;
+				QAction *act = sub->addAction(QString::fromUtf8(obs_property_list_item_name(p, i)));
+				act->setCheckable(true);
+				if (fmt == OBS_COMBO_FORMAT_INT) {
+					long long v = obs_property_list_item_int(p, i);
+					act->setChecked(obs_data_get_int(settings, name) == v);
+					QObject::connect(act, &QAction::triggered, owner, [src, key, v]() {
+						OBSDataAutoRelease d = obs_data_create();
+						obs_data_set_int(d, key.c_str(), v);
+						obs_source_update(src, d);
+					});
+				} else {
+					double v = obs_property_list_item_float(p, i);
+					act->setChecked(obs_data_get_double(settings, name) == v);
+					QObject::connect(act, &QAction::triggered, owner, [src, key, v]() {
+						OBSDataAutoRelease d = obs_data_create();
+						obs_data_set_double(d, key.c_str(), v);
+						obs_source_update(src, d);
+					});
+				}
+			}
+			break;
+		}
+		case OBS_PROPERTY_GROUP: {
+			obs_properties_t *content = obs_property_group_content(p);
+			if (obs_property_group_type(p) == OBS_GROUP_CHECKABLE) {
+				QAction *act = menu->addAction(label);
+				act->setCheckable(true);
+				act->setChecked(obs_data_get_bool(settings, name));
+				std::string key = name;
+				QObject::connect(act, &QAction::toggled, owner, [src, key](bool checked) {
+					OBSDataAutoRelease d = obs_data_create();
+					obs_data_set_bool(d, key.c_str(), checked);
+					obs_source_update(src, d);
+				});
+			}
+			if (content)
+				add_quick_properties(owner, menu, src, content, settings);
+			break;
+		}
+		default:
+			break;
+		}
+	}
+}
+
+/* ---------- context menu ---------- */
+
+bool ScopeWidget::openMenu(QMouseEvent *)
+{
+	QMenu popup(this);
+	QAction *act;
+	const int tile = data->i_menu;
+	const bool on_tile = tile >= 0 && tile_source(data, tile);
+
+	if (on_tile) {
+		obs_source_t *src = tile_source(data, tile);
+
+		// Quick settings of this scope, straight from its own properties.
+		const int type = tile > 0 ? data->entries[tile - 1]->type : -1;
+		if (const grid_key_s *keys = grid_keys_for(type)) {
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.grid")));
+			act->setCheckable(true);
+			act->setChecked(grid_visible(src, keys));
+			connect(act, &QAction::toggled, this, [src, keys](bool checked) { set_grid_visible(src, keys, checked); });
+		}
+		{
+			obs_properties_t *props = obs_source_properties(src);
+			OBSDataAutoRelease settings = obs_source_get_settings(src);
+			if (props) {
+				add_quick_properties(this, &popup, src, props, settings);
+				obs_properties_destroy(props);
+			}
+		}
+		popup.addSeparator();
+
+		act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.settings")));
+		connect(act, &QAction::triggered, this, [this, tile]() { openProperties(tile); });
+
+		if (data->solo >= 0) {
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.solo.exit")));
+			connect(act, &QAction::triggered, this, [this]() { toggleSolo(-1); });
+		} else {
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.solo")));
+			connect(act, &QAction::triggered, this, [this, tile]() { toggleSolo(tile); });
+		}
+
+		act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.projector")));
+		connect(act, &QAction::triggered, this, [this, tile]() {
+			if (obs_source_t *s = tile_source(data, tile))
+				obs_frontend_open_projector("Source", -1, "", obs_source_get_name(s));
+		});
+
+		if (tile > 0) {
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.move.earlier")));
+			act->setEnabled(tile > 1);
+			connect(act, &QAction::triggered, this, [this, tile]() { moveScope(tile, -1); });
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.move.later")));
+			act->setEnabled(tile < (int)data->entries.size());
+			connect(act, &QAction::triggered, this, [this, tile]() { moveScope(tile, +1); });
+
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.remove")));
+			connect(act, &QAction::triggered, this, [this, tile]() { removeScope(tile); },
+				Qt::QueuedConnection);
+		}
+
+		popup.addSeparator();
+	} else if (data->solo >= 0) {
+		act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.solo.exit")));
+		connect(act, &QAction::triggered, this, [this]() { toggleSolo(-1); });
+		popup.addSeparator();
+	}
+
+	QMenu *addMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.add")));
+	fillAddScopeMenu(addMenu);
+
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.show.roi")));
+	act->setCheckable(true);
+	act->setChecked(data->roi_shown);
+	connect(act, &QAction::toggled, this, [this](bool checked) {
+		data->roi_shown = checked;
+		if (!checked && data->solo == 0)
+			data->solo = -1;
+	});
+
+	QMenu *layoutMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.layout")));
+	const char *layout_text[] = {
+		obs_module_text("dock.menu.layout.auto"),
+		obs_module_text("dock.menu.layout.vertical"),
+		obs_module_text("dock.menu.layout.horizontal"),
+	};
+	for (int l = 0; l < 3; l++) {
+		act = layoutMenu->addAction(QString::fromUtf8(layout_text[l]));
+		act->setCheckable(true);
+		act->setChecked(data->layout == l);
+		connect(act, &QAction::triggered, this, [this, l]() { data->layout = l; });
+	}
+
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.toolbar")));
+	act->setCheckable(true);
+	act->setChecked(toolbarVisible);
+	connect(act, &QAction::toggled, this, &ScopeWidget::setToolbarVisible);
+
+	popup.addSeparator();
+
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.close")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::RemoveDock, Qt::QueuedConnection);
+
+	popup.exec(QCursor::pos());
+	return true;
+}
+
+void ScopeWidget::closeProperties()
+{
+	if (properties) {
+		auto *p = properties;
+		properties = NULL;
+		p->close();
+	}
+}
+
+void ScopeWidget::openProperties(int tile)
+{
+	obs_source_t *s = tile_source(data, tile);
+	if (!s)
+		return;
+
+	closeProperties();
+
+	QString title;
+	if (tile == 0)
+		title = QString::fromUtf8(obs_module_text("ROI"));
+	else
+		title = QString::fromUtf8(obs_module_text(scope_types[data->entries[tile - 1]->type].name_key));
+
+	properties = new ScopeWidgetProperties(this, s, title, tile == 0);
+	properties->setAttribute(Qt::WA_DeleteOnClose, true);
+	properties->Init();
+}
+
+/* ---------- options panel ---------- */
+
+static const char *options_style = R"(
+QFrame#ScopeOptions {
+	background: #1c1c1f;
+	border: 1px solid #3a3a40;
+	border-radius: 10px;
+}
+QFrame#ScopeOptions QLabel { color: #d8d8dc; background: transparent; }
+QFrame#ScopeOptions QLabel#Title { color: #f4f4f6; font-size: 13px; font-weight: 600; }
+QFrame#ScopeOptions QLabel[section="true"] { color: #8d8d96; font-size: 10px; font-weight: 600; }
+QFrame#ScopeOptions QComboBox, QFrame#ScopeOptions QLineEdit {
+	background: #2a2a2f; color: #e8e8ec; border: 1px solid #3c3c43; border-radius: 6px;
+	padding: 3px 8px; min-height: 20px;
+}
+QFrame#ScopeOptions QComboBox:hover, QFrame#ScopeOptions QLineEdit:focus { border-color: #6fcf86; }
+QFrame#ScopeOptions QComboBox QAbstractItemView {
+	background: #2a2a2f; color: #e8e8ec; selection-background-color: #3d5c45; border: 1px solid #3c3c43;
+}
+QFrame#ScopeOptions QPushButton {
+	background: #2a2a2f; color: #e8e8ec; border: 1px solid #3c3c43; border-radius: 6px; padding: 4px 10px;
+}
+QFrame#ScopeOptions QPushButton:hover { background: #34343a; }
+QFrame#ScopeOptions QPushButton#Segment { border-radius: 0px; }
+QFrame#ScopeOptions QPushButton#SegmentLeft { border-top-right-radius: 0px; border-bottom-right-radius: 0px; }
+QFrame#ScopeOptions QPushButton#SegmentRight { border-top-left-radius: 0px; border-bottom-left-radius: 0px; }
+QFrame#ScopeOptions QPushButton#Delete { background: transparent; border: none; color: #e5655d; }
+QFrame#ScopeOptions QPushButton#Delete:hover { color: #ff8078; }
+QFrame#ScopeOptions QPushButton#Primary { background: #3b3b42; border-color: #4a4a52; }
+QFrame#ScopeOptions QPushButton#Flat { background: transparent; border: none; color: #b8b8c0; padding: 2px 6px; }
+QFrame#ScopeOptions QPushButton#Flat:hover { color: #ffffff; }
+QFrame#ScopeOptions QCheckBox { color: #c9c9cf; background: transparent; }
+QFrame#ScopeOptions QSlider::groove:horizontal { height: 4px; background: #3a3a40; border-radius: 2px; }
+QFrame#ScopeOptions QSlider::sub-page:horizontal { background: #6fcf86; border-radius: 2px; }
+QFrame#ScopeOptions QSlider::handle:horizontal {
+	background: #f0f0f2; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
+}
+QFrame#ScopeOptions QFrame#Divider { background: #303036; max-height: 1px; min-height: 1px; border: none; }
+)";
+
+static QLabel *section_label(QWidget *parent, const QString &text)
+{
+	auto *l = new QLabel(text.toUpper(), parent);
+	l->setProperty("section", true);
+	return l;
+}
+
+static QFrame *divider(QWidget *parent)
+{
+	auto *f = new QFrame(parent);
+	f->setObjectName("Divider");
+	return f;
+}
+
+static void update_one(obs_source_t *src, const std::function<void(obs_data_t *)> &set)
+{
+	OBSDataAutoRelease d = obs_data_create();
+	set(d);
+	obs_source_update(src, d);
+}
+
+/* Names of the visible properties, to notice when a change shows or hides other options. */
+static std::string visible_signature(obs_properties_t *props)
+{
+	std::string sig;
+	for (obs_property_t *p = obs_properties_first(props); p; obs_property_next(&p)) {
+		if (!obs_property_visible(p))
+			continue;
+		sig += obs_property_name(p);
+		sig += ';';
+		if (obs_property_get_type(p) == OBS_PROPERTY_GROUP)
+			if (obs_properties_t *c = obs_property_group_content(p))
+				sig += visible_signature(c);
+	}
+	return sig;
+}
+
+/* Lays out a scope's own options: lists as dropdowns two to a row, sliders full width,
+ * on/off options as check boxes. on_layout_change runs when a change shows or hides options. */
+static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_t *src, obs_properties_t *props,
+				  obs_data_t *settings, const std::function<void()> &on_layout_change)
+{
+	QGridLayout *grid = nullptr;
+	int col = 0, row = 0;
+	auto flush_grid = [&]() {
+		grid = nullptr;
+		col = row = 0;
+	};
+	auto check_layout = [src, on_layout_change](const std::string &before) {
+		obs_properties_t *after = obs_source_properties(src);
+		bool changed = after && visible_signature(after) != before;
+		obs_properties_destroy(after);
+		if (changed)
+			on_layout_change();
+	};
+	const std::string sig = visible_signature(props);
+
+	for (obs_property_t *p = obs_properties_first(props); p; obs_property_next(&p)) {
+		if (!obs_property_visible(p))
+			continue;
+		const char *name = obs_property_name(p);
+		if (!name || !strcmp(name, "target_name") || !strcmp(name, "target_scale") || !strcmp(name, "bypass"))
+			continue;
+		const std::string key = name;
+		const QString desc = QString::fromUtf8(obs_property_description(p));
+		const bool enabled = obs_property_enabled(p);
+
+		switch (obs_property_get_type(p)) {
+		case OBS_PROPERTY_LIST: {
+			const obs_combo_format fmt = obs_property_list_format(p);
+			if (fmt != OBS_COMBO_FORMAT_INT && fmt != OBS_COMBO_FORMAT_FLOAT)
+				break;
+			auto *combo = new QComboBox(panel);
+			combo->setEnabled(enabled);
+			const size_t n = obs_property_list_item_count(p);
+			int current = -1;
+			for (size_t i = 0; i < n; i++) {
+				const QString item = QString::fromUtf8(obs_property_list_item_name(p, i));
+				if (fmt == OBS_COMBO_FORMAT_INT) {
+					long long v = obs_property_list_item_int(p, i);
+					combo->addItem(item, QVariant(v));
+					if (obs_data_get_int(settings, name) == v)
+						current = (int)i;
+				} else {
+					double v = obs_property_list_item_float(p, i);
+					combo->addItem(item, QVariant(v));
+					if (obs_data_get_double(settings, name) == v)
+						current = (int)i;
+				}
+			}
+			combo->setCurrentIndex(current);
+			QObject::connect(combo, QOverload<int>::of(&QComboBox::activated), panel,
+					 [combo, src, key, fmt, sig, check_layout](int idx) {
+						 const QVariant v = combo->itemData(idx);
+						 update_one(src, [&](obs_data_t *d) {
+							 if (fmt == OBS_COMBO_FORMAT_INT)
+								 obs_data_set_int(d, key.c_str(), v.toLongLong());
+							 else
+								 obs_data_set_double(d, key.c_str(), v.toDouble());
+						 });
+						 check_layout(sig);
+					 });
+			if (!grid) {
+				grid = new QGridLayout();
+				grid->setHorizontalSpacing(8);
+				grid->setVerticalSpacing(3);
+				vbox->addLayout(grid);
+			}
+			grid->addWidget(section_label(panel, desc), row * 2, col);
+			grid->addWidget(combo, row * 2 + 1, col);
+			if (++col == 2) {
+				col = 0;
+				row++;
+			}
+			break;
+		}
+		case OBS_PROPERTY_INT:
+		case OBS_PROPERTY_FLOAT: {
+			flush_grid();
+			const bool is_int = obs_property_get_type(p) == OBS_PROPERTY_INT;
+			double lo = is_int ? obs_property_int_min(p) : obs_property_float_min(p);
+			double hi = is_int ? obs_property_int_max(p) : obs_property_float_max(p);
+			double step = is_int ? obs_property_int_step(p) : obs_property_float_step(p);
+			if (step <= 0 || hi <= lo || (hi - lo) / step > 100000)
+				break;
+			const double cur = is_int ? (double)obs_data_get_int(settings, name)
+						  : obs_data_get_double(settings, name);
+			auto *head = new QHBoxLayout();
+			head->addWidget(section_label(panel, desc));
+			head->addStretch(1);
+			auto *value = new QLabel(QString::number(cur), panel);
+			head->addWidget(value);
+			vbox->addLayout(head);
+			auto *slider = new QSlider(Qt::Horizontal, panel);
+			slider->setEnabled(enabled);
+			slider->setRange(0, (int)std::lround((hi - lo) / step));
+			slider->setValue((int)std::lround((cur - lo) / step));
+			QObject::connect(slider, &QSlider::valueChanged, panel,
+					 [src, key, is_int, lo, step, value](int pos) {
+						 const double v = lo + pos * step;
+						 value->setText(QString::number(v));
+						 update_one(src, [&](obs_data_t *d) {
+							 if (is_int)
+								 obs_data_set_int(d, key.c_str(), (long long)std::lround(v));
+							 else
+								 obs_data_set_double(d, key.c_str(), v);
+						 });
+					 });
+			vbox->addWidget(slider);
+			break;
+		}
+		case OBS_PROPERTY_BOOL: {
+			flush_grid();
+			auto *cb = new QCheckBox(desc, panel);
+			cb->setEnabled(enabled);
+			cb->setChecked(obs_data_get_bool(settings, name));
+			QObject::connect(cb, &QCheckBox::toggled, panel, [src, key, sig, check_layout](bool on) {
+				update_one(src, [&](obs_data_t *d) { obs_data_set_bool(d, key.c_str(), on); });
+				check_layout(sig);
+			});
+			vbox->addWidget(cb);
+			break;
+		}
+		case OBS_PROPERTY_GROUP: {
+			flush_grid();
+			if (obs_property_group_type(p) == OBS_GROUP_CHECKABLE) {
+				auto *cb = new QCheckBox(desc, panel);
+				cb->setChecked(obs_data_get_bool(settings, name));
+				QObject::connect(cb, &QCheckBox::toggled, panel, [src, key](bool on) {
+					update_one(src, [&](obs_data_t *d) { obs_data_set_bool(d, key.c_str(), on); });
+				});
+				vbox->addWidget(cb);
+			} else {
+				vbox->addWidget(section_label(panel, desc));
+			}
+			if (obs_properties_t *content = obs_property_group_content(p))
+				add_property_controls(panel, vbox, src, content, settings, on_layout_change);
+			break;
+		}
+		default:
+			break;
+		}
+	}
+}
+
+void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
+{
+	obs_source_t *src = tile_source(data, tile);
+	if (!src)
+		return;
+	const bool is_roi = tile == 0;
+	scope_entry *e = is_roi ? nullptr : data->entries[tile - 1];
+
+	// Translucent outer window so the panel can have rounded corners.
+	auto *popup = new QWidget(this, Qt::Popup | Qt::FramelessWindowHint);
+	popup->setAttribute(Qt::WA_DeleteOnClose, true);
+	popup->setAttribute(Qt::WA_TranslucentBackground, true);
+	popup->setStyleSheet(options_style);
+	auto *outer = new QVBoxLayout(popup);
+	outer->setContentsMargins(0, 0, 0, 0);
+
+	auto *panel = new QFrame(popup);
+	panel->setObjectName("ScopeOptions");
+	panel->setMinimumWidth(260);
+	panel->setMaximumWidth(320);
+	outer->addWidget(panel);
+
+	auto *vbox = new QVBoxLayout(panel);
+	vbox->setContentsMargins(14, 12, 14, 12);
+	vbox->setSpacing(6);
+
+	auto reopen = [this, tile, popup]() {
+		const QPoint pos = popup->pos();
+		popup->close();
+		QTimer::singleShot(0, this, [this, tile, pos]() { openOptions(tile, pos); });
+	};
+
+	// header: title and the full dock menu
+	{
+		auto *head = new QHBoxLayout();
+		const QString type_name = QString::fromUtf8(
+			is_roi ? obs_module_text("ROI") : obs_module_text(scope_types[e->type].name_key));
+		auto *title = new QLabel(QString::fromUtf8(obs_module_text("Options.Title")).arg(type_name), panel);
+		title->setObjectName("Title");
+		head->addWidget(title);
+		head->addStretch(1);
+		auto *more = new QPushButton(QStringLiteral("⋯"), panel);
+		more->setObjectName("Flat");
+		more->setToolTip(QString::fromUtf8(obs_module_text("Options.DockMenu")));
+		connect(more, &QPushButton::clicked, this, [this, popup]() {
+			popup->close();
+			QTimer::singleShot(0, this, [this]() { openMenu(nullptr); });
+		});
+		head->addWidget(more);
+		vbox->addLayout(head);
+	}
+
+	// name shown on the scope
+	if (e) {
+		vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Options.Name"))));
+		auto *edit = new QLineEdit(QString::fromStdString(e->label), panel);
+		connect(edit, &QLineEdit::textEdited, this, [this, e](const QString &text) {
+			pthread_mutex_lock(&data->mutex);
+			e->label = text.toStdString();
+			pthread_mutex_unlock(&data->mutex);
+		});
+		vbox->addWidget(edit);
+		auto *show = new QCheckBox(QString::fromUtf8(obs_module_text("Options.ShowName")), panel);
+		show->setChecked(e->show_label);
+		connect(show, &QCheckBox::toggled, this, [this, e](bool on) {
+			pthread_mutex_lock(&data->mutex);
+			e->show_label = on;
+			pthread_mutex_unlock(&data->mutex);
+		});
+		vbox->addWidget(show);
+	}
+
+	// source: the dock's ROI selection, or a source of the scope's own
+	{
+		obs_properties_t *props = obs_source_properties(src);
+		obs_property_t *tp = props ? obs_properties_get(props, "target_name") : nullptr;
+		OBSDataAutoRelease settings = obs_source_get_settings(src);
+		if (tp && obs_property_list_format(tp) == OBS_COMBO_FORMAT_STRING) {
+			vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Source"))));
+			auto *combo = new QComboBox(panel);
+			const std::string roi_name = roi_name_of(this);
+			const QString roi_marker = QStringLiteral("\x01roi");
+			if (e)
+				combo->addItem(QString::fromUtf8(obs_module_text("Options.Source.Dock")), roi_marker);
+			const char *cur = obs_data_get_string(settings, "target_name");
+			int current = 0;
+			const size_t n = obs_property_list_item_count(tp);
+			for (size_t i = 0; i < n; i++) {
+				const char *v = obs_property_list_item_string(tp, i);
+				if (!v || v == roi_name || is_roi_source_name(v))
+					continue; // the dock's own ROI is the first entry
+				combo->addItem(QString::fromUtf8(obs_property_list_item_name(tp, i)), QString::fromUtf8(v));
+				if (!(e && e->use_roi) && cur && strcmp(cur, v) == 0)
+					current = combo->count() - 1;
+			}
+			combo->setCurrentIndex(current);
+			connect(combo, QOverload<int>::of(&QComboBox::activated), this,
+				[this, combo, src, e, roi_marker, roi_name](int idx) {
+					const QString v = combo->itemData(idx).toString();
+					const bool use_roi = e && v == roi_marker;
+					const std::string target = use_roi ? roi_name : v.toStdString();
+					if (e) {
+						e->use_roi = use_roi;
+						e->target = use_roi ? std::string() : target;
+					}
+					update_one(src, [&](obs_data_t *d) {
+						obs_data_set_string(d, "target_name", target.c_str());
+					});
+				});
+			vbox->addWidget(combo);
+		}
+		obs_properties_destroy(props);
+	}
+
+	// type
+	if (e) {
+		vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Options.Type"))));
+		auto *combo = new QComboBox(panel);
+		for (int t = 0; t < N_TYPES; t++)
+			combo->addItem(QString::fromUtf8(obs_module_text(scope_types[t].name_key)), t);
+		combo->setCurrentIndex(e->type);
+		connect(combo, QOverload<int>::of(&QComboBox::activated), this, [this, tile, popup](int t) {
+			const QPoint pos = popup->pos();
+			popup->close();
+			QTimer::singleShot(0, this, [this, tile, t, pos]() {
+				changeScopeType(tile, t);
+				openOptions(tile, pos);
+			});
+		});
+		vbox->addWidget(combo);
+	}
+
+	vbox->addWidget(divider(panel));
+
+	// graticule switch and the scope's own options
+	if (e) {
+		if (const grid_key_s *keys = grid_keys_for(e->type)) {
+			auto *cb = new QCheckBox(QString::fromUtf8(obs_module_text("dock.menu.grid")).remove('&'), panel);
+			cb->setChecked(grid_visible(src, keys));
+			connect(cb, &QCheckBox::toggled, this, [src, keys](bool on) { set_grid_visible(src, keys, on); });
+			vbox->addWidget(cb);
+		}
+	}
+	{
+		obs_properties_t *props = obs_source_properties(src);
+		OBSDataAutoRelease settings = obs_source_get_settings(src);
+		if (props) {
+			add_property_controls(panel, vbox, src, props, settings, reopen);
+			obs_properties_destroy(props);
+		}
+	}
+
+	vbox->addWidget(divider(panel));
+
+	// order in the grid
+	if (e) {
+		vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Options.Order"))));
+		auto *seg = new QHBoxLayout();
+		seg->setSpacing(0);
+		auto *earlier = new QPushButton(QString::fromUtf8(obs_module_text("Options.Earlier")), panel);
+		earlier->setObjectName("SegmentLeft");
+		earlier->setEnabled(tile > 1);
+		auto *later = new QPushButton(QString::fromUtf8(obs_module_text("Options.Later")), panel);
+		later->setObjectName("SegmentRight");
+		later->setEnabled(tile < (int)data->entries.size());
+		connect(earlier, &QPushButton::clicked, this, [this, tile, popup]() {
+			const QPoint pos = popup->pos();
+			popup->close();
+			moveScope(tile, -1);
+			QTimer::singleShot(0, this, [this, tile, pos]() { openOptions(tile - 1, pos); });
+		});
+		connect(later, &QPushButton::clicked, this, [this, tile, popup]() {
+			const QPoint pos = popup->pos();
+			popup->close();
+			moveScope(tile, +1);
+			QTimer::singleShot(0, this, [this, tile, pos]() { openOptions(tile + 1, pos); });
+		});
+		seg->addWidget(earlier);
+		seg->addWidget(later);
+		vbox->addLayout(seg);
+	}
+
+	// view actions
+	{
+		auto *row = new QHBoxLayout();
+		auto *solo = new QPushButton(QString::fromUtf8(obs_module_text(data->solo >= 0 ? "dock.menu.solo.exit"
+											       : "dock.menu.solo"))
+						     .remove('&'),
+					     panel);
+		solo->setObjectName("Flat");
+		connect(solo, &QPushButton::clicked, this, [this, tile, popup]() {
+			popup->close();
+			toggleSolo(data->solo >= 0 ? -1 : tile);
+		});
+		auto *proj = new QPushButton(QString::fromUtf8(obs_module_text("dock.menu.projector")).remove('&'), panel);
+		proj->setObjectName("Flat");
+		connect(proj, &QPushButton::clicked, this, [src, popup]() {
+			popup->close();
+			obs_frontend_open_projector("Source", -1, "", obs_source_get_name(src));
+		});
+		auto *all = new QPushButton(QString::fromUtf8(obs_module_text("dock.menu.settings")).remove('&'), panel);
+		all->setObjectName("Flat");
+		connect(all, &QPushButton::clicked, this, [this, tile, popup]() {
+			popup->close();
+			openProperties(tile);
+		});
+		row->addWidget(solo);
+		row->addWidget(proj);
+		row->addStretch(1);
+		row->addWidget(all);
+		vbox->addLayout(row);
+	}
+
+	// footer
+	if (e) {
+		auto *row = new QHBoxLayout();
+		auto *del = new QPushButton(QString::fromUtf8(obs_module_text("Options.Delete")), panel);
+		del->setObjectName("Delete");
+		connect(del, &QPushButton::clicked, this, [this, tile, popup]() {
+			popup->close();
+			QTimer::singleShot(0, this, [this, tile]() { removeScope(tile); });
+		});
+		auto *dup = new QPushButton(QString::fromUtf8(obs_module_text("Options.Duplicate")), panel);
+		dup->setObjectName("Primary");
+		connect(dup, &QPushButton::clicked, this, [this, tile, popup]() {
+			popup->close();
+			duplicateScope(tile);
+		});
+		row->addWidget(del);
+		row->addStretch(1);
+		row->addWidget(dup);
+		vbox->addLayout(row);
+	}
+
+	popup->adjustSize();
+
+	// keep the panel on screen
+	QPoint pos = globalPos;
+	if (QScreen *screen = QGuiApplication::screenAt(globalPos)) {
+		const QRect avail = screen->availableGeometry();
+		if (pos.x() + popup->width() > avail.right())
+			pos.setX(std::max(avail.left(), avail.right() - popup->width()));
+		if (pos.y() + popup->height() > avail.bottom())
+			pos.setY(std::max(avail.top(), avail.bottom() - popup->height()));
+	}
+	popup->move(pos);
+	popup->show();
+}
+
+/* ---------- arranging ---------- */
+
+void ScopeWidget::moveScope(int tile, int delta)
+{
+	const int i = tile - 1;
+	const int j = i + delta;
+	if (i < 0 || j < 0 || i >= (int)data->entries.size() || j >= (int)data->entries.size())
+		return;
+	pthread_mutex_lock(&data->mutex);
+	std::swap(data->entries[i], data->entries[j]);
+	if (data->solo == tile)
+		data->solo = j + 1;
+	pthread_mutex_unlock(&data->mutex);
+}
+
+/* ---------- views ---------- */
+
+/* Writes the active view (its scopes and layout) in the same shape loadActive() reads. */
+static void serialize_active(scope_widget_s *data, obs_data_t *out)
+{
+	pthread_mutex_lock(&data->mutex);
+	obs_data_set_int(out, "layout", data->layout);
+	obs_data_set_int(out, "solo", data->solo);
+	obs_data_set_bool(out, "roi-shown", data->roi_shown);
+
+	OBSDataArrayAutoRelease array = obs_data_array_create();
+	for (scope_entry *e : data->entries) {
+		OBSDataAutoRelease item = obs_data_create();
+		OBSDataAutoRelease prop = obs_source_get_settings(e->src);
+		obs_data_set_string(item, "type", scope_types[e->type].key);
+		obs_data_set_obj(item, "prop", prop);
+		entry_meta(e, item);
+		obs_data_array_push_back(array, item);
+	}
+	obs_data_set_array(out, "scopes", array);
+	pthread_mutex_unlock(&data->mutex);
+}
+
+static void add_default_scopes(ScopeWidget *w)
+{
+	OBSDataAutoRelease rgb = obs_data_create();
+	obs_data_set_int(rgb, "components", WV_COMP_RGB);
+	obs_data_set_int(rgb, "display", WV_DISP_PARADE);
+	w->addScope(TYPE_WAVEFORM, rgb);
+
+	OBSDataAutoRelease luma = obs_data_create();
+	obs_data_set_int(luma, "components", WV_COMP_Y);
+	w->addScope(TYPE_WAVEFORM, luma);
+
+	OBSDataAutoRelease vs = obs_data_create();
+	obs_data_set_bool(vs, "ring_scale", true);
+	w->addScope(TYPE_VECTORSCOPE, vs);
+	w->addScope(TYPE_HISTOGRAM);
+}
+
+void ScopeWidget::storeActive()
+{
+	if (data->active_view < 0 || data->active_view >= (int)data->views.size())
+		return;
+	OBSDataAutoRelease state = obs_data_create();
+	serialize_active(data, state);
+	data->views[data->active_view].state = state.Get();
+}
+
+void ScopeWidget::clearActive()
+{
+	closeProperties();
+
+	pthread_mutex_lock(&data->mutex);
+	std::vector<scope_entry *> entries;
+	entries.swap(data->entries);
+	data->solo = -1;
+	data->i_mouse_last = -1;
+	pthread_mutex_unlock(&data->mutex);
+
+	for (scope_entry *e : entries)
+		release_entry(e);
+}
+
+void ScopeWidget::loadActive(obs_data_t *state)
+{
+	clearActive();
+
+	pthread_mutex_lock(&data->mutex);
+	data->layout = state ? (int)obs_data_get_int(state, "layout") : SCOPE_LAYOUT_AUTO;
+	if (data->layout < SCOPE_LAYOUT_AUTO || data->layout > SCOPE_LAYOUT_HORIZONTAL)
+		data->layout = SCOPE_LAYOUT_AUTO;
+	data->roi_shown = state && obs_data_has_user_value(state, "roi-shown") ? obs_data_get_bool(state, "roi-shown")
+										  : true;
+	pthread_mutex_unlock(&data->mutex);
+
+	if (state && obs_data_has_user_value(state, "scopes")) {
+		OBSDataArrayAutoRelease array = obs_data_get_array(state, "scopes");
+		const size_t n = obs_data_array_count(array);
+		for (size_t i = 0; i < n; i++) {
+			OBSDataAutoRelease item = obs_data_array_item(array, i);
+			int type = type_from_key(obs_data_get_string(item, "type"));
+			if (type < 0)
+				continue;
+			OBSDataAutoRelease prop = obs_data_get_obj(item, "prop");
+			insertScope(type, prop, item, -1);
+		}
+	} else {
+		add_default_scopes(this);
+	}
+
+	// addScope() resets solo; restore the saved one if it still exists.
+	int solo = state && obs_data_has_user_value(state, "solo") ? (int)obs_data_get_int(state, "solo") : -1;
+	data->solo = (solo >= 0 && solo < n_tiles(data)) ? solo : -1;
+}
+
+void ScopeWidget::rebuildTabs()
+{
+	if (!tabs)
+		return;
+	rebuildingTabs = true;
+	while (tabs->count())
+		tabs->removeTab(0);
+	for (const auto &v : data->views)
+		tabs->addTab(QString::fromStdString(v.name));
+	tabs->setCurrentIndex(data->active_view);
+	tabs->setVisible(data->views.size() > 1);
+	rebuildingTabs = false;
+}
+
+void ScopeWidget::switchView(int index)
+{
+	if (index < 0 || index >= (int)data->views.size() || index == data->active_view)
+		return;
+	storeActive();
+	data->active_view = index;
+	loadActive(data->views[index].state);
+	rebuildTabs();
+}
+
+static std::string next_view_name(const scope_widget_s *data)
+{
+	for (int i = (int)data->views.size() + 1;; i++) {
+		const std::string name = QString::fromUtf8(obs_module_text("dock.view.default_name")).arg(i).toStdString();
+		bool used = false;
+		for (const auto &v : data->views)
+			used = used || v.name == name;
+		if (!used)
+			return name;
+	}
+}
+
+void ScopeWidget::addView()
+{
+	storeActive();
+
+	// A new view starts empty apart from the ROI, ready for scopes of your choice.
+	OBSDataAutoRelease state = obs_data_create();
+	OBSDataArrayAutoRelease empty = obs_data_array_create();
+	obs_data_set_array(state, "scopes", empty);
+
+	data->views.push_back({next_view_name(data), state.Get()});
+	data->active_view = (int)data->views.size() - 1;
+	loadActive(state);
+	rebuildTabs();
+}
+
+void ScopeWidget::duplicateView(int index)
+{
+	if (index < 0 || index >= (int)data->views.size())
+		return;
+	storeActive();
+	OBSDataAutoRelease copy = obs_data_create_from_json(obs_data_get_json(data->views[index].state));
+	std::string name = data->views[index].name + " " + obs_module_text("dock.view.copy_suffix");
+	data->views.insert(data->views.begin() + index + 1, {name, copy.Get()});
+	data->active_view = index + 1;
+	loadActive(copy);
+	rebuildTabs();
+}
+
+void ScopeWidget::renameView(int index)
+{
+	if (index < 0 || index >= (int)data->views.size())
+		return;
+	bool ok = false;
+	QString name = QInputDialog::getText(this, QString::fromUtf8(obs_module_text("dock.view.rename.title")),
+					     QString::fromUtf8(obs_module_text("dock.view.rename.label")),
+					     QLineEdit::Normal, QString::fromStdString(data->views[index].name), &ok);
+	if (!ok || name.trimmed().isEmpty())
+		return;
+	data->views[index].name = name.trimmed().toStdString();
+	rebuildTabs();
+}
+
+void ScopeWidget::deleteView(int index)
+{
+	if (data->views.size() <= 1 || index < 0 || index >= (int)data->views.size())
+		return;
+	storeActive();
+	data->views.erase(data->views.begin() + index);
+	if (data->active_view >= index && data->active_view > 0)
+		data->active_view--;
+	loadActive(data->views[data->active_view].state);
+	rebuildTabs();
+}
+
+void ScopeWidget::openTabMenu(const QPoint &pos)
+{
+	const int index = tabs ? tabs->tabAt(pos) : -1;
+	QMenu menu(this);
+	QAction *act;
+	if (index >= 0) {
+		act = menu.addAction(QString::fromUtf8(obs_module_text("dock.view.rename")));
+		connect(act, &QAction::triggered, this, [this, index]() { renameView(index); });
+		act = menu.addAction(QString::fromUtf8(obs_module_text("dock.view.duplicate")));
+		connect(act, &QAction::triggered, this, [this, index]() { duplicateView(index); });
+		act = menu.addAction(QString::fromUtf8(obs_module_text("dock.view.delete")));
+		act->setEnabled(data->views.size() > 1);
+		connect(act, &QAction::triggered, this, [this, index]() { deleteView(index); }, Qt::QueuedConnection);
+		menu.addSeparator();
+	}
+	act = menu.addAction(QString::fromUtf8(obs_module_text("dock.view.add")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::addView);
+	menu.exec(tabs->mapToGlobal(pos));
+}
+
+/* ---------- saving and loading ---------- */
+
+void ScopeWidget::default_properties(obs_data_t *props)
+{
+	obs_data_set_default_bool(props, "toolbar", true);
+}
+
+void ScopeWidget::save_properties(obs_data_t *props)
+{
+	storeActive();
+
+	obs_data_set_bool(props, "toolbar", toolbarVisible);
+	obs_data_set_int(props, "active_view", data->active_view);
+
+	if (data->roi) {
+		OBSDataAutoRelease prop = obs_source_get_settings(data->roi);
+		obs_data_set_obj(props, ROI_KEY "-prop", prop);
+	}
+
+	OBSDataArrayAutoRelease array = obs_data_array_create();
+	for (const auto &v : data->views) {
+		OBSDataAutoRelease item = obs_data_create();
+		obs_data_set_string(item, "name", v.name.c_str());
+		obs_data_set_obj(item, "state", v.state);
+		obs_data_array_push_back(array, item);
+	}
+	obs_data_set_array(props, "views", array);
+}
+
+void ScopeWidget::load_properties(obs_data_t *props)
+{
+	const std::string roi_name = roi_name_of(this);
+
+	setToolbarVisible(obs_data_get_bool(props, "toolbar"));
+
+	if (!data->roi) {
+		OBSDataAutoRelease prop = obs_data_get_obj(props, ROI_KEY "-prop");
+		if (!prop)
+			prop = obs_data_create();
+		obs_source_t *roi = create_source(ROI_ID, prop, roi_name.c_str());
+		pthread_mutex_lock(&data->mutex);
+		data->roi = roi;
+		pthread_mutex_unlock(&data->mutex);
+	}
+
+	data->views.clear();
+	OBSDataArrayAutoRelease array = obs_data_get_array(props, "views");
+	const size_t n = obs_data_array_count(array);
+	for (size_t i = 0; i < n; i++) {
+		OBSDataAutoRelease item = obs_data_array_item(array, i);
+		OBSDataAutoRelease state = obs_data_get_obj(item, "state");
+		const char *name = obs_data_get_string(item, "name");
+		data->views.push_back({name && *name ? name : next_view_name(data), state.Get()});
+	}
+
+	if (data->views.empty()) {
+		// A single view; docks from before views existed kept their scopes at the top level.
+		OBSDataAutoRelease state = obs_data_has_user_value(props, "scopes")
+						   ? obs_data_create_from_json(obs_data_get_json(props))
+						   : nullptr;
+		data->views.push_back({next_view_name(data), state.Get()});
+	}
+
+	int active = (int)obs_data_get_int(props, "active_view");
+	data->active_view = (active >= 0 && active < (int)data->views.size()) ? active : 0;
+	loadActive(data->views[data->active_view].state);
+	rebuildTabs();
+}

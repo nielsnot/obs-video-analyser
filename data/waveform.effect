@@ -1,0 +1,199 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float intensity;
+uniform float4x4 color = {
+	1.00, 0.41, 0.41, 0.0,
+	0.00, 1.00, 0.00, 0.0,
+	0.53, 0.53, 1.00, 0.0,
+	0.00, 0.00, 0.00, 1.0
+};
+
+sampler_state def_sampler {
+	Filter   = Point;
+	AddressU = Repeat;
+	AddressV = Repeat;
+};
+
+struct VertInOut {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in)
+{
+	VertInOut vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = vert_in.uv;
+	return vert_out;
+}
+
+float4 PSDrawOverlay(VertInOut vert_in) : TARGET
+{
+	float4 rgb;
+	rgb.xyz = image.Sample(def_sampler, vert_in.uv).xyz * intensity;
+	if (rgb.x>1.0) rgb.x = 1.0;
+	if (rgb.y>1.0) rgb.y = 1.0;
+	if (rgb.z>1.0) rgb.z = 1.0;
+	rgb.a = 1.0;
+	return rgb;
+}
+
+float4 PSDrawStack(VertInOut vert_in) : TARGET
+{
+	int i = int(vert_in.uv.y * 3);
+	float v = vert_in.uv.y * 3 - i;
+	float r = image.Sample(def_sampler, float2(vert_in.uv.x, v))[i] * intensity;
+	if (r>1.0) r = 1.0;
+	return float4(color[i].xyz*r, 1.0);
+}
+
+float4 PSDrawParade(VertInOut vert_in) : TARGET
+{
+	int i = int(vert_in.uv.x * 3);
+	float u = vert_in.uv.x * 3 - i;
+	float r = image.Sample(def_sampler, float2(u, vert_in.uv.y))[i] * intensity;
+	if (r>1.0) r = 1.0;
+	return float4(color[i].xyz*r, 1.0);
+}
+
+float4 PSDrawStackUV(VertInOut vert_in) : TARGET
+{
+	int i;
+	if (vert_in.uv.y < 0.5)
+		i = 0;
+	else
+		i = 2;
+	float v = vert_in.uv.y * 2;
+	float r = image.Sample(def_sampler, float2(vert_in.uv.x, v))[i] * intensity;
+	if (r>1.0) r = 1.0;
+	return float4(color[i].xyz*r, 1.0);
+}
+
+float4 PSDrawParadeUV(VertInOut vert_in) : TARGET
+{
+	int i;
+	if (vert_in.uv.x < 0.5)
+		i = 0;
+	else
+		i = 2;
+	float u = vert_in.uv.x * 2;
+	float r = image.Sample(def_sampler, float2(u, vert_in.uv.y))[i] * intensity;
+	if (r>1.0) r = 1.0;
+	return float4(color[i].xyz*r, 1.0);
+}
+
+// YRGB: luma (fourth channel) followed by R, G and B.
+float4 yrgb_column(float4 s, int i)
+{
+	float r;
+	float3 c;
+	if (i == 0) {
+		r = s.w;
+		c = float3(0.9, 0.9, 0.9);
+	} else {
+		r = s[i - 1];
+		c = color[i - 1].xyz;
+	}
+	r = r * intensity;
+	if (r > 1.0)
+		r = 1.0;
+	return float4(c * r, 1.0);
+}
+
+float4 PSDrawParadeYRGB(VertInOut vert_in) : TARGET
+{
+	int i = int(vert_in.uv.x * 4);
+	if (i > 3)
+		i = 3;
+	float u = vert_in.uv.x * 4 - i;
+	return yrgb_column(image.Sample(def_sampler, float2(u, vert_in.uv.y)), i);
+}
+
+float4 PSDrawStackYRGB(VertInOut vert_in) : TARGET
+{
+	int i = int(vert_in.uv.y * 4);
+	if (i > 3)
+		i = 3;
+	float v = vert_in.uv.y * 4 - i;
+	return yrgb_column(image.Sample(def_sampler, float2(vert_in.uv.x, v)), i);
+}
+
+float4 PSDrawOverlayYRGB(VertInOut vert_in) : TARGET
+{
+	float4 s = image.Sample(def_sampler, vert_in.uv) * intensity;
+	float3 rgb = min(s.xyz, float3(1.0, 1.0, 1.0));
+	float y = min(s.w, 1.0) * 0.6;
+	return float4(max(rgb, float3(y, y, y)), 1.0);
+}
+
+technique DrawOverlay
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawOverlay(vert_in);
+	}
+}
+
+technique DrawStack
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawStack(vert_in);
+	}
+}
+
+technique DrawParade
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawParade(vert_in);
+	}
+}
+
+technique DrawStackUV
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawStackUV(vert_in);
+	}
+}
+
+technique DrawParadeUV
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawParadeUV(vert_in);
+	}
+}
+
+technique DrawParadeYRGB
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawParadeYRGB(vert_in);
+	}
+}
+
+technique DrawStackYRGB
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawStackYRGB(vert_in);
+	}
+}
+
+technique DrawOverlayYRGB
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawOverlayYRGB(vert_in);
+	}
+}

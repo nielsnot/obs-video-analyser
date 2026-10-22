@@ -1,0 +1,162 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+// Selection shapes rasterized over the whole captured frame (R8, 1 = selected).
+uniform texture2d mask_tex;
+// 1 when mask_tex holds shapes, 0 when every pixel is selected.
+uniform float mask_use_tex = 0.0;
+// 1 when the hue/saturation/luma qualifier is active.
+uniform float qual_enable = 0.0;
+// x: hue center (degrees), y: hue half width (degrees, >= 180 means every hue)
+uniform float2 qual_hue = {0.0, 180.0};
+// x: min, y: max (0..1)
+uniform float2 qual_sat = {0.0, 1.0};
+uniform float2 qual_luma = {0.0, 1.0};
+
+sampler_state cnv_sampler {
+	Filter   = Point;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertInOut {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in)
+{
+	VertInOut vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = vert_in.uv;
+	return vert_out;
+}
+
+float in_shape(float2 uv)
+{
+	float m = step(0.5, mask_tex.Sample(cnv_sampler, uv).r);
+	return lerp(1.0, m, mask_use_tex);
+}
+
+float in_qualifier(float3 rgb)
+{
+	if (qual_enable < 0.5)
+		return 1.0;
+
+	float mx = max(rgb.r, max(rgb.g, rgb.b));
+	float mn = min(rgb.r, min(rgb.g, rgb.b));
+	float c = mx - mn;
+
+	float luma = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+	if (luma < qual_luma.x || luma > qual_luma.y)
+		return 0.0;
+
+	float l = (mx + mn) * 0.5;
+	float denom = 1.0 - abs(2.0 * l - 1.0);
+	float sat = 0.0;
+	if (denom > 0.00001)
+		sat = c / denom;
+	if (sat < qual_sat.x || sat > qual_sat.y)
+		return 0.0;
+
+	if (qual_hue.y < 180.0) {
+		if (c < 0.00001)
+			return 0.0; // grey has no hue
+		float h = 0.0;
+		if (mx == rgb.r) {
+			h = 60.0 * ((rgb.g - rgb.b) / c);
+			if (h < 0.0)
+				h += 360.0;
+		} else if (mx == rgb.g) {
+			h = 60.0 * ((rgb.b - rgb.r) / c + 2.0);
+		} else {
+			h = 60.0 * ((rgb.r - rgb.g) / c + 4.0);
+		}
+		float d = abs(h - qual_hue.x);
+		d = min(d, 360.0 - d);
+		if (d > qual_hue.y)
+			return 0.0;
+	}
+
+	return 1.0;
+}
+
+float mask_value(float2 uv, float3 rgb)
+{
+	return in_shape(uv) * in_qualifier(rgb);
+}
+
+float4 PSMaskRGB(VertInOut vert_in) : TARGET
+{
+	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	// Pixels outside the mask get alpha 0; the scopes skip them.
+	rgb.a = rgb.a * mask_value(vert_in.uv, rgb.rgb);
+	return rgb;
+}
+
+float4 PSDrawDimmed(VertInOut vert_in) : TARGET
+{
+	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	// For display: keep the selection as is, darken the rest.
+	float m = mask_value(vert_in.uv, rgb.rgb);
+	float k = 0.5 + 0.5 * m;
+	return float4(rgb.rgb * k, rgb.a);
+}
+
+float4 PSConvertRGB_YUV601(VertInOut vert_in) : TARGET
+{
+	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	float4 uv00;
+	uv00.z = -0.147643 * rgb.x -0.289855 * rgb.y +0.437500 * rgb.z +0.5 - 1.0/256.0; // U
+	uv00.y = +0.299000 * rgb.x +0.587000 * rgb.y +0.114000 * rgb.z; // Y
+	uv00.x = +0.437500 * rgb.x -0.366351 * rgb.y -0.071147 * rgb.z +0.5; // V
+	uv00.a = mask_value(vert_in.uv, rgb.rgb);
+	return uv00;
+}
+
+float4 PSConvertRGB_YUV709(VertInOut vert_in) : TARGET
+{
+	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	float4 uv00;
+	uv00.z = -0.100643 * rgb.x -0.338571 * rgb.y +0.439216 * rgb.z +0.5 - 1.0/256.0; // U
+	uv00.y = +0.212600 * rgb.x +0.715200 * rgb.y +0.072200 * rgb.z; // Y
+	uv00.x = +0.439216 * rgb.x -0.398941 * rgb.y -0.040273 * rgb.z +0.5; // V
+	uv00.a = mask_value(vert_in.uv, rgb.rgb);
+	return uv00;
+}
+
+technique MaskRGB
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSMaskRGB(vert_in);
+	}
+}
+
+technique DrawDimmed
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawDimmed(vert_in);
+	}
+}
+
+technique ConvertRGB_YUV601
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSConvertRGB_YUV601(vert_in);
+	}
+}
+
+technique ConvertRGB_YUV709
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSConvertRGB_YUV709(vert_in);
+	}
+}

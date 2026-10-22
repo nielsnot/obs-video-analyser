@@ -1,0 +1,35 @@
+set(EXPORT_NAME NorisCommonUITargets)
+install(TARGETS ${PROJECT_NAME}
+	EXPORT ${EXPORT_NAME}
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	PUBLIC_HEADER DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME}"
+)
+file(GLOB_RECURSE NORIS_HEADERS "include/*")
+install(FILES ${NORIS_HEADERS} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME}")
+
+set(CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+	"${CMAKE_CURRENT_BINARY_DIR}/NorisCommonUIConfigVersion.cmake"
+	VERSION ${PROJECT_VERSION}
+	COMPATIBILITY AnyNewerVersion
+)
+configure_package_config_file(
+	cmake/NorisCommonUIConfig.cmake.in
+	"${CMAKE_CURRENT_BINARY_DIR}/NorisCommonUIConfig.cmake"
+	INSTALL_DESTINATION ${CONFIG_INSTALL_DIR}
+)
+install(FILES
+	"${CMAKE_CURRENT_BINARY_DIR}/NorisCommonUIConfig.cmake"
+	"${CMAKE_CURRENT_BINARY_DIR}/NorisCommonUIConfigVersion.cmake"
+	DESTINATION ${CONFIG_INSTALL_DIR}
+	COMPONENT Development
+)
+
+install(EXPORT ${EXPORT_NAME}
+	FILE "NorisCommonUITargets.cmake"
+	NAMESPACE noriscommonui:: 
+	DESTINATION ${CONFIG_INSTALL_DIR}
+	COMPONENT Development
+)
+
