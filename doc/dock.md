@@ -123,3 +123,31 @@ and a longer one every 10 degrees. New docks start with it on.
 Set `Show key` to `Table with percentages (right)` to show, beside the picture, every false color band
 with its color, luma range, meaning and the share of the picture (or of the selection) in that band.
 The table is available with the built-in colors; with a LUT file the regular key applies.
+
+## Color picker
+
+Switch on `⊕ Picker` in the toolbar and click on the ROI view to place a pin; up to 8 pins, the oldest makes room.
+Each pin shows a swatch and the color under it, averaged over 3×3 pixels, as RGB (0–255), luma (%) and HSL.
+While the picker is on, `Undo` and `Reset` remove pins instead of shapes. Pins are saved with the dock.
+
+## Snapshot and compare
+
+`◉ Snapshot` freezes the current picture and every scope in the view as a reference and turns on `⇆ Compare`.
+While comparing, waveforms, vectorscopes and histograms draw the reference as a pink trace over the live one,
+and the ROI view shows the reference on the left and live on the right. Turn `⇆ Compare` off to hide it.
+
+## CIE diagram
+
+Plots every pixel at its CIE 1931 xy chromaticity, in its own color, with the spectral locus, the Rec. 709,
+DCI-P3 and Rec. 2020 triangles and the D65 white point. The picture is treated as Rec. 709, so it stays inside
+the Rec. 709 triangle; the diagram shows how much of that gamut the picture uses.
+
+## Lows / Mids / Highs
+
+A vectorscope's `Luma range` limits it to the dark, middle or bright third of the picture.
+`+ Scope` → `Lows / Mids / Highs vectorscopes` adds all three with a colored hue ring.
+
+## Hue and saturation histograms
+
+Set a histogram's components to `Hue` or `Saturation`. Drag across it to set the ROI qualifier to that range;
+a plain click clears it. The active range is shown as a light band.

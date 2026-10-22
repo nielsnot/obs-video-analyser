@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Video Analyser dock overview</title>
+  <rect width="960" height="600" fill="#0d0d10"/>
+
+  <!-- dock frame -->
+  <rect x="40" y="40" width="660" height="520" rx="8" fill="#141418" stroke="#33333a"/>
+
+  <!-- toolbar -->
+  <rect x="40" y="40" width="660" height="36" rx="8" fill="#1d1d22"/>
+  <g font-size="12" fill="#d6d6dc">
+    <rect x="52" y="48" width="58" height="20" rx="4" fill="#2c2c33"/><text x="81" y="62" text-anchor="middle">View 1</text>
+    <rect x="114" y="48" width="58" height="20" rx="4" fill="none" stroke="#3a3a42"/><text x="143" y="62" text-anchor="middle">View 2</text>
+    <text x="182" y="62">+ View</text>
+    <text x="238" y="62">+ Scope</text>
+    <text x="306" y="62">▭</text><text x="326" y="62">◯</text><text x="346" y="62">⊕</text>
+    <text x="368" y="62">↶</text><text x="388" y="62">✕</text>
+    <text x="414" y="62">◉ Snapshot</text><text x="496" y="62">⇆ Compare</text>
+  </g>
+
+  <!-- ROI view -->
+  <rect x="52" y="88" width="316" height="178" fill="#2a3540"/>
+  <rect x="52" y="88" width="316" height="178" fill="#000" opacity="0.45"/>
+  <ellipse cx="200" cy="172" rx="58" ry="58" fill="#5d7a90"/>
+  <ellipse cx="200" cy="172" rx="58" ry="58" fill="none" stroke="#2fe05a" stroke-width="2"/>
+  <g stroke="#fff" stroke-width="1.5"><line x1="290" y1="130" x2="304" y2="130"/><line x1="297" y1="123" x2="297" y2="137"/></g>
+  <rect x="306" y="120" width="58" height="22" rx="3" fill="#101012" opacity="0.85"/>
+  <rect x="309" y="124" width="12" height="14" fill="#c69a7a"/>
+  <text x="326" y="135" font-size="9" fill="#eee">R198 G154</text>
+  <rect x="58" y="94" width="34" height="16" rx="3" fill="#000" opacity="0.6"/><text x="63" y="106" font-size="11" fill="#fff">ROI</text>
+
+  <!-- waveform RGB parade -->
+  <rect x="376" y="88" width="316" height="178" fill="#050506"/>
+  <g stroke="#ffbf00" stroke-opacity="0.35"><line x1="376" y1="110" x2="692" y2="110"/><line x1="376" y1="152" x2="692" y2="152"/><line x1="376" y1="194" x2="692" y2="194"/><line x1="376" y1="236" x2="692" y2="236"/></g>
+  <path d="M380 220 Q420 140 460 170 T478 150" stroke="#ff6a6a" stroke-width="10" fill="none" opacity="0.55"/>
+  <path d="M484 210 Q520 130 560 160 T584 140" stroke="#40ff40" stroke-width="10" fill="none" opacity="0.55"/>
+  <path d="M588 230 Q620 160 660 190 T688 170" stroke="#8a8aff" stroke-width="10" fill="none" opacity="0.55"/>
+  <rect x="382" y="94" width="74" height="16" rx="3" fill="#000" opacity="0.6"/><text x="387" y="106" font-size="11" fill="#fff">RGB parade</text>
+  <text x="380" y="114" font-size="9" fill="#ffd060">100%</text><text x="380" y="240" font-size="9" fill="#ffd060">0%</text>
+
+  <!-- vectorscope -->
+  <rect x="52" y="274" width="210" height="274" fill="#050506"/>
+  <circle cx="157" cy="411" r="92" fill="none" stroke="#ffbf00" stroke-opacity="0.6"/>
+  <circle cx="157" cy="411" r="69" fill="none" stroke="#ffbf00" stroke-opacity="0.25"/>
+  <circle cx="157" cy="411" r="46" fill="none" stroke="#ffbf00" stroke-opacity="0.25"/>
+  <path d="M150 405 L178 382 L170 420 Z" fill="#ffe9d0" opacity="0.8"/>
+  <line x1="157" y1="411" x2="120" y2="330" stroke="#ffbf00" stroke-opacity="0.6"/>
+  <rect x="58" y="280" width="74" height="16" rx="3" fill="#000" opacity="0.6"/><text x="63" y="292" font-size="11" fill="#fff">Vectorscope</text>
+
+  <!-- false color + table -->
+  <rect x="270" y="274" width="250" height="274" fill="#050506"/>
+  <rect x="276" y="300" width="150" height="120" fill="#4d4d4d"/>
+  <rect x="300" y="320" width="60" height="50" fill="#f29e9e"/>
+  <rect x="370" y="330" width="40" height="40" fill="#ffff00"/>
+  <rect x="290" y="380" width="80" height="30" fill="#548cff"/>
+  <g font-size="9" fill="#e6e6e6">
+    <rect x="432" y="300" width="10" height="10" fill="#e63300"/><text x="446" y="309">&gt;100%  0.0%</text>
+    <rect x="432" y="318" width="10" height="10" fill="#ffff00"/><text x="446" y="327">84-94  6.1%</text>
+    <rect x="432" y="336" width="10" height="10" fill="#f29e9e"/><text x="446" y="345">52-58  12%</text>
+    <rect x="432" y="354" width="10" height="10" fill="#4d4d4d"/><text x="446" y="363">20-42  48%</text>
+    <rect x="432" y="372" width="10" height="10" fill="#548cff"/><text x="446" y="381">10-20  9.0%</text>
+  </g>
+  <rect x="276" y="280" width="104" height="16" rx="3" fill="#000" opacity="0.6"/><text x="281" y="292" font-size="11" fill="#fff">False color + table</text>
+
+  <!-- options panel -->
+  <rect x="528" y="274" width="164" height="274" rx="10" fill="#1c1c1f" stroke="#3a3a40"/>
+  <text x="542" y="298" font-size="12" font-weight="600" fill="#f4f4f6">Waveform Options</text>
+  <g font-size="8" font-weight="600" fill="#8d8d96"><text x="542" y="318">NAME</text><text x="542" y="354">SOURCE</text><text x="542" y="390">TYPE</text><text x="542" y="426">COMPONENTS</text><text x="618" y="426">DISPLAY</text></g>
+  <g fill="#2a2a2f" stroke="#3c3c43">
+    <rect x="542" y="322" width="136" height="20" rx="5"/><rect x="542" y="358" width="136" height="20" rx="5"/>
+    <rect x="542" y="394" width="136" height="20" rx="5"/><rect x="542" y="430" width="66" height="20" rx="5"/><rect x="612" y="430" width="66" height="20" rx="5"/>
+  </g>
+  <g font-size="10" fill="#e8e8ec"><text x="548" y="336">RGB parade</text><text x="548" y="372">Dock selection (ROI)</text><text x="548" y="408">Waveform</text><text x="548" y="444">RGB</text><text x="618" y="444">Parade</text></g>
+  <rect x="542" y="462" width="136" height="4" rx="2" fill="#3a3a40"/><rect x="542" y="462" width="70" height="4" rx="2" fill="#6fcf86"/>
+  <text x="542" y="530" font-size="11" fill="#e5655d">Delete</text>
+  <rect x="616" y="516" width="62" height="20" rx="5" fill="#3b3b42"/><text x="647" y="530" font-size="11" fill="#e8e8ec" text-anchor="middle">Duplicate</text>
+
+  <!-- callouts -->
+  <g font-size="13" fill="#e8e8ec">
+    <g stroke="#6fcf86" stroke-width="1.2" fill="none">
+      <path d="M150 56 C160 20 600 20 720 70"/><path d="M265 56 C280 30 600 40 720 110"/><path d="M340 56 C360 40 600 70 720 150"/>
+      <path d="M455 56 C470 50 600 100 720 190"/><path d="M230 172 C400 260 600 230 720 230"/>
+      <path d="M600 140 C650 140 680 260 720 270"/><path d="M157 330 C300 520 600 330 720 310"/>
+      <path d="M470 420 C600 470 650 360 720 350"/><path d="M692 300 C705 300 710 390 720 390"/>
+    </g>
+    <text x="728" y="74">1  Views (tabs)</text>
+    <text x="728" y="114">2  Add a scope</text>
+    <text x="728" y="154">3  Select: rectangle, ellipse, picker</text>
+    <text x="728" y="194">4  Snapshot / compare</text>
+    <text x="728" y="234">5  ROI with shapes and pins</text>
+    <text x="728" y="274">6  Waveform with scale</text>
+    <text x="728" y="314">7  Vectorscope with ring scale</text>
+    <text x="728" y="354">8  False color table</text>
+    <text x="728" y="394">9  Options panel (right-click)</text>
+  </g>
+  <text x="728" y="440" font-size="11" fill="#8d8d96">Schematic, not a screenshot</text>
+</svg>

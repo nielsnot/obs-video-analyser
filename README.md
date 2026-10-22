@@ -1,67 +1,76 @@
-# Video Analyser plugin for OBS Studio
+# Video Analyser for OBS Studio
 
-Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color-monitor) by Norihiro Kamae.
-It adds a scope dock where you add any number of scopes, a YRGB waveform,
-rectangle and ellipse selections drawn from a toolbar, and a hue / saturation / luma qualifier.
-It uses its own source ids, so it can be installed next to Color Monitor.
+Broadcast-style scopes inside OBS Studio: build your own scope dock with waveforms, vectorscopes,
+histograms, a CIE diagram, a diamond display and false color, look at just one part of the picture,
+pick colors, and compare against a snapshot.
 
-## Features
+Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color-monitor) by Norihiro Kamae
+(GPL-2.0). It uses its own source ids, so both plugins can be installed side by side.
 
-### Selecting part of the picture
-The toolbar at the top of the dock has `▭ Rectangle`, `◯ Ellipse`, `↶ Undo` and `✕ Reset`.
-Switch on Rectangle or Ellipse and drag on the ROI view to draw a shape; hold `Shift` for a square or a circle.
-You can draw several shapes. From then on every scope in the dock analyzes only the pixels inside the shapes,
-so the waveform, vectorscope, histogram, diamond and false color table show just that part of the picture,
-for example one face or the sky. Outside the shapes the ROI view is darkened.
-`Undo` removes the last shape, `Reset` removes them all so the scopes use the whole picture again.
-This selects what is measured; the picture itself is not zoomed.
-The vectorscope can be zoomed separately with the mouse wheel.
+![Overview of the Video Analyser dock](doc/dock-overview.svg)
 
-### Qualifier
-In the ROI settings, limit the analysis further to pixels within a hue, saturation and luma range,
-for example only skin tones. It works together with the shapes.
+## Quick start
 
-### Scopes and views
-- Add any number of scopes with `+ Scope`: waveform (RGB, Luma, Chroma, YUV, YRGB), vectorscope with optional
-  ring scale, histogram, diamond, zebra, false color (optionally with a table of bands and percentages) and focus peaking.
-- Right-click a scope for its options panel: name label, its own source (the dock selection or any camera or scene),
-  type, graticule and all other options, order, maximize, projector, delete and duplicate.
-- `+ View` adds views as tabs, each with its own scopes and layout.
-- The grid arranges the scopes automatically; double-click a scope to maximize it.
+1. **Install.** Download the package for your system and OBS version from the latest build
+   (Windows installer, macOS `.pkg` or Linux `.deb`) and restart OBS.
+2. **Open a dock.** In OBS choose `Tools` → `New Video Analyser Dock...`, pick Program or Preview and click OK.
+   The dock starts with an RGB parade, a luma waveform, a vectorscope and a histogram.
+3. **Make it yours.** Click `+ Scope` to add scopes, right-click a scope to change it,
+   and double-click a scope to fill the dock with it.
+4. **Look at one part of the picture.** Click `◯ Ellipse` (or `▭ Rectangle`) and drag on the ROI view,
+   for example around a face. Every scope now measures only what is inside.
 
-See [Dock](doc/dock.md) for the details.
+## What you see in the dock
 
-## Introduction
+| # | Element | What it does |
+|---|---------|--------------|
+| 1 | **View tabs** and `+ View` | Several layouts per dock, each with its own scopes. Right-click a tab to rename, duplicate or delete it. |
+| 2 | `+ Scope` | Adds a scope: waveform, vectorscope, histogram, CIE diagram, diamond, false color, zebra or focus peaking. Also a preset with three Lows / Mids / Highs vectorscopes. |
+| 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
+| 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
+| 5 | **ROI view** | The picture being analyzed. Shapes are outlined in green, everything outside them is darkened. Pins show RGB, luma and HSL values. |
+| 6 – 8 | **Scopes** | Arranged in a grid that fits the dock. Each shows a name label in its corner. |
+| 9 | **Options panel** | Right-click a scope: name, source, type, graticule and all its options, order, maximize, projector, delete and duplicate. |
 
-This plugin provides these sources to monitor color balances.
+## The scopes
 
-- [Vectorscope](doc/vectorscope.md)
-- [Waveform](doc/waveform.md)
-- [Histogram](doc/histogram.md)
-- [Zebra](doc/zebra.md)
-- [False Color](doc/falsecolor.md)
-- [Focus Peaking](doc/focuspeaking.md)
-- Diamond (see [Dock](doc/dock.md#diamond))
+| Scope | Shows | Highlights |
+|-------|-------|------------|
+| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit or 10-bit; mouse wheel zooms in (for example into the blacks) |
+| **Vectorscope** | Hue and saturation | Skin tone line, ring scale with degree ticks, colored hue ring, Lows / Mids / Highs luma ranges, mouse wheel zoom |
+| **Histogram** | Distribution of levels | RGB, Luma, Chroma, YUV, plus Hue and Saturation; drag across a hue or saturation histogram to select that range |
+| **CIE diagram** | Chromaticity | Spectral locus, Rec. 709, DCI-P3 and Rec. 2020 triangles, D65 white point |
+| **Diamond** | RGB gamut | Anything outside the dashed outlines is out of gamut |
+| **False color** | Exposure as colors | Presets (Exposure, Clipping only, Skin and mid grey, Spectrum) or your own bands; optional table with the share of the picture in each band |
+| **Zebra** | Over- and underexposure | Adjustable thresholds |
+| **Focus peaking** | Sharp edges | Color and threshold |
 
-In addition, a dock widget is available.
-- [Dock](doc/dock.md)
+## Tools
 
-To hide the source and filter types from the add-source and add-filter menues, refer this document.
-- [Global Configuration](doc/global_config.md)
+- **Selections.** Draw any number of rectangles and ellipses on the ROI view. The scopes count only the pixels inside
+  them. This selects what is measured; it does not zoom the picture.
+- **Qualifier.** In the ROI options, limit the analysis to a hue, saturation and luma range, such as skin tones.
+  The quickest way is to drag across a Hue or Saturation histogram.
+- **Color picker.** With `⊕ Picker` on, each click places a pin (up to 8) that reads the color under it.
+- **Own source per scope.** In a scope's options, set `Source` to a camera or scene instead of the dock selection,
+  so one dock can show scopes for several cameras.
+- **Snapshot and compare.** Take a reference with `◉ Snapshot`, then match a second camera or a new grade against it.
 
-## Quick Usage
+More details: [Dock](doc/dock.md), [Waveform](doc/waveform.md), [Vectorscope](doc/vectorscope.md),
+[Histogram](doc/histogram.md), [False Color](doc/falsecolor.md), [Zebra](doc/zebra.md),
+[Focus Peaking](doc/focuspeaking.md), [Global Configuration](doc/global_config.md).
 
-### Dock
-1. Install the plugin and boot OBS Studio.
-1. Click `Tools` and `New Video Analyser Dock...` in the menu of OBS Studio.
-1. Input the name, optionally set the source to monitor, and clock OK. You will see a new dock containing vectorscope, waveform, and histogram for the program.
+## Scopes as sources
 
-### Projector View
-1. Install the plugin and boot OBS Studio.
-1. Have your source to see vectorscope, waveform, or histogram, eg. a camera.
-1. Create a new scene.
-1. Create vectorscope, waveform, or histogram on the scene by clicking `+` button at the bottom of `Source` list.
-1. At `Source` combo box, select your source. You can select both scene and source.
-   1. If the plugin increases rendering time too much, increase `scale` to scale down the image before processing.
-   1. `Bypass` checkbox will show the scaled image to ensure you've select the right source.
-1. You may open a windowed projector of the scene so that you can switch preview and program scene while monitoring color.
+Every scope is also an OBS source. Add one to a scene with `+` in the Sources list, choose the camera or scene
+to analyze, and open a windowed projector to watch it on another screen. If it costs too much rendering time,
+raise `Scale` to analyze a smaller image; `Bypass` shows that image to check you picked the right source.
+
+## Building
+
+GitHub Actions builds the plugin for Windows, macOS and Linux for OBS 30, 31 and 32 on every push to `main`;
+the packages are under the run's Artifacts. Locally the plugin builds with CMake against OBS Studio and Qt 6.
+
+## License
+
+GPL-2.0-or-later, see [LICENSE](LICENSE). Based on Color Monitor by Norihiro Kamae.
