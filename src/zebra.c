@@ -29,22 +29,62 @@ enum show_key_e {
 	show_key_table = 7, // false color only: table beside the picture
 };
 
-/* Built-in false color bands, bottom to top; must match falsecolor.effect. */
-#define FC_N_BANDS 12
-static const struct
+/* False color bands, bottom to top. A band holds luma below y_max; the last band of a scheme
+ * has y_max above 1 and holds 100 % and over. A color of 0 shows the luma as grey. */
+#define FC_MAX_BANDS 12
+#define FC_GREY 0x00000000
+
+struct fc_band
 {
-	float y_max;    // band holds luma below this (the last band is 100 % and above)
-	uint32_t color; // 0xAARRGGBB
-	const char *range;
-	const char *label_key;
-} fc_bands[FC_N_BANDS] = {
-	{0.02f, 0xFFD938FF, "0-2%", "FC.Band.BlackClip"},   {0.10f, 0xFF0000FF, "2-10%", "FC.Band.DeepShadow"},
-	{0.20f, 0xFF548CFF, "10-20%", "FC.Band.Shadow"},    {0.42f, 0xFF4D4D4D, "20-42%", "FC.Band.Dark"},
-	{0.48f, 0xFF99FF00, "42-48%", "FC.Band.MidGrey"},   {0.52f, 0xFF808080, "48-52%", "FC.Band.Mid"},
-	{0.58f, 0xFFF29E9E, "52-58%", "FC.Band.Skin"},      {0.78f, 0xFFB3B3B3, "58-78%", "FC.Band.Bright"},
-	{0.84f, 0xFFB3B300, "78-84%", "FC.Band.Highlight"}, {0.94f, 0xFFFFFF00, "84-94%", "FC.Band.BrightHighlight"},
-	{1.00f, 0xFFE68000, "94-100%", "FC.Band.NearClip"}, {2.00f, 0xFFE63300, ">100%", "FC.Band.Clip"},
+	float y_max;
+	uint32_t color; // 0xAARRGGBB, or FC_GREY
+	char label[48];
 };
+
+struct fc_preset_band
+{
+	float y_max;
+	uint32_t color;
+	const char *label_key;
+};
+
+enum fc_preset_e {
+	FC_PRESET_EXPOSURE = 0,
+	FC_PRESET_CLIPPING = 1,
+	FC_PRESET_SKIN = 2,
+	FC_PRESET_SPECTRUM = 3,
+	FC_PRESET_CUSTOM = 4,
+};
+
+static const struct fc_preset_band fc_preset_exposure[] = {
+	{0.02f, 0xFFD938FF, "FC.Band.BlackClip"}, {0.10f, 0xFF0000FF, "FC.Band.DeepShadow"},
+	{0.20f, 0xFF548CFF, "FC.Band.Shadow"},    {0.42f, 0xFF4D4D4D, "FC.Band.Dark"},
+	{0.48f, 0xFF99FF00, "FC.Band.MidGrey"},   {0.52f, 0xFF808080, "FC.Band.Mid"},
+	{0.58f, 0xFFF29E9E, "FC.Band.Skin"},      {0.78f, 0xFFB3B3B3, "FC.Band.Bright"},
+	{0.84f, 0xFFB3B300, "FC.Band.Highlight"}, {0.94f, 0xFFFFFF00, "FC.Band.BrightHighlight"},
+	{1.00f, 0xFFE68000, "FC.Band.NearClip"},  {2.00f, 0xFFE63300, "FC.Band.Clip"},
+};
+static const struct fc_preset_band fc_preset_clipping[] = {
+	{0.02f, 0xFF2060FF, "FC.Band.BlackClip"},
+	{0.98f, FC_GREY, "FC.Band.InRange"},
+	{1.00f, 0xFFFFD000, "FC.Band.NearClip"},
+	{2.00f, 0xFFFF2020, "FC.Band.Clip"},
+};
+static const struct fc_preset_band fc_preset_skin[] = {
+	{0.02f, 0xFF2060FF, "FC.Band.BlackClip"}, {0.42f, FC_GREY, "FC.Band.Dark"},
+	{0.48f, 0xFF40E040, "FC.Band.MidGrey"},   {0.52f, FC_GREY, "FC.Band.Mid"},
+	{0.62f, 0xFFF2A0A0, "FC.Band.Skin"},      {0.70f, 0xFFE07850, "FC.Band.SkinBright"},
+	{0.98f, FC_GREY, "FC.Band.Bright"},       {2.00f, 0xFFFF2020, "FC.Band.Clip"},
+};
+static const struct fc_preset_band fc_preset_spectrum[] = {
+	{0.10f, 0xFF5000A0, "FC.Band.Decile"}, {0.20f, 0xFF2020FF, "FC.Band.Decile"},
+	{0.30f, 0xFF0090FF, "FC.Band.Decile"}, {0.40f, 0xFF00D0C0, "FC.Band.Decile"},
+	{0.50f, 0xFF00C040, "FC.Band.Decile"}, {0.60f, 0xFF90E000, "FC.Band.Decile"},
+	{0.70f, 0xFFF0E000, "FC.Band.Decile"}, {0.80f, 0xFFFFA000, "FC.Band.Decile"},
+	{0.90f, 0xFFFF5000, "FC.Band.Decile"}, {2.00f, 0xFFFF0040, "FC.Band.Decile"},
+};
+
+#define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
 // common structure for source and filter
 struct zb_source
@@ -63,6 +103,12 @@ struct zb_source
 	gs_vertbuffer_t *key_label_vbuf;
 	gs_image_file_t falsecolor_lut;
 	bool is_falsecolor;
+
+	/* false color scheme */
+	struct fc_band bands[FC_MAX_BANDS];
+	int n_bands;
+	gs_texture_t *scheme_lut; // 256x1 color per luma, built from the bands
+	volatile bool scheme_dirty;
 };
 
 struct zbs_source
@@ -71,14 +117,15 @@ struct zbs_source
 	struct zb_source zb;
 
 	// share of the analyzed pixels in each false color band, for the table
-	float coverage[2][FC_N_BANDS];
+	float coverage[2][FC_MAX_BANDS];
 	volatile int w_coverage;
 	bool has_coverage;
 };
 
 static inline bool zb_has_table(const struct zb_source *zb)
 {
-	return zb->is_falsecolor && zb->show_key == show_key_table && !zb->falsecolor_lut.texture;
+	// a user LUT file has no band definitions to list
+	return zb->is_falsecolor && zb->show_key == show_key_table && !zb->falsecolor_lut.texture && zb->n_bands > 0;
 }
 
 static void fcs_surface_cb(void *data, struct cm_surface_data *surface_data)
@@ -89,15 +136,18 @@ static void fcs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		return;
 
 	// Luma code values 0..255 to band index, built once per call.
+	const int n_bands = src->zb.n_bands;
+	if (n_bands <= 0)
+		return;
 	uint8_t band_of[256];
 	for (int v = 0, b = 0; v < 256; v++) {
 		const float y = v / 255.0f;
-		while (b < FC_N_BANDS - 1 && y >= fc_bands[b].y_max)
+		while (b < n_bands - 1 && y >= src->zb.bands[b].y_max)
 			b++;
 		band_of[v] = (uint8_t)b;
 	}
 
-	uint32_t counts[FC_N_BANDS] = {0};
+	uint32_t counts[FC_MAX_BANDS] = {0};
 	uint32_t total = 0;
 	for (uint32_t y = 0; y < surface_data->height; y++) {
 		const uint8_t *p = yuv + (size_t)surface_data->linesize * y;
@@ -110,7 +160,7 @@ static void fcs_surface_cb(void *data, struct cm_surface_data *surface_data)
 	}
 
 	float *out = src->coverage[src->w_coverage];
-	for (int b = 0; b < FC_N_BANDS; b++)
+	for (int b = 0; b < n_bands; b++)
 		out[b] = total ? (float)counts[b] / (float)total : 0.0f;
 	src->w_coverage ^= 1;
 	src->has_coverage = true;
@@ -217,6 +267,12 @@ static void zb_destroy(struct zb_source *src)
 		obs_leave_graphics();
 	}
 
+	if (src->scheme_lut) {
+		obs_enter_graphics();
+		gs_texture_destroy(src->scheme_lut);
+		obs_leave_graphics();
+	}
+
 	if (src->is_falsecolor) {
 		falsecolor_lut_unload(src);
 		bfree(src->falsecolor_lut_filename);
@@ -251,6 +307,113 @@ static void falsecolor_lut_load(struct zb_source *src, const char *lut_filename)
 	obs_leave_graphics();
 }
 
+static void fc_set_bands(struct zb_source *src, const struct fc_preset_band *preset, size_t n)
+{
+	struct fc_band bands[FC_MAX_BANDS];
+	if (n > FC_MAX_BANDS)
+		n = FC_MAX_BANDS;
+	for (size_t i = 0; i < n; i++) {
+		bands[i].y_max = preset[i].y_max;
+		bands[i].color = preset[i].color;
+		if (!strcmp(preset[i].label_key, "FC.Band.Decile"))
+			snprintf(bands[i].label, sizeof(bands[i].label), "%s %d", obs_module_text("FC.Band.Decile"),
+				 (int)i + 1);
+		else
+			snprintf(bands[i].label, sizeof(bands[i].label), "%s", obs_module_text(preset[i].label_key));
+	}
+	memcpy(src->bands, bands, sizeof(bands));
+	src->n_bands = (int)n;
+	src->scheme_dirty = true;
+}
+
+/* OBS stores colors as 0xAABBGGRR; the bands use 0xAARRGGBB. */
+static inline uint32_t abgr_to_argb(uint32_t c)
+{
+	return (c & 0xFF00FF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
+}
+
+static void fc_load_scheme(struct zb_source *src, obs_data_t *settings)
+{
+	switch ((int)obs_data_get_int(settings, "fc_preset")) {
+	case FC_PRESET_CLIPPING:
+		fc_set_bands(src, fc_preset_clipping, ARRAY_LEN(fc_preset_clipping));
+		return;
+	case FC_PRESET_SKIN:
+		fc_set_bands(src, fc_preset_skin, ARRAY_LEN(fc_preset_skin));
+		return;
+	case FC_PRESET_SPECTRUM:
+		fc_set_bands(src, fc_preset_spectrum, ARRAY_LEN(fc_preset_spectrum));
+		return;
+	case FC_PRESET_CUSTOM:
+		break;
+	default:
+		fc_set_bands(src, fc_preset_exposure, ARRAY_LEN(fc_preset_exposure));
+		return;
+	}
+
+	// Custom: bands sorted by their upper limit; 101 % stands for "100 % and over".
+	struct fc_band bands[FC_MAX_BANDS];
+	int n = (int)obs_data_get_int(settings, "fc_custom_count");
+	if (n < 1)
+		n = 1;
+	if (n > FC_MAX_BANDS)
+		n = FC_MAX_BANDS;
+	for (int i = 0; i < n; i++) {
+		char key[32];
+		snprintf(key, sizeof(key), "fc_c%d_max", i + 1);
+		const int max_pct = (int)obs_data_get_int(settings, key);
+		bands[i].y_max = max_pct > 100 ? 2.0f : max_pct / 100.0f;
+		snprintf(key, sizeof(key), "fc_c%d_grey", i + 1);
+		const bool grey = obs_data_get_bool(settings, key);
+		snprintf(key, sizeof(key), "fc_c%d_color", i + 1);
+		bands[i].color = grey ? FC_GREY
+				      : (abgr_to_argb((uint32_t)obs_data_get_int(settings, key)) | 0xFF000000);
+		snprintf(key, sizeof(key), "fc_c%d_label", i + 1);
+		const char *label = obs_data_get_string(settings, key);
+		snprintf(bands[i].label, sizeof(bands[i].label), "%s", label && *label ? label : "");
+	}
+	for (int i = 1; i < n; i++) // insertion sort by upper limit
+		for (int j = i; j > 0 && bands[j].y_max < bands[j - 1].y_max; j--) {
+			struct fc_band t = bands[j];
+			bands[j] = bands[j - 1];
+			bands[j - 1] = t;
+		}
+	bands[n - 1].y_max = 2.0f; // the top band always reaches above white
+	memcpy(src->bands, bands, sizeof(bands));
+	src->n_bands = n;
+	src->scheme_dirty = true;
+}
+
+/* Builds the 256-entry color table the false color shader samples by luma. Graphics thread. */
+static void fc_update_scheme_lut(struct zb_source *src)
+{
+	if (!src->scheme_dirty && src->scheme_lut)
+		return;
+	src->scheme_dirty = false;
+
+	uint8_t buf[256 * 4];
+	for (int i = 0, b = 0; i < 256; i++) {
+		const float y = i / 255.0f;
+		while (b < src->n_bands - 1 && y >= src->bands[b].y_max)
+			b++;
+		const uint32_t c = src->n_bands ? src->bands[b].color : FC_GREY;
+		uint8_t *t = buf + i * 4;
+		if (c == FC_GREY) {
+			t[0] = t[1] = t[2] = (uint8_t)i;
+		} else {
+			t[0] = c & 0xFF;         // B
+			t[1] = (c >> 8) & 0xFF;  // G
+			t[2] = (c >> 16) & 0xFF; // R
+		}
+		t[3] = 0xFF;
+	}
+	const uint8_t *data = buf;
+	if (!src->scheme_lut)
+		src->scheme_lut = gs_texture_create(256, 1, GS_BGRA, 1, &data, GS_DYNAMIC);
+	else
+		gs_texture_set_image(src->scheme_lut, buf, 256 * 4, false);
+}
+
 static void zb_update(struct zb_source *src, obs_data_t *settings)
 {
 	if (!src->is_falsecolor) {
@@ -273,6 +436,9 @@ static void zb_update(struct zb_source *src, obs_data_t *settings)
 	}
 
 	src->show_key = obs_data_get_int(settings, "show_key");
+
+	if (src->is_falsecolor)
+		fc_load_scheme(src, settings);
 }
 
 static void zbs_update(void *data, obs_data_t *settings)
@@ -298,6 +464,48 @@ static void zb_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "zebra_th_low", 75);
 	obs_data_set_default_int(settings, "zebra_th_high", 100);
+
+	// a starting point for the custom false color scheme (colors as 0xAABBGGRR)
+	static const struct
+	{
+		int max;
+		uint32_t color;
+		bool grey;
+		const char *label;
+	} custom[] = {
+		{2, 0xFFFF6020, false, "Crushed"},   {42, 0xFF808080, true, "Shadows"},
+		{48, 0xFF40E040, false, "Mid grey"}, {95, 0xFF808080, true, "Bright"},
+		{101, 0xFF2020FF, false, "Clipped"},
+	};
+	obs_data_set_default_int(settings, "fc_preset", FC_PRESET_EXPOSURE);
+	obs_data_set_default_int(settings, "fc_custom_count", (int)ARRAY_LEN(custom));
+	for (int i = 1; i <= FC_MAX_BANDS; i++) {
+		char key[32];
+		const bool known = i <= (int)ARRAY_LEN(custom);
+		snprintf(key, sizeof(key), "fc_c%d_max", i);
+		obs_data_set_default_int(settings, key, known ? custom[i - 1].max : 101);
+		snprintf(key, sizeof(key), "fc_c%d_color", i);
+		obs_data_set_default_int(settings, key, known ? custom[i - 1].color : 0xFFFFFFFF);
+		snprintf(key, sizeof(key), "fc_c%d_grey", i);
+		obs_data_set_default_bool(settings, key, known && custom[i - 1].grey);
+		snprintf(key, sizeof(key), "fc_c%d_label", i);
+		obs_data_set_default_string(settings, key, known ? custom[i - 1].label : "");
+	}
+}
+
+/* Shows the custom band settings only for the custom scheme, and only as many as are used. */
+static bool fc_scheme_props_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	const bool custom = obs_data_get_int(settings, "fc_preset") == FC_PRESET_CUSTOM;
+	const int n = (int)obs_data_get_int(settings, "fc_custom_count");
+	obs_property_set_visible(obs_properties_get(props, "fc_custom_count"), custom);
+	for (int i = 1; i <= FC_MAX_BANDS; i++) {
+		char key[32];
+		snprintf(key, sizeof(key), "fc_c%d", i);
+		obs_property_set_visible(obs_properties_get(props, key), custom && i <= n);
+	}
+	return true;
 }
 
 static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
@@ -317,6 +525,35 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		dstr_cat(&filename_filters, " (*.bmp *.jpg *.jpeg *.tga *.gif *.png);;");
 		dstr_cat(&filename_filters, obs_module_text("FalseColor.Prop.LUTFile.Filter.All"));
 		dstr_cat(&filename_filters, " (*.*)");
+		prop = obs_properties_add_list(props, "fc_preset", obs_module_text("FC.Prop.Preset"),
+					       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Exposure"), FC_PRESET_EXPOSURE);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Clipping"), FC_PRESET_CLIPPING);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Skin"), FC_PRESET_SKIN);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Spectrum"), FC_PRESET_SPECTRUM);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Custom"), FC_PRESET_CUSTOM);
+		obs_property_set_modified_callback(prop, fc_scheme_props_changed);
+
+		prop = obs_properties_add_int_slider(props, "fc_custom_count", obs_module_text("FC.Prop.CustomCount"),
+						     1, FC_MAX_BANDS, 1);
+		obs_property_set_modified_callback(prop, fc_scheme_props_changed);
+		for (int i = 1; i <= FC_MAX_BANDS; i++) {
+			char key[32], desc[96];
+			obs_properties_t *band = obs_properties_create();
+			snprintf(key, sizeof(key), "fc_c%d_max", i);
+			prop = obs_properties_add_int(band, key, obs_module_text("FC.Prop.Band.Max"), 1, 101, 1);
+			obs_property_int_set_suffix(prop, "%");
+			snprintf(key, sizeof(key), "fc_c%d_color", i);
+			obs_properties_add_color(band, key, obs_module_text("FC.Prop.Band.Color"));
+			snprintf(key, sizeof(key), "fc_c%d_grey", i);
+			obs_properties_add_bool(band, key, obs_module_text("FC.Prop.Band.Grey"));
+			snprintf(key, sizeof(key), "fc_c%d_label", i);
+			obs_properties_add_text(band, key, obs_module_text("FC.Prop.Band.Label"), OBS_TEXT_DEFAULT);
+			snprintf(key, sizeof(key), "fc_c%d", i);
+			snprintf(desc, sizeof(desc), "%s %d", obs_module_text("FC.Prop.Band"), i);
+			obs_properties_add_group(props, key, desc, OBS_GROUP_NORMAL, band);
+		}
+
 		obs_properties_add_bool(props, "falsecolor_lut", obs_module_text("FalseColor.Prop.LUT"));
 		obs_properties_add_path(props, "falsecolor_lut_filename", obs_module_text("FalseColor.Prop.LUTFile"),
 					OBS_PATH_FILE, filename_filters.array, NULL);
@@ -450,6 +687,10 @@ static void set_effect_params(struct zb_source *src)
 	} else {
 		/* falsecolor */
 		gs_texture_t *lut = src->falsecolor_lut.texture;
+		if (!lut) {
+			fc_update_scheme_lut(src);
+			lut = src->scheme_lut;
+		}
 		gs_effect_set_bool(gs_effect_get_param_by_name(e, "use_lut"), !!lut);
 		if (lut)
 			gs_effect_set_texture(gs_effect_get_param_by_name(e, "lut"), lut);
@@ -686,10 +927,23 @@ static void fill_rect(float x0, float y0, float x1, float y1, uint32_t color)
 
 /* Table beside the picture: one row per band with its color, luma range, meaning and,
  * when known, the share of the picture in that band. Drawn at x0..x0+tw over the height. */
-static void zb_render_table(float x0, float tw, float height, float total_width, const float *coverage)
+static void fc_band_range(const struct zb_source *src, int b, char *buf, size_t size)
 {
+	const int lo = b == 0 ? 0 : (int)lroundf(src->bands[b - 1].y_max * 100.0f);
+	if (src->bands[b].y_max > 1.0f)
+		snprintf(buf, size, lo >= 100 ? ">100%%" : "%d%%+", lo);
+	else
+		snprintf(buf, size, "%d-%d%%", lo, (int)lroundf(src->bands[b].y_max * 100.0f));
+}
+
+static void zb_render_table(const struct zb_source *src, float x0, float tw, float height, float total_width,
+			    const float *coverage)
+{
+	const int n = src->n_bands;
+	if (n <= 0)
+		return;
 	const struct text_scale ts = text_scale_from_viewport(total_width, height);
-	const float row_h = height / FC_N_BANDS;
+	const float row_h = height / n;
 	const float row_px = row_h / ts.uy;
 	float font_px = row_px * 0.62f;
 	if (font_px > 20.0f)
@@ -700,28 +954,36 @@ static void zb_render_table(float x0, float tw, float height, float total_width,
 		return; // too small to read
 
 	const float gap = 6.0f * ts.ux;
-	const float sw = row_px * 0.7f * ts.ux; // swatch is square on screen
+	const float sw = fminf(row_px * 0.7f, 22.0f) * ts.ux; // swatch is square on screen
 	const float x_sw = x0 + gap;
 	const float x_range = x_sw + sw + gap;
 	const float x_label = x_range + text_width(&ts, "94-100%", font_px) + gap;
 	const float x_right = x0 + tw - gap;
 
-	for (int b = 0; b < FC_N_BANDS; b++) {
-		const float y_top = (FC_N_BANDS - 1 - b) * row_h; // brightest band on top
+	for (int b = 0; b < n; b++) {
+		const float y_top = (n - 1 - b) * row_h; // brightest band on top
 		const float y_mid = y_top + row_h * 0.5f;
-		const float pad_y = row_h * 0.15f;
+		const float pad_y = fmaxf(row_h * 0.15f, (row_h - sw / ts.ux * ts.uy) * 0.5f);
 		const float share = coverage ? coverage[b] : 0.0f;
 		const bool present = coverage && share >= 0.0005f;
 
 		if (present)
 			fill_rect(x0, y_top, x0 + tw, y_top + row_h, 0xFF1E1E1E);
-		fill_rect(x_sw, y_top + pad_y, x_sw + sw, y_top + row_h - pad_y, fc_bands[b].color);
+		if (src->bands[b].color == FC_GREY) {
+			// a band shown as grey: half dark, half light
+			const float xm = x_sw + sw * 0.5f;
+			fill_rect(x_sw, y_top + pad_y, xm, y_top + row_h - pad_y, 0xFF404040);
+			fill_rect(xm, y_top + pad_y, x_sw + sw, y_top + row_h - pad_y, 0xFFB0B0B0);
+		} else {
+			fill_rect(x_sw, y_top + pad_y, x_sw + sw, y_top + row_h - pad_y, src->bands[b].color);
+		}
 
 		const uint32_t text_color = !coverage || present ? 0xFFE6E6E6 : 0xFF707070;
-		text_draw(&ts, fc_bands[b].range, x_range, y_mid, font_px, text_color, TEXT_ALIGN_LEFT,
+		char range[24];
+		fc_band_range(src, b, range, sizeof(range));
+		text_draw(&ts, range, x_range, y_mid, font_px, text_color, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+		text_draw(&ts, src->bands[b].label, x_label, y_mid, font_px, text_color, TEXT_ALIGN_LEFT,
 			  TEXT_VALIGN_MIDDLE);
-		text_draw(&ts, obs_module_text(fc_bands[b].label_key), x_label, y_mid, font_px, text_color,
-			  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
 		if (coverage) {
 			char pct[16];
 			snprintf(pct, sizeof(pct), "%.1f%%", share * 100.0f);
@@ -730,7 +992,7 @@ static void zb_render_table(float x0, float tw, float height, float total_width,
 	}
 
 	// thin separators between rows
-	for (int b = 1; b < FC_N_BANDS; b++)
+	for (int b = 1; b < n; b++)
 		fill_rect(x0, b * row_h - 0.5f * ts.uy, x0 + tw, b * row_h + 0.5f * ts.uy, 0xFF2A2A2A);
 }
 
@@ -764,7 +1026,7 @@ static void zbs_render(void *data, gs_effect_t *effect)
 		if (zb_has_table(&src->zb)) {
 			const float tw = cy * 3.0f / 4.0f;
 			const float *cov = src->has_coverage ? src->coverage[src->w_coverage ^ 1] : NULL;
-			zb_render_table((float)cx, tw, (float)cy, cx + tw, cov);
+			zb_render_table(&src->zb, (float)cx, tw, (float)cy, cx + tw, cov);
 		}
 	}
 
@@ -798,7 +1060,7 @@ static void zbf_render(void *data, gs_effect_t *effect)
 		zb_render_key(&src->zb, draw, cx, cy);
 		if (zb_has_table(&src->zb)) {
 			const float tw = cy * 3.0f / 4.0f;
-			zb_render_table((float)cx, tw, (float)cy, cx + tw, NULL);
+			zb_render_table(&src->zb, (float)cx, tw, (float)cy, cx + tw, NULL);
 		}
 	}
 
