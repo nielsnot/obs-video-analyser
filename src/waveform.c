@@ -4,6 +4,7 @@
 #include <graphics/matrix4.h>
 #include "common.h"
 #include "util.h"
+#include "text-render.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -18,6 +19,16 @@ static const char *prof_draw_graticule_name = "graticule";
 #endif // ! ENABLE_PROFILE
 
 #define WV_SIZE 256
+
+enum scale_labels_e {
+	SCALE_NONE = 0,
+	SCALE_PERCENT = 1,
+	SCALE_IRE = 2,
+	SCALE_8BIT = 3,
+	SCALE_10BIT = 4, // legal range, 64 at black and 940 at white
+};
+
+#define ZOOM_MAX 8.0f
 
 #define DISP_OVERLAY 0
 #define DISP_STACK 1
@@ -55,6 +66,10 @@ struct wvs_source
 	uint32_t components;
 	int intensity;
 	int graticule_lines, graticule_lines_prev;
+	int scale_labels; // scale_labels_e
+
+	// vertical zoom with the mouse wheel; zoom_off is the top of the view in trace units
+	float zoom, zoom_off;
 };
 
 static void wvs_update(void *, obs_data_t *);
@@ -72,6 +87,7 @@ static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, wvs_surface_cb, src);
+	src->zoom = 1.0f;
 
 	obs_enter_graphics();
 	src->effect = create_effect_from_module_file("waveform.effect");
@@ -115,6 +131,7 @@ static void wvs_update(void *data, obs_data_t *settings)
 		src->intensity = 1;
 
 	src->graticule_lines = (int)obs_data_get_int(settings, "graticule_lines");
+	src->scale_labels = (int)obs_data_get_int(settings, "scale_labels");
 }
 
 static void wvs_get_defaults(obs_data_t *settings)
@@ -123,6 +140,7 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "intensity", 51);
 	obs_data_set_default_int(settings, "components", COMP_RGB);
 	obs_data_set_default_int(settings, "graticule_lines", 5);
+	obs_data_set_default_int(settings, "scale_labels", SCALE_PERCENT);
 }
 
 static bool components_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
@@ -175,6 +193,14 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("Graticule.Step.25"), 4);
 	obs_property_list_add_int(prop, obs_module_text("Graticule.Step.20"), 5);
 	obs_property_list_add_int(prop, obs_module_text("Graticule.Step.10"), 10);
+
+	prop = obs_properties_add_list(props, "scale_labels", obs_module_text("WV.Prop.Scale"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("None"), SCALE_NONE);
+	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.Percent"), SCALE_PERCENT);
+	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.IRE"), SCALE_IRE);
+	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.8bit"), SCALE_8BIT);
+	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.10bit"), SCALE_10BIT);
 
 	return props;
 }
@@ -397,6 +423,86 @@ static void render_waveform(struct wvs_source *src)
 		gs_draw_sprite(src->tex_wv, 0, w, h);
 }
 
+static inline bool zoom_active(const struct wvs_source *src)
+{
+	return src->zoom > 1.001f && src->display != DISP_STACK;
+}
+
+static const char *scale_label(int scale, float level, char *buf, size_t size)
+{
+	switch (scale) {
+	case SCALE_PERCENT:
+		snprintf(buf, size, "%d%%", (int)lroundf(level * 100.0f));
+		break;
+	case SCALE_IRE:
+		snprintf(buf, size, "%d", (int)lroundf(level * 100.0f));
+		break;
+	case SCALE_8BIT:
+		snprintf(buf, size, "%d", (int)lroundf(level * 255.0f));
+		break;
+	case SCALE_10BIT:
+		snprintf(buf, size, "%d", (int)lroundf(64.0f + level * 876.0f));
+		break;
+	default:
+		buf[0] = 0;
+	}
+	return buf;
+}
+
+/* Values beside the graticule lines, drawn on the left edge so they don't change the layout. */
+static void wvs_render_scale(struct wvs_source *src, float width, float height)
+{
+	if (src->scale_labels == SCALE_NONE || src->graticule_lines <= 0)
+		return;
+
+	const struct text_scale ts = text_scale_from_viewport(width, height);
+	const bool stack = src->display == DISP_STACK;
+	const int n_stack = stack ? (int)n_components(src) : 1;
+	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
+	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
+	const float px = 11.0f;
+	const float pad = 3.0f * ts.ux;
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	for (int k = 0; k < n_stack; k++) {
+		const float base = (float)(WV_SIZE * k);
+		for (int i = 0; i <= src->graticule_lines; i++) {
+			const float level = 1.0f - (float)i / src->graticule_lines; // top line is white
+			const float y = base + (WV_SIZE * (float)i / src->graticule_lines - off) * zoom;
+			if (y < base - 1.0f || y > base + WV_SIZE + 1.0f)
+				continue; // outside the zoomed view
+			char buf[16];
+			scale_label(src->scale_labels, level, buf, sizeof(buf));
+			const float tw = text_width(&ts, buf, px);
+			// keep labels inside the trace area
+			int valign = TEXT_VALIGN_MIDDLE;
+			if (y - px * 0.5f * ts.uy < base)
+				valign = TEXT_VALIGN_TOP;
+			else if (y + px * 0.5f * ts.uy > base + WV_SIZE)
+				valign = TEXT_VALIGN_BOTTOM;
+			const float y0 = valign == TEXT_VALIGN_TOP      ? y
+					 : valign == TEXT_VALIGN_BOTTOM ? y - px * ts.uy
+									: y - px * 0.5f * ts.uy;
+			gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xA0000000);
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				gs_vertex2f(0.0f, y0);
+				gs_vertex2f(tw + pad * 2.0f, y0);
+				gs_vertex2f(0.0f, y0 + px * ts.uy);
+				gs_vertex2f(tw + pad * 2.0f, y0 + px * ts.uy);
+				gs_render_stop(GS_TRISTRIP);
+			}
+			text_draw(&ts, buf, pad, y, px, 0xE0FFD060, TEXT_ALIGN_LEFT, valign);
+		}
+	}
+
+	if (zoom_active(src)) {
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%.1fx", src->zoom);
+		text_draw(&ts, buf, width - pad, pad, px, 0xE0FFFFFF, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	}
+}
+
 static void wvs_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -408,6 +514,19 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	PROFILE_START(prof_render_name);
 
 	cm_render_target(&src->cm);
+
+	const bool zoomed = zoom_active(src);
+	if (zoomed) {
+		// y' = (y - off) * zoom; the dock's viewport clips what falls outside
+		struct matrix4 tr = {
+			{.ptr = {1.0f, 0.0f, 0.0f, 0.0f}},
+			{.ptr = {0.0f, src->zoom, 0.0f, 0.0f}},
+			{.ptr = {0.0f, 0.0f, 1.0f, 0.0f}},
+			{.ptr = {0.0f, -src->zoom_off * src->zoom, 0.0f, 1.0f}},
+		};
+		gs_matrix_push();
+		gs_matrix_mul(&tr);
+	}
 
 	PROFILE_START(prof_draw_name);
 	if (src->tex_buf[src->r_tex_buf]) {
@@ -426,7 +545,40 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	}
 	PROFILE_END(prof_draw_graticule_name);
 
+	if (zoomed)
+		gs_matrix_pop();
+
+	wvs_render_scale(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
+
 	PROFILE_END(prof_render_name);
+}
+
+/* Wheel zooms the trace vertically around the pointer, e.g. into the blacks; zooming out to 1x resets. */
+static void wvs_mouse_wheel(void *data, const struct obs_mouse_event *event, int x_delta, int y_delta)
+{
+	UNUSED_PARAMETER(x_delta);
+	struct wvs_source *src = data;
+	if (src->display == DISP_STACK || !y_delta)
+		return;
+
+	const float h = (float)WV_SIZE;
+	const float ys = event ? (float)event->y : h * 0.5f; // pointer, in source units
+	const float yd = ys / src->zoom + src->zoom_off;     // trace level under the pointer
+
+	float zoom = src->zoom * (y_delta > 0 ? 1.25f : 0.8f);
+	if (zoom < 1.0f)
+		zoom = 1.0f;
+	if (zoom > ZOOM_MAX)
+		zoom = ZOOM_MAX;
+
+	float off = yd - ys / zoom;
+	if (off < 0.0f)
+		off = 0.0f;
+	if (off > h - h / zoom)
+		off = h - h / zoom;
+
+	src->zoom = zoom;
+	src->zoom_off = zoom > 1.001f ? off : 0.0f;
 }
 
 static void wvs_tick(void *data, float second)
@@ -440,7 +592,7 @@ static void wvs_tick(void *data, float second)
 const struct obs_source_info colormonitor_waveform = {
 	.id = ID_PREFIX "waveform_source",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION,
 	.get_name = wvs_get_name,
 	.create = wvs_create,
 	.destroy = wvs_destroy,
@@ -452,4 +604,5 @@ const struct obs_source_info colormonitor_waveform = {
 	.enum_active_sources = cm_enum_sources,
 	.video_render = wvs_render,
 	.video_tick = wvs_tick,
+	.mouse_wheel = wvs_mouse_wheel,
 };
