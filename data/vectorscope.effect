@@ -38,6 +38,13 @@ float4 PSDrawGraticule(VertInOut vert_in) : TARGET
 	return float4(color.xyz, color.a*a);
 }
 
+// Snapshot reference in one tint over the live trace.
+float4 PSDrawRef(VertInOut vert_in) : TARGET
+{
+	float r = min(image.Sample(def_sampler, vert_in.uv).x * intensity, 1.0);
+	return float4(1.0, 0.35, 0.85, r * 0.75);
+}
+
 technique Draw
 {
 	pass
@@ -53,5 +60,14 @@ technique DrawGraticule
 	{
 		vertex_shader = VSDefault(vert_in);
 		pixel_shader  = PSDrawGraticule(vert_in);
+	}
+}
+
+technique DrawRef
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawRef(vert_in);
 	}
 }

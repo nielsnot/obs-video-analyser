@@ -126,6 +126,52 @@ float4 PSDrawOverlayYRGB(VertInOut vert_in) : TARGET
 	return float4(max(rgb, float3(y, y, y)), 1.0);
 }
 
+// Snapshot reference, drawn over the live trace in one tint.
+// ref_mode: 0 overlay, 1 stack, 2 parade; ref_n: number of components; ref_yrgb: luma in .w
+uniform texture2d ref_image;
+uniform float ref_mode = 0.0;
+uniform float ref_n = 1.0;
+uniform float ref_yrgb = 0.0;
+
+float ref_channel(float4 s, int i, int n)
+{
+	if (ref_yrgb > 0.5) {
+		if (i == 0)
+			return s.w;
+		return s[i - 1];
+	}
+	if (n == 2) {
+		if (i == 0)
+			return s.x;
+		return s.z;
+	}
+	if (n >= 3)
+		return s[i];
+	return max(s.x, max(s.y, s.z));
+}
+
+float4 PSDrawRef(VertInOut vert_in) : TARGET
+{
+	int n = int(ref_n + 0.5);
+	float2 uv = vert_in.uv;
+	int i = 0;
+	if (ref_mode > 1.5 && n > 1) {
+		i = min(int(uv.x * n), n - 1);
+		uv.x = uv.x * n - i;
+	} else if (ref_mode > 0.5 && n > 1) {
+		i = min(int(uv.y * n), n - 1);
+		uv.y = uv.y * n - i;
+	}
+	float4 s = ref_image.Sample(def_sampler, uv);
+	float r;
+	if (ref_mode < 0.5 || n <= 1)
+		r = max(max(s.x, s.y), max(s.z, ref_yrgb > 0.5 ? s.w : 0.0));
+	else
+		r = ref_channel(s, i, n);
+	r = min(r * intensity, 1.0);
+	return float4(1.0, 0.35, 0.85, r * 0.75);
+}
+
 technique DrawOverlay
 {
 	pass
@@ -195,5 +241,14 @@ technique DrawOverlayYRGB
 	{
 		vertex_shader = VSDefault(vert_in);
 		pixel_shader  = PSDrawOverlayYRGB(vert_in);
+	}
+}
+
+technique DrawRef
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawRef(vert_in);
 	}
 }

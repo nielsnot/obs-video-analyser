@@ -70,6 +70,15 @@ struct wvs_source
 
 	// vertical zoom with the mouse wheel; zoom_off is the top of the view in trace units
 	float zoom, zoom_off;
+
+	// snapshot reference, shown over the live trace while comparing
+	volatile bool want_snapshot;
+	volatile bool compare;
+	uint8_t *ref_buf;
+	uint32_t ref_width;
+	bool ref_alpha;
+	bool ref_dirty;
+	gs_texture_t *tex_ref;
 };
 
 static void wvs_update(void *, obs_data_t *);
@@ -81,6 +90,17 @@ static const char *wvs_get_name(void *unused)
 	return obs_module_text("Waveform");
 }
 
+static void wvs_snapshot_cb(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	((struct wvs_source *)data)->want_snapshot = true;
+}
+
+static void wvs_compare_cb(void *data, calldata_t *cd)
+{
+	((struct wvs_source *)data)->compare = calldata_bool(cd, "on");
+}
+
 static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct wvs_source *src = bzalloc(sizeof(struct wvs_source));
@@ -88,6 +108,10 @@ static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, wvs_surface_cb, src);
 	src->zoom = 1.0f;
+
+	proc_handler_t *ph = obs_source_get_proc_handler(source);
+	proc_handler_add(ph, "void va_snapshot()", wvs_snapshot_cb, src);
+	proc_handler_add(ph, "void va_set_compare(in bool on)", wvs_compare_cb, src);
 
 	obs_enter_graphics();
 	src->effect = create_effect_from_module_file("waveform.effect");
@@ -104,8 +128,10 @@ static void wvs_destroy(void *data)
 
 	obs_enter_graphics();
 	gs_texture_destroy(src->tex_wv);
+	gs_texture_destroy(src->tex_ref);
 	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
 	obs_leave_graphics();
+	bfree(src->ref_buf);
 
 	cm_destroy(&src->cm);
 
@@ -392,6 +418,59 @@ static void wvs_render_graticule(struct wvs_source *src)
 	}
 }
 
+/* Takes the trace being shown as the reference; graphics thread. */
+static void wvs_take_snapshot(struct wvs_source *src)
+{
+	src->want_snapshot = false;
+	const uint8_t *cur = src->tex_buf[src->r_tex_buf];
+	const uint32_t width = src->tex_buf_width[src->r_tex_buf];
+	if (!cur || !width)
+		return;
+	const size_t size = (size_t)width * WV_SIZE * 4;
+	if (src->ref_width != width) {
+		bfree(src->ref_buf);
+		src->ref_buf = bmalloc(size);
+		src->ref_width = width;
+	}
+	memcpy(src->ref_buf, cur, size);
+	src->ref_alpha = is_yrgb(src->components);
+	src->ref_dirty = true;
+}
+
+static void render_reference(struct wvs_source *src)
+{
+	if (!src->ref_buf || !src->effect)
+		return;
+	if (src->ref_dirty || !src->tex_ref) {
+		gs_texture_destroy(src->tex_ref);
+		const uint8_t *buf = src->ref_buf;
+		src->tex_ref =
+			gs_texture_create(src->ref_width, WV_SIZE, src->ref_alpha ? GS_BGRA : GS_BGRX, 1, &buf, 0);
+		src->ref_dirty = false;
+	}
+	gs_effect_t *e = src->effect;
+	const int n = (int)n_components(src);
+	int w = src->ref_width, h = WV_SIZE;
+	float mode = 0.0f;
+	if (src->display == DISP_STACK) {
+		h *= n;
+		mode = 1.0f;
+	} else if (src->display == DISP_PARADE) {
+		w *= n;
+		mode = 2.0f;
+	}
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "ref_image"), src->tex_ref);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"), (float)src->intensity);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_mode"), mode);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_n"), (float)n);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_yrgb"), src->ref_alpha ? 1.0f : 0.0f);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	while (gs_effect_loop(e, "DrawRef"))
+		gs_draw_sprite(src->tex_ref, 0, w, h);
+	gs_blend_state_pop();
+}
+
 static void render_waveform(struct wvs_source *src)
 {
 	gs_effect_t *effect = src->effect ? src->effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
@@ -529,10 +608,14 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	}
 
 	PROFILE_START(prof_draw_name);
+	if (src->want_snapshot)
+		wvs_take_snapshot(src);
 	if (src->tex_buf[src->r_tex_buf]) {
 		wvs_set_image(src, src->tex_buf[src->r_tex_buf], src->tex_buf_width[src->r_tex_buf]);
 		render_waveform(src);
 	}
+	if (src->compare && src->ref_buf && src->ref_width == src->tex_buf_width[src->r_tex_buf])
+		render_reference(src);
 	PROFILE_END(prof_draw_name);
 
 	PROFILE_START(prof_draw_graticule_name);

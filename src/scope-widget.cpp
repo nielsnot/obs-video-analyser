@@ -501,6 +501,8 @@ static std::string roi_name_of(const ScopeWidget *w)
 	return roi_name;
 }
 
+static void call_compare(obs_source_t *src, bool on);
+
 void ScopeWidget::addScope(int type, obs_data_t *settings)
 {
 	insertScope(type, settings, nullptr, -1);
@@ -544,6 +546,9 @@ void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, 
 		e->actual_size = obs_data_get_bool(s, "actual_size");
 		signal_handler_connect(obs_source_get_signal_handler(src), "update", focuspeaking_update_cb, e);
 	}
+
+	if (comparing)
+		call_compare(src, true);
 
 	pthread_mutex_lock(&data->mutex);
 	if (index < 0 || index > (int)data->entries.size())
@@ -667,6 +672,8 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	btnRect = make_tool_button(toolbar, "dock.toolbar.rect", "dock.toolbar.rect.tip", true);
 	btnEllipse = make_tool_button(toolbar, "dock.toolbar.ellipse", "dock.toolbar.ellipse.tip", true);
 	btnPin = make_tool_button(toolbar, "dock.toolbar.pin", "dock.toolbar.pin.tip", true);
+	auto *btnSnap = make_tool_button(toolbar, "dock.toolbar.snapshot", "dock.toolbar.snapshot.tip", false);
+	btnCompare = make_tool_button(toolbar, "dock.toolbar.compare", "dock.toolbar.compare.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
 
@@ -696,6 +703,9 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addWidget(btnPin);
 	layout->addWidget(btnUndo);
 	layout->addWidget(btnReset);
+	layout->addSpacing(8);
+	layout->addWidget(btnSnap);
+	layout->addWidget(btnCompare);
 	layout->addStretch(1);
 
 	// The shape buttons behave like radio buttons that can also be switched off.
@@ -705,6 +715,8 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_ELLIPSE : ROI_DRAW_NONE); });
 	connect(btnPin, &QToolButton::clicked, this,
 		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_PIN : ROI_DRAW_NONE); });
+	connect(btnSnap, &QToolButton::clicked, this, &ScopeWidget::takeSnapshot);
+	connect(btnCompare, &QToolButton::toggled, this, &ScopeWidget::setCompare);
 	connect(btnUndo, &QToolButton::clicked, this, &ScopeWidget::undoShape);
 	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
 
@@ -753,6 +765,43 @@ void ScopeWidget::resetShapes()
 		roi_clear_pins(widget_roi(data));
 	else
 		roi_clear_shapes(widget_roi(data));
+}
+
+static void call_compare(obs_source_t *src, bool on)
+{
+	if (!src)
+		return;
+	uint8_t stack[64];
+	calldata_t cd;
+	calldata_init_fixed(&cd, stack, sizeof(stack));
+	calldata_set_bool(&cd, "on", on);
+	proc_handler_call(obs_source_get_proc_handler(src), "va_set_compare", &cd);
+}
+
+/* Freezes the current frame and every scope's trace as the reference to compare with. */
+void ScopeWidget::takeSnapshot()
+{
+	auto snap = [](obs_source_t *src) {
+		if (!src)
+			return;
+		uint8_t stack[64];
+		calldata_t cd;
+		calldata_init_fixed(&cd, stack, sizeof(stack));
+		proc_handler_call(obs_source_get_proc_handler(src), "va_snapshot", &cd);
+	};
+	snap(data->roi);
+	for (scope_entry *e : data->entries)
+		snap(e->src);
+	if (btnCompare && !btnCompare->isChecked())
+		btnCompare->setChecked(true); // show what was just taken
+}
+
+void ScopeWidget::setCompare(bool on)
+{
+	comparing = on;
+	call_compare(data->roi, on);
+	for (scope_entry *e : data->entries)
+		call_compare(e->src, on);
 }
 
 void ScopeWidget::setToolbarVisible(bool visible)

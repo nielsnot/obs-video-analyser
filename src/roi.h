@@ -63,6 +63,12 @@ struct roi_source
 
 	struct cm_mask mask;
 
+	// snapshot reference: the frame at the moment of the snapshot, shown left of a split
+	volatile bool want_snapshot;
+	volatile bool compare;
+	gs_texture_t *ref_tex;
+	uint32_t ref_w, ref_h;
+
 	pthread_mutex_t sources_mutex;
 	DARRAY(struct cm_source *) sources;
 };

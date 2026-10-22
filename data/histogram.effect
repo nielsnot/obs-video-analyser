@@ -109,6 +109,17 @@ float4 PSDrawSat(VertInOut vert_in) : TARGET
 	return float4(0.0, 0.0, 0.0, 1.0);
 }
 
+// Snapshot reference: the outline of the reference histogram (largest channel) in one tint.
+uniform float3 ref_max = {1.0, 1.0, 1.0};
+float4 PSDrawRef(VertInOut vert_in) : TARGET
+{
+	float3 v = image.Sample(def_sampler, float2(vert_in.uv.x, 0.5)).xyz / max(ref_max, float3(1.0, 1.0, 1.0));
+	float m = max(v.x, max(v.y, v.z));
+	if (m >= 1 - vert_in.uv.y)
+		return float4(1.0, 0.35, 0.85, 0.45);
+	return float4(0.0, 0.0, 0.0, 0.0);
+}
+
 technique DrawOverlay
 {
 	pass
@@ -169,5 +180,14 @@ technique DrawSat
 	{
 		vertex_shader = VSDefault(vert_in);
 		pixel_shader  = PSDrawSat(vert_in);
+	}
+}
+
+technique DrawRef
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawRef(vert_in);
 	}
 }

@@ -17,6 +17,8 @@ class ScopeWidget : public NorisQTDisplay {
 	class QToolButton *btnRect = nullptr;
 	class QToolButton *btnEllipse = nullptr;
 	class QToolButton *btnPin = nullptr;
+	class QToolButton *btnCompare = nullptr;
+	bool comparing = false;
 	bool toolbarVisible = true;
 	int drawMode = 0;
 	class QTabBar *tabs = nullptr;
@@ -55,6 +57,8 @@ public slots:
 	void undoShape();
 	void resetShapes();
 	void setToolbarVisible(bool visible);
+	void takeSnapshot();
+	void setCompare(bool on);
 	void moveScope(int tile, int delta);
 	void duplicateScope(int tile);
 	void changeScopeType(int tile, int type);

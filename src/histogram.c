@@ -66,12 +66,23 @@ struct his_source
 	float graticule_horizontal_step;
 	bool graticule_need_update;
 
+	// snapshot reference, shown over the live histogram while comparing
+	volatile bool want_snapshot;
+	volatile bool compare;
+	float *ref_buf; // HI_SIZE x 4 floats, as uploaded
+	struct vec3 ref_max;
+	bool ref_dirty;
+	gs_texture_t *tex_ref;
+
 	// dragging over a hue or saturation histogram sets the ROI qualifier
 	bool dragging;
 	int drag_x0, drag_x1;
 };
 
 static void his_update(void *, obs_data_t *);
+
+static void his_snapshot_cb(void *data, calldata_t *cd);
+static void his_compare_cb(void *data, calldata_t *cd);
 static void his_surface_cb(void *data, struct cm_surface_data *surface_data);
 
 static const char *his_get_name(void *unused)
@@ -90,6 +101,10 @@ static void *his_create(obs_data_t *settings, obs_source_t *source)
 	src->effect = create_effect_from_module_file("histogram.effect");
 	obs_leave_graphics();
 
+	proc_handler_t *ph = obs_source_get_proc_handler(source);
+	proc_handler_add(ph, "void va_snapshot()", his_snapshot_cb, src);
+	proc_handler_add(ph, "void va_set_compare(in bool on)", his_compare_cb, src);
+
 	his_update(src, settings);
 
 	return src;
@@ -101,6 +116,7 @@ static void his_destroy(void *data)
 
 	obs_enter_graphics();
 	gs_texture_destroy(src->tex_hi);
+	gs_texture_destroy(src->tex_ref);
 	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
 	obs_leave_graphics();
 
@@ -108,6 +124,7 @@ static void his_destroy(void *data)
 
 	bfree(src->tex_buf[0]);
 	bfree(src->tex_buf[1]);
+	bfree(src->ref_buf);
 
 	bfree(src);
 }
@@ -707,6 +724,38 @@ static void his_mouse_click(void *data, const struct obs_mouse_event *event, int
 	obs_data_release(d);
 }
 
+static void his_snapshot_cb(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	((struct his_source *)data)->want_snapshot = true;
+}
+
+static void his_compare_cb(void *data, calldata_t *cd)
+{
+	((struct his_source *)data)->compare = calldata_bool(cd, "on");
+}
+
+static void his_render_reference(struct his_source *src)
+{
+	if (!src->ref_buf || !src->effect)
+		return;
+	const uint8_t *buf = (const uint8_t *)src->ref_buf;
+	if (!src->tex_ref)
+		src->tex_ref = gs_texture_create(HI_SIZE, 1, GS_RGBA32F, 1, &buf, GS_DYNAMIC);
+	else if (src->ref_dirty)
+		gs_texture_set_image(src->tex_ref, buf, sizeof(float) * HI_SIZE * 4, false);
+	src->ref_dirty = false;
+
+	gs_effect_t *e = src->effect;
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->tex_ref);
+	gs_effect_set_vec3(gs_effect_get_param_by_name(e, "ref_max"), &src->ref_max);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	while (gs_effect_loop(e, "DrawRef"))
+		gs_draw_sprite(src->tex_ref, 0, HI_SIZE, src->level_height);
+	gs_blend_state_pop();
+}
+
 static void his_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -721,10 +770,23 @@ static void his_render(void *data, gs_effect_t *effect)
 
 	PROFILE_START(prof_draw_name);
 	int r_tex_buf = src->w_tex_buf ^ 1;
+	if (src->want_snapshot) {
+		src->want_snapshot = false;
+		if (src->tex_buf[r_tex_buf]) {
+			if (!src->ref_buf)
+				src->ref_buf = bmalloc(sizeof(float) * HI_SIZE * 4);
+			memcpy(src->ref_buf, src->tex_buf[r_tex_buf], sizeof(float) * HI_SIZE * 4);
+			for (int i = 0; i < 3; i++)
+				src->ref_max.ptr[i] = (float)src->hi_max[r_tex_buf][i];
+			src->ref_dirty = true;
+		}
+	}
 	if (src->tex_buf[r_tex_buf]) {
 		his_set_image(src, src->tex_buf[r_tex_buf], src->hi_max[r_tex_buf]);
 		render_histogram(src);
 	}
+	if (src->compare && src->display != DISP_PARADE && src->display != DISP_STACK)
+		his_render_reference(src);
 	PROFILE_END(prof_draw_name);
 
 	if (src->graticule_need_update) {

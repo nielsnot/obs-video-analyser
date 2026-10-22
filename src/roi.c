@@ -61,6 +61,17 @@ static void cb_get_roi(void *data, calldata_t *cd)
 	calldata_set_ptr(cd, "roi", data);
 }
 
+static void roi_snapshot_cb(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	((struct roi_source *)data)->want_snapshot = true;
+}
+
+static void roi_compare_cb(void *data, calldata_t *cd)
+{
+	((struct roi_source *)data)->compare = calldata_bool(cd, "on");
+}
+
 static void *roi_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct roi_source *src = bzalloc(sizeof(struct roi_source));
@@ -87,6 +98,8 @@ static void *roi_create(obs_data_t *settings, obs_source_t *source)
 
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	proc_handler_add(ph, "void get_roi(out ptr roi)", cb_get_roi, src);
+	proc_handler_add(ph, "void va_snapshot()", roi_snapshot_cb, src);
+	proc_handler_add(ph, "void va_set_compare(in bool on)", roi_compare_cb, src);
 	return src;
 }
 
@@ -98,6 +111,7 @@ static void roi_destroy(void *data)
 
 	obs_enter_graphics();
 	gs_texture_destroy(src->mask_tex);
+	gs_texture_destroy(src->ref_tex);
 	obs_leave_graphics();
 	bfree(src->mask_buf);
 
@@ -568,6 +582,20 @@ static void roi_render(void *data, gs_effect_t *effect)
 	const float h = (float)roi_get_height(src);
 
 	gs_texture_t *tex = gs_texrender_get_texture(src->cm.texrender);
+
+	if (src->want_snapshot && tex) {
+		src->want_snapshot = false;
+		const uint32_t tw = gs_texture_get_width(tex), th = gs_texture_get_height(tex);
+		if (!src->ref_tex || src->ref_w != tw || src->ref_h != th) {
+			gs_texture_destroy(src->ref_tex);
+			src->ref_tex = gs_texture_create(tw, th, gs_texture_get_color_format(tex), 1, NULL, 0);
+			src->ref_w = tw;
+			src->ref_h = th;
+		}
+		if (src->ref_tex)
+			gs_copy_texture(src->ref_tex, tex);
+	}
+
 	if (tex && src->cm.effect) {
 		// Darkens everything outside the shapes and the qualifier.
 		gs_effect_t *dim = src->cm.effect;
@@ -582,6 +610,31 @@ static void roi_render(void *data, gs_effect_t *effect)
 		while (gs_effect_loop(def, "Draw")) {
 			gs_draw_sprite(tex, 0, src->cm.texrender_width, src->cm.texrender_height);
 		}
+	}
+
+	// comparing: the reference frame fills the left half, with a divider line
+	if (src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
+	    src->ref_h == src->cm.texrender_height) {
+		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
+		while (gs_effect_loop(def, "Draw"))
+			gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, src->ref_w / 2, src->ref_h);
+		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFF59D9);
+		const float xm = (float)(src->ref_w / 2);
+		const struct text_scale ts = text_scale_from_viewport(w, h);
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			gs_vertex2f(xm - 1.0f * ts.ux, 0.0f);
+			gs_vertex2f(xm + 1.0f * ts.ux, 0.0f);
+			gs_vertex2f(xm - 1.0f * ts.ux, h);
+			gs_vertex2f(xm + 1.0f * ts.ux, h);
+			gs_render_stop(GS_TRISTRIP);
+		}
+		text_draw(&ts, obs_module_text("ROI.Reference"), xm - 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f, 0xFFFF59D9,
+			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+		text_draw(&ts, obs_module_text("ROI.Live"), xm + 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f, 0xFFFFFFFF,
+			  TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
 	}
 
 	pthread_mutex_lock(&src->shapes_mutex);

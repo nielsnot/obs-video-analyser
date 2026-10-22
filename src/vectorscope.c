@@ -74,6 +74,13 @@ struct vss_source
 	bool hue_ring;
 	volatile int luma_range; // luma_range_e
 
+	// snapshot reference, shown over the live trace while comparing
+	volatile bool want_snapshot;
+	volatile bool compare;
+	uint8_t *ref_buf;
+	bool ref_dirty;
+	gs_texture_t *tex_ref;
+
 	float zoom;
 };
 
@@ -84,6 +91,17 @@ static const char *vss_get_name(void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	return obs_module_text("Vectorscope");
+}
+
+static void vss_snapshot_cb(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	((struct vss_source *)data)->want_snapshot = true;
+}
+
+static void vss_compare_cb(void *data, calldata_t *cd)
+{
+	((struct vss_source *)data)->compare = calldata_bool(cd, "on");
 }
 
 static void *vss_create(obs_data_t *settings, obs_source_t *source)
@@ -114,6 +132,10 @@ static void *vss_create(obs_data_t *settings, obs_source_t *source)
 
 	vss_update(src, settings);
 
+	proc_handler_t *ph = obs_source_get_proc_handler(source);
+	proc_handler_add(ph, "void va_snapshot()", vss_snapshot_cb, src);
+	proc_handler_add(ph, "void va_set_compare(in bool on)", vss_compare_cb, src);
+
 	return src;
 }
 
@@ -123,6 +145,7 @@ static void vss_destroy(void *data)
 
 	obs_enter_graphics();
 	gs_texture_destroy(src->tex_vs);
+	gs_texture_destroy(src->tex_ref);
 	gs_image_file_free(&src->graticule_img);
 	gs_vertexbuffer_destroy(src->graticule_vbuf);
 	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
@@ -132,6 +155,7 @@ static void vss_destroy(void *data)
 
 	bfree(src->tex_buf[0]);
 	bfree(src->tex_buf[1]);
+	bfree(src->ref_buf);
 	bfree(src);
 }
 
@@ -530,6 +554,15 @@ static void vss_render(void *data, gs_effect_t *effect)
 
 	PROFILE_START(prof_draw_name);
 	int r_tex_buf = src->w_tex_buf ^ 1;
+	if (src->want_snapshot) {
+		src->want_snapshot = false;
+		if (src->tex_buf[r_tex_buf]) {
+			if (!src->ref_buf)
+				src->ref_buf = bmalloc(VS_SIZE * VS_SIZE);
+			memcpy(src->ref_buf, src->tex_buf[r_tex_buf], VS_SIZE * VS_SIZE);
+			src->ref_dirty = true;
+		}
+	}
 	if (src->tex_buf[r_tex_buf] && src->effect) {
 		vss_set_image(src, src->tex_buf[r_tex_buf]);
 
@@ -563,6 +596,22 @@ static void vss_render(void *data, gs_effect_t *effect)
 		while (gs_effect_loop(effect, "Draw")) {
 			gs_draw_sprite(src->tex_vs, 0, VS_SIZE, VS_SIZE);
 		}
+	}
+	if (src->compare && src->ref_buf && src->effect) {
+		const uint8_t *buf = src->ref_buf;
+		if (!src->tex_ref)
+			src->tex_ref = gs_texture_create(VS_SIZE, VS_SIZE, GS_R8, 1, &buf, GS_DYNAMIC);
+		else if (src->ref_dirty)
+			gs_texture_set_image(src->tex_ref, buf, VS_SIZE, false);
+		src->ref_dirty = false;
+		gs_effect_t *e = src->effect;
+		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->tex_ref);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"), (float)src->intensity);
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+		while (gs_effect_loop(e, "DrawRef"))
+			gs_draw_sprite(src->tex_ref, 0, VS_SIZE, VS_SIZE);
+		gs_blend_state_pop();
 	}
 	PROFILE_END(prof_draw_name);
 
