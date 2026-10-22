@@ -1,8 +1,10 @@
 #include <obs-module.h>
+#include <math.h>
 #include <util/platform.h>
 #include "plugin-macros.generated.h"
 #include <graphics/matrix4.h>
 #include "common.h"
+#include "roi.h"
 #include "util.h"
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -28,6 +30,12 @@ static const char *prof_draw_name = "draw";
 #define COMP_Y 0x20
 #define COMP_UV 0x50
 #define COMP_YUV (COMP_Y | COMP_UV)
+// Hue and saturation of each pixel, counted in the first channel (the R bit marks it).
+#define COMP_HUE_FLAG 0x100
+#define COMP_SAT_FLAG 0x200
+#define COMP_HUE (COMP_HUE_FLAG | 0x04)
+#define COMP_SAT (COMP_SAT_FLAG | 0x04)
+#define HUE_MIN_CHROMA 8 // greyer pixels have no meaningful hue
 
 #define LEVEL_MODE_NONE 0
 #define LEVEL_MODE_PIXEL 1
@@ -57,6 +65,10 @@ struct his_source
 	int graticule_vertical_lines;
 	float graticule_horizontal_step;
 	bool graticule_need_update;
+
+	// dragging over a hue or saturation histogram sets the ROI qualifier
+	bool dragging;
+	int drag_x0, drag_x1;
 };
 
 static void his_update(void *, obs_data_t *);
@@ -252,6 +264,8 @@ static obs_properties_t *his_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("Luma"), COMP_Y);
 	obs_property_list_add_int(prop, obs_module_text("Chroma"), COMP_UV);
 	obs_property_list_add_int(prop, obs_module_text("YUV"), COMP_YUV);
+	obs_property_list_add_int(prop, obs_module_text("HI.Hue"), COMP_HUE);
+	obs_property_list_add_int(prop, obs_module_text("HI.Saturation"), COMP_SAT);
 
 	// TODO: Disable this property if ROI target is selected.
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
@@ -376,23 +390,62 @@ static inline void his_draw_histogram(struct his_source *src, uint8_t *tex_buf, 
 	const bool calc_g = (src->components & 0x22) ? true : false;
 	const bool calc_r = (src->components & 0x44) ? true : false;
 
-	for (uint32_t y = 0; y < height; y++) {
-		const uint8_t *v = video_data + surface_data->linesize * y;
-		for (uint32_t x = 0; x < width; x++) {
-			const uint8_t b = *v++;
-			const uint8_t g = *v++;
-			const uint8_t r = *v++;
-			const uint8_t a = *v++;
-			if (!a)
-				continue;
-			if (calc_r)
-				dbuf[r * 4 + 0]++;
-			if (calc_g)
-				dbuf[g * 4 + 1]++;
-			if (calc_b)
-				dbuf[b * 4 + 2]++;
+	if (src->components & (COMP_HUE_FLAG | COMP_SAT_FLAG)) {
+		const bool hue = (src->components & COMP_HUE_FLAG) != 0;
+		for (uint32_t y = 0; y < height; y++) {
+			const uint8_t *v = video_data + surface_data->linesize * y;
+			for (uint32_t x = 0; x < width; x++, v += 4) {
+				if (!v[3])
+					continue;
+				const int b = v[0], g = v[1], r = v[2];
+				const int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+				const int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+				const int c = mx - mn;
+				int bin;
+				if (hue) {
+					if (c < HUE_MIN_CHROMA)
+						continue;
+					float h;
+					if (mx == r)
+						h = (float)(g - b) / c;
+					else if (mx == g)
+						h = (float)(b - r) / c + 2.0f;
+					else
+						h = (float)(r - g) / c + 4.0f;
+					if (h < 0.0f)
+						h += 6.0f;
+					bin = (int)(h * (HI_SIZE / 6.0f));
+				} else {
+					// HSL saturation
+					const int l2 = mx + mn; // twice the lightness, 0..510
+					const int denom = l2 <= 255 ? l2 : 510 - l2;
+					bin = denom > 0 ? c * 255 / denom : 0;
+				}
+				if (bin < 0)
+					bin = 0;
+				if (bin >= HI_SIZE)
+					bin = HI_SIZE - 1;
+				dbuf[bin * 4 + 0]++;
+			}
 		}
-	}
+	} else
+		for (uint32_t y = 0; y < height; y++) {
+			const uint8_t *v = video_data + surface_data->linesize * y;
+			for (uint32_t x = 0; x < width; x++) {
+				const uint8_t b = *v++;
+				const uint8_t g = *v++;
+				const uint8_t r = *v++;
+				const uint8_t a = *v++;
+				if (!a)
+					continue;
+				if (calc_r)
+					dbuf[r * 4 + 0]++;
+				if (calc_g)
+					dbuf[g * 4 + 1]++;
+				if (calc_b)
+					dbuf[b * 4 + 2]++;
+			}
+		}
 
 	if (src->level_fixed_value > 0)
 		his_fix_max_level(hi_max, src->level_fixed_value);
@@ -528,7 +581,9 @@ static inline void render_histogram(struct his_source *src)
 	int w = HI_SIZE;
 	int h = src->level_height;
 	int n = n_components(src);
-	if (src->effect)
+	if (src->effect && (src->components & (COMP_HUE_FLAG | COMP_SAT_FLAG))) {
+		name = (src->components & COMP_HUE_FLAG) ? "DrawHue" : "DrawSat";
+	} else if (src->effect)
 		switch (src->display) {
 		case DISP_STACK:
 			name = n == 3 ? "DrawStack" : n == 2 ? "DrawStackUV" : "DrawOverlay";
@@ -545,6 +600,111 @@ static inline void render_histogram(struct his_source *src)
 	while (gs_effect_loop(effect, name)) {
 		gs_draw_sprite(src->tex_hi, 0, w, h);
 	}
+}
+
+static void fill_band(float x0, float x1, float h, uint32_t color)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(x0, 0.0f);
+		gs_vertex2f(x1, 0.0f);
+		gs_vertex2f(x0, h);
+		gs_vertex2f(x1, h);
+		gs_render_stop(GS_TRISTRIP);
+	}
+}
+
+static inline bool is_hue_or_sat(const struct his_source *src)
+{
+	return (src->components & (COMP_HUE_FLAG | COMP_SAT_FLAG)) != 0;
+}
+
+/* Shows the qualifier range set on the ROI, and the range being dragged. */
+static void his_render_selection(struct his_source *src)
+{
+	const float h = (float)src->level_height;
+	if (src->dragging) {
+		const int a = src->drag_x0 < src->drag_x1 ? src->drag_x0 : src->drag_x1;
+		const int b = src->drag_x0 < src->drag_x1 ? src->drag_x1 : src->drag_x0;
+		fill_band((float)a, (float)b, h, 0x40FFFFFF);
+		return;
+	}
+	if (!cm_is_roi(&src->cm) || !src->cm.roi->mask.qualifier)
+		return;
+	const struct cm_mask *m = &src->cm.roi->mask;
+	if (src->components & COMP_HUE_FLAG) {
+		if (m->hue_half_width >= 180.0f)
+			return;
+		const float c = m->hue_center / 360.0f * HI_SIZE;
+		const float w = m->hue_half_width / 360.0f * HI_SIZE;
+		float a = c - w, b = c + w;
+		// the hue axis wraps around
+		if (a < 0.0f) {
+			fill_band(a + HI_SIZE, (float)HI_SIZE, h, 0x30FFFFFF);
+			a = 0.0f;
+		}
+		if (b > HI_SIZE) {
+			fill_band(0.0f, b - HI_SIZE, h, 0x30FFFFFF);
+			b = (float)HI_SIZE;
+		}
+		fill_band(a, b, h, 0x30FFFFFF);
+	} else if (m->sat_min > 0.0f || m->sat_max < 1.0f) {
+		fill_band(m->sat_min * HI_SIZE, m->sat_max * HI_SIZE, h, 0x30FFFFFF);
+	}
+}
+
+static void his_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
+{
+	struct his_source *src = data;
+	if (!mouse_leave && event && src->dragging)
+		src->drag_x1 = event->x;
+}
+
+/* Drag over a hue or saturation histogram to qualify that range on the dock's ROI;
+ * a click without dragging clears that part of the qualifier. */
+static void his_mouse_click(void *data, const struct obs_mouse_event *event, int32_t type, bool mouse_up,
+			    uint32_t click_count)
+{
+	UNUSED_PARAMETER(click_count);
+	struct his_source *src = data;
+	if (type != MOUSE_LEFT || !is_hue_or_sat(src) || !cm_is_roi(&src->cm))
+		return;
+
+	if (!mouse_up) {
+		src->dragging = true;
+		src->drag_x0 = src->drag_x1 = event->x;
+		return;
+	}
+	if (!src->dragging)
+		return;
+	src->dragging = false;
+	src->drag_x1 = event->x;
+
+	int a = src->drag_x0 < src->drag_x1 ? src->drag_x0 : src->drag_x1;
+	int b = src->drag_x0 < src->drag_x1 ? src->drag_x1 : src->drag_x0;
+	if (a < 0)
+		a = 0;
+	if (b > HI_SIZE)
+		b = HI_SIZE;
+	const bool clear = b - a < 2;
+
+	obs_data_t *d = obs_data_create();
+	obs_data_set_bool(d, "qual_enable", true);
+	if (src->components & COMP_HUE_FLAG) {
+		const int center = (int)lroundf((a + b) * 0.5f / HI_SIZE * 360.0f);
+		int width = (int)lroundf((float)(b - a) / HI_SIZE * 360.0f);
+		if (width < 4)
+			width = 4;
+		obs_data_set_int(d, "qual_hue_center", clear ? 0 : center % 360);
+		obs_data_set_int(d, "qual_hue_width", clear ? 360 : width);
+	} else {
+		obs_data_set_int(d, "qual_sat_min", clear ? 0 : a * 100 / HI_SIZE);
+		obs_data_set_int(d, "qual_sat_max", clear ? 100 : (b * 100 + HI_SIZE - 1) / HI_SIZE);
+	}
+	obs_source_update(src->cm.roi_src, d);
+	obs_data_release(d);
 }
 
 static void his_render(void *data, gs_effect_t *effect)
@@ -573,6 +733,8 @@ static void his_render(void *data, gs_effect_t *effect)
 	}
 	if (src->graticule_line_vbuf)
 		his_render_graticule(src);
+	if (is_hue_or_sat(src))
+		his_render_selection(src);
 
 	PROFILE_END(prof_render_name);
 }
@@ -580,7 +742,7 @@ static void his_render(void *data, gs_effect_t *effect)
 const struct obs_source_info colormonitor_histogram = {
 	.id = ID_PREFIX "histogram_source",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION,
 	.get_name = his_get_name,
 	.create = his_create,
 	.destroy = his_destroy,
@@ -589,6 +751,8 @@ const struct obs_source_info colormonitor_histogram = {
 	.get_properties = his_get_properties,
 	.get_width = his_get_width,
 	.get_height = his_get_height,
+	.mouse_click = his_mouse_click,
+	.mouse_move = his_mouse_move,
 	.enum_active_sources = cm_enum_sources,
 	.video_render = his_render,
 	.video_tick = cm_tick,

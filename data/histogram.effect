@@ -84,6 +84,31 @@ float4 PSDrawParadeUV(VertInOut vert_in) : TARGET
 	return float4(color[i].xyz*r, 1.0);
 }
 
+// Hue histogram: each column in the color of its hue.
+float3 hue_color(float h)
+{
+	float3 k = abs(frac(float3(h, h, h) + float3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - float3(3.0, 3.0, 3.0));
+	return saturate(k - float3(1.0, 1.0, 1.0));
+}
+
+float4 PSDrawHue(VertInOut vert_in) : TARGET
+{
+	float r = image.Sample(def_sampler, float2(vert_in.uv.x, 0.5)).x;
+	if (r >= (1 - vert_in.uv.y) * hi_max.x)
+		return float4(hue_color(vert_in.uv.x), 1.0);
+	return float4(hue_color(vert_in.uv.x) * 0.12, 1.0);
+}
+
+// Saturation histogram: from grey on the left to full color on the right.
+float4 PSDrawSat(VertInOut vert_in) : TARGET
+{
+	float r = image.Sample(def_sampler, float2(vert_in.uv.x, 0.5)).x;
+	float3 c = lerp(float3(0.55, 0.55, 0.55), float3(1.0, 0.55, 0.15), vert_in.uv.x);
+	if (r >= (1 - vert_in.uv.y) * hi_max.x)
+		return float4(c, 1.0);
+	return float4(0.0, 0.0, 0.0, 1.0);
+}
+
 technique DrawOverlay
 {
 	pass
@@ -126,5 +151,23 @@ technique DrawParadeUV
 	{
 		vertex_shader = VSDefault(vert_in);
 		pixel_shader  = PSDrawParadeUV(vert_in);
+	}
+}
+
+technique DrawHue
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawHue(vert_in);
+	}
+}
+
+technique DrawSat
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawSat(vert_in);
 	}
 }
