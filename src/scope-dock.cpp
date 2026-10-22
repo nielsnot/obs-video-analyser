@@ -33,6 +33,7 @@ void scope_dock_add(const char *name, obs_data_t *props, bool show)
 
 	// The dock holds a slim selection toolbar above the scope display.
 	QWidget *container = new QWidget(main_window);
+	container->setObjectName("VideoAnalyserDock");
 	auto *layout = new QVBoxLayout(container);
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);

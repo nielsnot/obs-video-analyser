@@ -1,5 +1,5 @@
 '''
-Test Color Monitor plugin
+Test Video Analyser plugin
 '''
 
 import time
@@ -7,7 +7,7 @@ import unittest
 from onsdriver import obstest, obsui
 
 
-class ColorMonitorTest(obstest.OBSTest):
+class VideoAnalyserTest(obstest.OBSTest):
     'Test plain features of OBS Studio'
 
     def setUp(self, config_name='saved-config', run=True):
@@ -37,7 +37,7 @@ class ColorMonitorTest(obstest.OBSTest):
         ui.request('menu-trigger', {
             'path': [
                 {"text": "&Tools"},
-                {"text": "New Scope Dock...", "objectName": "actionScopeDockNew"},
+                {"text": "New Video Analyser Dock...", "objectName": "actionScopeDockNew"},
             ]
         })
 
@@ -54,6 +54,7 @@ class ColorMonitorTest(obstest.OBSTest):
 
         dock_path = [
             {"className": "OBSDock"},
+            {"objectName": "VideoAnalyserDock"},
             {"className": "ScopeWidget"},
         ]
 
