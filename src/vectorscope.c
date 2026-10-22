@@ -34,6 +34,16 @@ static const char *prof_draw_graticule_name = "graticule";
 #define RGB2U_709(r, g, b) ((-102 * (r) - 346 * (g) + 450 * (b)) / 1024 + 128)
 #define RGB2V_709(r, g, b) ((+450 * (r) - 408 * (g) - 40 * (b)) / 1024 + 128)
 
+/* Restrict the vectorscope to dark, middle or bright pixels, like a Lows / Mids / Highs split. */
+enum luma_range_e {
+	luma_range_all = 0,
+	luma_range_lows = 1,
+	luma_range_mids = 2,
+	luma_range_highs = 3,
+};
+#define LUMA_LOW_MAX 85   // below one third of the range
+#define LUMA_HIGH_MIN 170 // above two thirds of the range
+
 enum color_type {
 	color_type_white = 0,
 	color_type_uv,
@@ -61,6 +71,8 @@ struct vss_source
 	int graticule_cs;
 	bool update_graticule;
 	bool ring_scale;
+	bool hue_ring;
+	volatile int luma_range; // luma_range_e
 
 	float zoom;
 };
@@ -148,6 +160,8 @@ static void vss_update(void *data, obs_data_t *settings)
 	}
 
 	src->ring_scale = obs_data_get_bool(settings, "ring_scale");
+	src->hue_ring = obs_data_get_bool(settings, "hue_ring");
+	src->luma_range = (int)obs_data_get_int(settings, "luma_range");
 
 	int graticule_skintone_color = (int)obs_data_get_int(settings, "graticule_skintone_color") & 0xFFFFFF;
 	if (graticule_skintone_color != src->graticule_skintone_color) {
@@ -194,7 +208,15 @@ static obs_properties_t *vss_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("Green"), 2);
 	obs_property_list_add_int(prop, obs_module_text("Green, IQ"), 2 + GRATICULES_IQ);
 
+	prop = obs_properties_add_list(props, "luma_range", obs_module_text("VS.Prop.LumaRange"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.All"), luma_range_all);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Lows"), luma_range_lows);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Mids"), luma_range_mids);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Highs"), luma_range_highs);
+
 	obs_properties_add_bool(props, "ring_scale", obs_module_text("VS.Prop.RingScale"));
+	obs_properties_add_bool(props, "hue_ring", obs_module_text("VS.Prop.HueRing"));
 
 	obs_properties_add_color(props, "graticule_skintone_color", obs_module_text("Skin tone color"));
 
@@ -220,7 +242,7 @@ static uint32_t vss_get_height(void *data)
 	return src->cm.bypass ? cm_bypass_get_height(&src->cm) : VS_SIZE;
 }
 
-static inline void vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *surface_data)
+static inline void vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *surface_data, int luma_range)
 {
 	for (int i = 0; i < VS_SIZE * VS_SIZE; i++)
 		dbuf[i] = 0;
@@ -232,11 +254,15 @@ static inline void vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *s
 	for (uint32_t y = 0; y < height; y++) {
 		for (uint32_t x = 0; x < width; x++) {
 			const uint8_t u = *vd++;
-			/*            b */ vd++;
+			const uint8_t luma = *vd++;
 			const uint8_t v = *vd++;
 			const uint8_t a = *vd++;
 			if (!a)
 				continue; // outside the selection mask
+			if ((luma_range == luma_range_lows && luma >= LUMA_LOW_MAX) ||
+			    (luma_range == luma_range_mids && (luma < LUMA_LOW_MAX || luma >= LUMA_HIGH_MIN)) ||
+			    (luma_range == luma_range_highs && luma < LUMA_HIGH_MIN))
+				continue;
 			uint8_t *c = dbuf + (u + VS_SIZE * (255 - v));
 			if (*c < 255)
 				++*c;
@@ -264,7 +290,7 @@ static void vss_surface_cb(void *data, struct cm_surface_data *surface_data)
 		src->tex_buf[src->w_tex_buf] = bzalloc(VS_SIZE * VS_SIZE);
 
 	PROFILE_START(prof_draw_vectorscope_name);
-	vss_draw_vectorscope(src->tex_buf[src->w_tex_buf], surface_data);
+	vss_draw_vectorscope(src->tex_buf[src->w_tex_buf], surface_data, src->luma_range);
 	PROFILE_END(prof_draw_vectorscope_name);
 
 	src->tex_cs[src->w_tex_buf] = surface_data->colorspace;
@@ -438,6 +464,43 @@ static void draw_ring_scale(uint32_t color)
 	}
 }
 
+/* A ring around the scope colored with the hue found at each angle, so directions read at a glance. */
+static void draw_hue_ring(int colorspace)
+{
+	const float cx = 127.5f, cy = 127.5f;
+	const float r0 = 123.0f, r1 = 127.5f;
+	const int n_seg = 180;
+	// U/V to R'G'B' for the matrix in use
+	const float kr_v = colorspace == 1 ? 1.402f : 1.5748f;
+	const float kg_u = colorspace == 1 ? 0.3441f : 0.1873f;
+	const float kg_v = colorspace == 1 ? 0.7141f : 0.4681f;
+	const float kb_u = colorspace == 1 ? 1.772f : 1.8556f;
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF); // vertex colors as they are
+	while (gs_effect_loop(solid, "SolidColored")) {
+		gs_render_start(true);
+		for (int i = 0; i <= n_seg; i++) {
+			const float a = (float)i * 2.0f * (float)M_PI / n_seg;
+			const float u = 0.3f * cosf(a), v = 0.3f * sinf(a);
+			float r = 0.5f + kr_v * v;
+			float g = 0.5f - kg_u * u - kg_v * v;
+			float b = 0.5f + kb_u * u;
+			float mn = fminf(r, fminf(g, b)), mx = fmaxf(r, fmaxf(g, b));
+			r = (r - mn) / (mx - mn);
+			g = (g - mn) / (mx - mn);
+			b = (b - mn) / (mx - mn);
+			const uint32_t color = 0xC0000000 | ((uint32_t)(b * 255.0f) << 16) |
+					       ((uint32_t)(g * 255.0f) << 8) | (uint32_t)(r * 255.0f);
+			gs_color(color);
+			gs_vertex2f(cx + r0 * cosf(a), cy - r0 * sinf(a));
+			gs_color(color);
+			gs_vertex2f(cx + r1 * cosf(a), cy - r1 * sinf(a));
+		}
+		gs_render_stop(GS_TRISTRIP);
+	}
+}
+
 static void vss_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -520,6 +583,8 @@ static void vss_render(void *data, gs_effect_t *effect)
 			gs_draw(GS_LINES, 0, 0);
 		}
 	}
+	if (src->hue_ring)
+		draw_hue_ring(src->tex_cs[r_tex_buf]);
 	if (src->ring_scale)
 		draw_ring_scale(src->graticule ? (uint32_t)src->graticule_color : 0x80FFBF00);
 	PROFILE_END(prof_draw_graticule_name);

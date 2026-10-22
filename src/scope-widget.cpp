@@ -612,6 +612,28 @@ void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
 		connect(act, &QAction::triggered, this, [this, t]() { addScope(t); });
 	}
+
+	menu->addSeparator();
+
+	// Three vectorscopes for the dark, middle and bright parts of the picture.
+	QAction *act = menu->addAction(QString::fromUtf8(obs_module_text("dock.preset.lmh")));
+	connect(act, &QAction::triggered, this, [this]() {
+		const struct
+		{
+			int range;
+			const char *label_key;
+		} parts[] = {{1, "VS.Label.Lows"}, {2, "VS.Label.Mids"}, {3, "VS.Label.Highs"}};
+		for (const auto &part : parts) {
+			OBSDataAutoRelease prop = obs_data_create();
+			obs_data_set_int(prop, "luma_range", part.range);
+			obs_data_set_bool(prop, "hue_ring", true);
+			obs_data_set_int(prop, "intensity", 50);
+			obs_data_set_int(prop, "color_type", 0); // white trace, the ring carries the color
+			OBSDataAutoRelease meta = obs_data_create();
+			obs_data_set_string(meta, "label", obs_module_text(part.label_key));
+			insertScope(TYPE_VECTORSCOPE, prop, meta, -1);
+		}
+	});
 }
 
 /* ---------- toolbar ---------- */
