@@ -48,6 +48,7 @@ configure_file(
 set(PLUGIN_SOURCES
 	src/plugin-main.c
 	src/diamond.c
+	src/cie.c
 	src/vectorscope.c
 	src/waveform.c
 	src/histogram.c

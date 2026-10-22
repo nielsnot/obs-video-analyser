@@ -61,6 +61,7 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "falsecolor_source", "falsecolor", "False Color", FIT_ASPECT},
 	{ID_PREFIX "focuspeaking_source", "focuspeaking", "FocusPeaking.Name", FIT_FOCUSPEAKING},
 	{ID_PREFIX "diamond_source", "diamond", "Diamond", FIT_SQUARE},
+	{ID_PREFIX "cie_source", "cie", "CIE", FIT_ASPECT},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {

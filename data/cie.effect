@@ -1,0 +1,58 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float intensity;
+// the plotted area in CIE xy: x from 0 to x_max, y from 0 to y_max (top of the texture is y_max)
+uniform float2 xy_max = {0.8, 0.9};
+
+sampler_state def_sampler {
+	Filter   = Point;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertInOut {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in)
+{
+	VertInOut vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = vert_in.uv;
+	return vert_out;
+}
+
+// Color of a chromaticity: xy with Y = 1, to linear Rec. 709, brightest channel at 1, then gamma.
+float3 xy_color(float2 xy)
+{
+	float y = max(xy.y, 0.001);
+	float X = xy.x / y;
+	float Z = (1.0 - xy.x - xy.y) / y;
+	float3 rgb;
+	rgb.r =  3.2406 * X - 1.5372 - 0.4986 * Z;
+	rgb.g = -0.9689 * X + 1.8758 + 0.0415 * Z;
+	rgb.b =  0.0557 * X - 0.2040 + 1.0570 * Z;
+	rgb = max(rgb, float3(0.0, 0.0, 0.0));
+	float m = max(rgb.r, max(rgb.g, rgb.b));
+	rgb = rgb / max(m, 0.0001);
+	return pow(rgb, float3(0.4545, 0.4545, 0.4545));
+}
+
+float4 PSDraw(VertInOut vert_in) : TARGET
+{
+	float2 xy = float2(vert_in.uv.x * xy_max.x, (1.0 - vert_in.uv.y) * xy_max.y);
+	float d = image.Sample(def_sampler, vert_in.uv).x * intensity;
+	if (d > 1.0)
+		d = 1.0;
+	return float4(xy_color(xy) * d, 1.0);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDraw(vert_in);
+	}
+}

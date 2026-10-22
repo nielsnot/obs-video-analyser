@@ -414,29 +414,34 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 }
 
 /* Rings at 25, 50, 75 and 100 % of the chroma range, with a tick every 2 degrees and a
- * longer one every 10 degrees on the outer ring, and a center cross. */
+ * longer one every 10 degrees on the outer ring, and a center cross.
+ * OBS draws at most 512 vertices per immediate batch, so each part is its own batch. */
+static void draw_circle(float cx, float cy, float r, int n_seg)
+{
+	gs_render_start(false);
+	for (int i = 0; i < n_seg; i++) {
+		const float a0 = (float)i * 2.0f * (float)M_PI / n_seg;
+		const float a1 = (float)(i + 1) * 2.0f * (float)M_PI / n_seg;
+		gs_vertex2f(cx + r * cosf(a0), cy - r * sinf(a0));
+		gs_vertex2f(cx + r * cosf(a1), cy - r * sinf(a1));
+	}
+	gs_render_stop(GS_LINES);
+}
+
 static void draw_ring_scale(uint32_t color)
 {
 	const float cx = 127.5f, cy = 127.5f;
 	const float r_outer = 127.0f;
-	const int n_seg = 180;
+	const int n_seg = 120; // 240 vertices per circle
 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 
-	// inner rings, dimmer
+	// inner rings and center cross, dimmer
 	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), (color & 0x00FFFFFF) | 0x50000000);
 	while (gs_effect_loop(solid, "Solid")) {
+		for (int r = 1; r <= 3; r++)
+			draw_circle(cx, cy, r_outer * r / 4.0f, n_seg);
 		gs_render_start(false);
-		for (int r = 1; r <= 3; r++) {
-			const float rr = r_outer * r / 4.0f;
-			for (int i = 0; i < n_seg; i++) {
-				const float a0 = (float)i * 2.0f * (float)M_PI / n_seg;
-				const float a1 = (float)(i + 1) * 2.0f * (float)M_PI / n_seg;
-				gs_vertex2f(cx + rr * cosf(a0), cy - rr * sinf(a0));
-				gs_vertex2f(cx + rr * cosf(a1), cy - rr * sinf(a1));
-			}
-		}
-		// center cross
 		gs_vertex2f(cx - 6.0f, cy);
 		gs_vertex2f(cx + 6.0f, cy);
 		gs_vertex2f(cx, cy - 6.0f);
@@ -444,16 +449,11 @@ static void draw_ring_scale(uint32_t color)
 		gs_render_stop(GS_LINES);
 	}
 
-	// outer ring and degree ticks
+	// outer ring and degree ticks (180 ticks, 360 vertices)
 	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), (color & 0x00FFFFFF) | 0xA0000000);
 	while (gs_effect_loop(solid, "Solid")) {
+		draw_circle(cx, cy, r_outer, n_seg);
 		gs_render_start(false);
-		for (int i = 0; i < n_seg; i++) {
-			const float a0 = (float)i * 2.0f * (float)M_PI / n_seg;
-			const float a1 = (float)(i + 1) * 2.0f * (float)M_PI / n_seg;
-			gs_vertex2f(cx + r_outer * cosf(a0), cy - r_outer * sinf(a0));
-			gs_vertex2f(cx + r_outer * cosf(a1), cy - r_outer * sinf(a1));
-		}
 		for (int deg = 0; deg < 360; deg += 2) {
 			const float a = deg * (float)M_PI / 180.0f;
 			const float len = deg % 10 == 0 ? 6.0f : 2.5f;

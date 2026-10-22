@@ -207,10 +207,19 @@ extern "C" float text_draw(const struct text_scale *scale, const char *text, flo
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
 	while (gs_effect_loop(effect, "Draw")) {
+		// OBS draws at most 512 vertices per immediate batch: 6 per glyph, so 80 glyphs a batch.
+		const int glyphs_per_batch = 80;
+		int in_batch = 0;
 		gs_render_start(true);
 		float pen = x - pad;
 		const unsigned char *p = (const unsigned char *)text;
 		while (*p) {
+			if (in_batch == glyphs_per_batch) {
+				gs_render_stop(GS_TRIS);
+				gs_render_start(true);
+				in_batch = 0;
+			}
+			in_batch++;
 			const glyph_s &g = atlas.glyphs[glyph_index(p)];
 			const float gw = (g.u1 - g.u0) * atlas.width * k * scale->ux;
 			const float x0 = pen, x1 = pen + gw;
