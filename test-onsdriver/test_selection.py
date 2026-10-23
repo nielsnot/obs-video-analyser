@@ -115,7 +115,13 @@ class SelectionTest(obstest.OBSTest):
             })
 
         inputs = cl.send('GetInputList').inputs
-        by_kind = {i['inputKind']: i['inputName'] for i in inputs}
+        # kinds can carry a version suffix, such as vectorscope_source_v2
+        by_kind = {}
+        for i in inputs:
+            kind = i['inputKind']
+            if kind.rsplit('_v', 1)[-1].isdigit():
+                kind = kind.rsplit('_v', 1)[0]
+            by_kind[kind] = i['inputName']
         notice('inputs: ' + ', '.join(f"{i['inputName']} ({i['inputKind']})" for i in inputs))
         vs = by_kind.get(PREFIX + 'vectorscope_source')
         fc = by_kind.get(PREFIX + 'falsecolor_source')
