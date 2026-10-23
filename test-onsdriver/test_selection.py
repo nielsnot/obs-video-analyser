@@ -40,6 +40,18 @@ def dock_data():
             'label': 'FC', 'show_label': False, 'use_roi': True, 'target': '',
             'prop': {'fc_preset': 0, 'show_key': 0, 'target_scale': 2},
         },
+        # not measured: these draw text and the hue ring every frame, which once crashed d3d11
+        # on the next frame of an async (media) source
+        {
+            'type': 'vectorscope',
+            'label': 'Ring', 'show_label': True, 'use_roi': True, 'target': '',
+            'prop': {'hue_ring': True, 'ring_scale': True, 'target_scale': 2},
+        },
+        {
+            'type': 'falsecolor',
+            'label': 'Table', 'show_label': True, 'use_roi': True, 'target': '',
+            'prop': {'fc_preset': 0, 'show_key': 7, 'target_scale': 2},
+        },
     ]
     return {
         'docks': [{
@@ -114,6 +126,23 @@ class SelectionTest(obstest.OBSTest):
                 'sceneItemTransform': {'positionX': x, 'positionY': 0},
             })
 
+        # an async source: a small looping YUV 4:2:0 clip played by the media source, in the blue
+        # half; YUV frames make libobs convert them with its vertex-less draw
+        clip = os.path.abspath('screenshots/async-test.y4m')
+        os.makedirs('screenshots', exist_ok=True)
+        with open(clip, 'wb') as fw:
+            fw.write(b'YUV4MPEG2 W64 H64 F10:1 Ip A1:1 C420jpeg\n')
+            for v in (60, 120, 180, 120):
+                fw.write(b'FRAME\n' + bytes([v]) * (64 * 64) + bytes([128]) * (2 * 32 * 32))
+        res = cl.send('CreateInput', {
+            'inputName': 'Media', 'sceneName': scene, 'inputKind': 'ffmpeg_source',
+            'inputSettings': {'local_file': clip, 'is_local_file': True, 'looping': True},
+        })
+        cl.send('SetSceneItemTransform', {
+            'sceneName': scene, 'sceneItemId': res.scene_item_id,
+            'sceneItemTransform': {'positionX': w - 80, 'positionY': h - 80},
+        })
+
         inputs = cl.send('GetInputList').inputs
         # kinds can carry a version suffix, such as vectorscope_source_v2
         by_kind = {}
@@ -123,8 +152,17 @@ class SelectionTest(obstest.OBSTest):
                 kind = kind.rsplit('_v', 1)[0]
             by_kind[kind] = i['inputName']
         notice('inputs: ' + ', '.join(f"{i['inputName']} ({i['inputKind']})" for i in inputs))
-        vs = by_kind.get(PREFIX + 'vectorscope_source')
-        fc = by_kind.get(PREFIX + 'falsecolor_source')
+        # the measured scopes come first in the dock, so their sources were created first
+        names = {}
+        for i in inputs:
+            kind = i['inputKind']
+            if kind.rsplit('_v', 1)[-1].isdigit():
+                kind = kind.rsplit('_v', 1)[0]
+            names.setdefault(kind, []).append(i['inputName'])
+        vs = min(names.get(PREFIX + 'vectorscope_source', [None]), key=lambda n: (len(n or ''), n or ''))
+        fc = min(names.get(PREFIX + 'falsecolor_source', [None]), key=lambda n: (len(n or ''), n or ''))
+        extra = [n for k in ('vectorscope_source', 'falsecolor_source')
+                 for n in names.get(PREFIX + k, []) if n not in (vs, fc)]
         roi = by_kind.get(PREFIX + 'roi')
         self.assertTrue(vs and fc and roi, 'dock scopes were not created')
 
@@ -155,6 +193,11 @@ class SelectionTest(obstest.OBSTest):
         self.assertLess(blue_sel, 30, 'the vectorscope shows blue from outside the selection')
         self.assertLess(corner, 3 * 40, 'false color is not dark outside the selection')
         self.assertGreater(center, 3 * 50, 'false color is dark inside the selection')
+
+        # draw the text and hue-ring scopes for a while next to the playing media source
+        for name in extra:
+            self.screenshot(cl, name, repeat=60)
+        notice(f'rendered {extra} with a media source playing; OBS is still running')
 
 
 if __name__ == '__main__':

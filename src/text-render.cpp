@@ -210,13 +210,13 @@ extern "C" float text_draw(const struct text_scale *scale, const char *text, flo
 		// OBS draws at most 512 vertices per immediate batch: 6 per glyph, so 80 glyphs a batch.
 		const int glyphs_per_batch = 80;
 		int in_batch = 0;
-		gs_render_start(true);
+		gs_render_start(false); // immediate buffer; see vertexbuffer_destroy_safe
 		float pen = x - pad;
 		const unsigned char *p = (const unsigned char *)text;
 		while (*p) {
 			if (in_batch == glyphs_per_batch) {
 				gs_render_stop(GS_TRIS);
-				gs_render_start(true);
+				gs_render_start(false); // immediate buffer; see vertexbuffer_destroy_safe
 				in_batch = 0;
 			}
 			in_batch++;

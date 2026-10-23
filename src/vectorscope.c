@@ -504,7 +504,9 @@ static void draw_hue_ring(int colorspace)
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF); // vertex colors as they are
 	while (gs_effect_loop(solid, "SolidColored")) {
-		gs_render_start(true);
+		// Immediate mode: gs_render_start(true) draws from a temporary vertex buffer that libobs
+		// frees while leaving it current, which crashes its next vertex-less draw.
+		gs_render_start(false);
 		for (int i = 0; i <= n_seg; i++) {
 			const float a = (float)i * 2.0f * (float)M_PI / n_seg;
 			const float u = 0.3f * cosf(a), v = 0.3f * sinf(a);

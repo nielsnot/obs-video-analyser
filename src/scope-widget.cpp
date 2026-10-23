@@ -425,6 +425,9 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 
 	gs_blend_state_pop();
 
+	// Leave no vertex buffer of ours current for libobs' own draws.
+	gs_load_vertexbuffer(NULL);
+
 	pthread_mutex_unlock(&data->mutex);
 }
 
