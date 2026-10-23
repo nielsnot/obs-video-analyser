@@ -65,6 +65,9 @@ class SelectionTest(obstest.OBSTest):
         collection[DOCK_KEY] = dock_data()
         with open(path, 'w', encoding='utf-8') as fw:
             json.dump(collection, fw)
+        scenes_dir = os.path.dirname(path)
+        notice(f'scene collection {path}; files: {sorted(os.listdir(scenes_dir))}; '
+               f'keys: {sorted(collection.keys())}')
         self.obs.run()
 
     def screenshot(self, cl, name, width=None, height=None, repeat=40):

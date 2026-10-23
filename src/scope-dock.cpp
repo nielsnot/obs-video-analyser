@@ -121,6 +121,7 @@ static void save_load_scope_docks(obs_data_t *save_data, bool saving, void *)
 
 		obs_data_array_t *array = obs_data_get_array(props, "docks");
 		size_t count = obs_data_array_count(array);
+		blog(LOG_INFO, "save_load_scope_docks: loading %d docks", (int)count);
 		for (size_t i = 0; i < count; i++) {
 			obs_data_t *obj = obs_data_array_item(array, i);
 			ScopeWidget::default_properties(obj);
