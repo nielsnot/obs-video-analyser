@@ -30,6 +30,9 @@
 #include <QTimer>
 #include <QScreen>
 #include <QGuiApplication>
+#include <QApplication>
+#include <QPointer>
+#include <QKeyEvent>
 #include "plugin-macros.generated.h"
 #include "scope-widget.hpp"
 #include "scope-widget-properties.hpp"
@@ -1608,6 +1611,40 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 	}
 }
 
+#ifdef __APPLE__
+/* On macOS a dropdown cannot open inside a Qt::Popup window, so the options panel is a
+ * frameless tool window there. This closes it when another window takes over or on Escape,
+ * but not while one of its own dropdown lists is open. */
+class OptionsPanelCloser : public QObject {
+	QWidget *panel;
+
+public:
+	explicit OptionsPanelCloser(QWidget *panel_) : QObject(panel_), panel(panel_) {}
+
+protected:
+	bool eventFilter(QObject *obj, QEvent *event) override
+	{
+		if (obj == panel && event->type() == QEvent::KeyPress &&
+		    static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+			panel->close();
+			return true;
+		}
+		if (obj == panel && event->type() == QEvent::WindowDeactivate) {
+			QPointer<QWidget> p = panel;
+			QTimer::singleShot(150, panel, [p]() {
+				if (!p || QApplication::activePopupWidget())
+					return;
+				QWidget *active = QApplication::activeWindow();
+				if (active == p || (active && p->isAncestorOf(active)))
+					return;
+				p->close();
+			});
+		}
+		return false;
+	}
+};
+#endif
+
 void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 {
 	obs_source_t *src = tile_source(data, tile);
@@ -1617,7 +1654,12 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	scope_entry *e = is_roi ? nullptr : data->entries[tile - 1];
 
 	// Translucent outer window so the panel can have rounded corners.
+#ifdef __APPLE__
+	auto *popup = new QWidget(this, Qt::Tool | Qt::FramelessWindowHint);
+	popup->installEventFilter(new OptionsPanelCloser(popup));
+#else
 	auto *popup = new QWidget(this, Qt::Popup | Qt::FramelessWindowHint);
+#endif
 	popup->setAttribute(Qt::WA_DeleteOnClose, true);
 	popup->setAttribute(Qt::WA_TranslucentBackground, true);
 	popup->setStyleSheet(options_style);
@@ -1860,6 +1902,10 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	}
 	popup->move(pos);
 	popup->show();
+#ifdef __APPLE__
+	popup->raise();
+	popup->activateWindow();
+#endif
 }
 
 /* ---------- arranging ---------- */
