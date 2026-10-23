@@ -1,5 +1,6 @@
 #include <obs-module.h>
 #include <QKeyEvent>
+#include <QContextMenuEvent>
 #include "plugin-macros.generated.h"
 #include "ScopeWidgetInteractiveEventFilter.hpp"
 
@@ -16,6 +17,10 @@ bool ScopeWidgetInteractiveEventFilter::eventFilter(QObject *, QEvent *event)
 
 	case QEvent::Wheel:
 		return parent->HandleMouseWheelEvent(static_cast<QWheelEvent *>(event));
+
+	case QEvent::ContextMenu:
+		// macOS: Control-click and two-finger taps arrive as a context menu request
+		return parent->HandleContextMenuEvent(static_cast<QContextMenuEvent *>(event));
 
 	case QEvent::KeyPress:
 	case QEvent::KeyRelease:

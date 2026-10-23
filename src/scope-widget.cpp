@@ -15,6 +15,8 @@
 #include <QToolButton>
 #include <QHBoxLayout>
 #include <QTabBar>
+#include <QContextMenuEvent>
+#include <QDateTime>
 #include <QInputDialog>
 #include <QComboBox>
 #include <QCheckBox>
@@ -923,15 +925,24 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 
 	const QPointF qtPos = event_pos(this, event);
 
-	if (event->button() == Qt::RightButton) {
-		if (!mouseUp)
-			return true;
-		data->i_menu = tile_at(data, (int)qtPos.x(), (int)qtPos.y());
-		if (data->i_menu >= 0 && tile_source(data, data->i_menu)) {
-			openOptions(data->i_menu, QCursor::pos());
-			return true;
-		}
-		return openMenu(event);
+	// macOS: Control-click is a right click (Qt reports the Control key as Meta there)
+	const bool control_click = event->button() == Qt::LeftButton &&
+#ifdef __APPLE__
+				   event->modifiers().testFlag(Qt::MetaModifier);
+#else
+				   false;
+#endif
+
+	if (event->button() == Qt::RightButton || control_click) {
+		// macOS opens context menus on press (the release may not reach this view), others on release
+#ifdef __APPLE__
+		const bool open_now = !mouseUp && event->type() != QEvent::MouseButtonDblClick;
+#else
+		const bool open_now = mouseUp;
+#endif
+		if (open_now)
+			openContextAt(qtPos, QCursor::pos());
+		return true;
 	}
 
 	if (clickCount == 2 && event->button() == Qt::LeftButton) {
@@ -1037,6 +1048,30 @@ bool ScopeWidget::HandleMouseWheelEvent(QWheelEvent *event)
 	if (src)
 		obs_source_send_mouse_wheel(src, &mouseEvent, xDelta, yDelta);
 
+	return true;
+}
+
+/* Right click, Control-click and two-finger taps can each arrive as a mouse button and as a
+ * context menu request; whichever comes first opens the menu and the other is ignored. */
+void ScopeWidget::openContextAt(const QPointF &widgetPos, const QPoint &globalPos)
+{
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (now - lastContextMs < 500)
+		return;
+	lastContextMs = now;
+
+	data->i_menu = tile_at(data, (int)widgetPos.x(), (int)widgetPos.y());
+	if (data->i_menu >= 0 && tile_source(data, data->i_menu))
+		openOptions(data->i_menu, globalPos);
+	else
+		openMenu(nullptr);
+	lastContextMs = QDateTime::currentMSecsSinceEpoch();
+}
+
+bool ScopeWidget::HandleContextMenuEvent(QContextMenuEvent *event)
+{
+	openContextAt(QPointF(event->pos()) * devicePixelRatio(), event->globalPos());
+	event->accept();
 	return true;
 }
 

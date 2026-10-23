@@ -36,6 +36,9 @@ private:
 	bool HandleMouseMoveEvent(QMouseEvent *event);
 	bool HandleMouseWheelEvent(QWheelEvent *event);
 	bool HandleKeyEvent(QKeyEvent *event);
+	bool HandleContextMenuEvent(class QContextMenuEvent *event);
+	void openContextAt(const QPointF &widgetPos, const QPoint &globalPos);
+	qint64 lastContextMs = 0;
 	bool openMenu(QMouseEvent *event);
 	void fillAddScopeMenu(class QMenu *menu);
 	void closeProperties();
