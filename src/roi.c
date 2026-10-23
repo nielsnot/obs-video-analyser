@@ -1,6 +1,7 @@
 #include <obs-module.h>
 #include <util/platform.h>
 #include <util/darray.h>
+#include <graphics/matrix4.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -93,6 +94,7 @@ static void *roi_create(obs_data_t *settings, obs_source_t *source)
 	src->cm.y1 = -1;
 	src->x_start = INT_MIN;
 	src->y_start = INT_MIN;
+	src->zoom = 1.0f;
 
 	roi_update(src, settings);
 
@@ -479,7 +481,7 @@ static void fill_quad(float x0, float y0, float x1, float y1, uint32_t color)
 }
 
 /* Each pin: a cross, a swatch of the color read and its values (RGB, luma %, HSL). */
-static void draw_pins(struct roi_source *src, float w, float h)
+static void draw_pins(struct roi_source *src, float w, float h, float zoom, float view_x, float view_y)
 {
 	struct roi_pin pins[ROI_MAX_PINS];
 	pthread_mutex_lock(&src->shapes_mutex);
@@ -495,7 +497,9 @@ static void draw_pins(struct roi_source *src, float w, float h)
 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	for (size_t i = 0; i < n; i++) {
-		const float x = pins[i].x * w, y = pins[i].y * h;
+		const float x = (pins[i].x * w - view_x) * zoom, y = (pins[i].y * h - view_y) * zoom;
+		if (x < 0.0f || y < 0.0f || x > w || y > h)
+			continue; // zoomed out of view
 
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF);
 		while (gs_effect_loop(solid, "Solid")) {
@@ -583,6 +587,10 @@ static void roi_render(void *data, gs_effect_t *effect)
 
 	gs_texture_t *tex = gs_texrender_get_texture(src->cm.texrender);
 
+	const float zoom = src->zoom;
+	const float view_x = src->view_x, view_y = src->view_y;
+	const bool zoomed = zoom > 1.001f;
+
 	if (src->want_snapshot && tex) {
 		src->want_snapshot = false;
 		const uint32_t tw = gs_texture_get_width(tex), th = gs_texture_get_height(tex);
@@ -594,6 +602,18 @@ static void roi_render(void *data, gs_effect_t *effect)
 		}
 		if (src->ref_tex)
 			gs_copy_texture(src->ref_tex, tex);
+	}
+
+	if (zoomed) {
+		// view = (picture - view origin) * zoom; the viewport clips what falls outside
+		struct matrix4 tr = {
+			{.ptr = {zoom, 0.0f, 0.0f, 0.0f}},
+			{.ptr = {0.0f, zoom, 0.0f, 0.0f}},
+			{.ptr = {0.0f, 0.0f, 1.0f, 0.0f}},
+			{.ptr = {-view_x * zoom, -view_y * zoom, 0.0f, 1.0f}},
+		};
+		gs_matrix_push();
+		gs_matrix_mul(&tr);
 	}
 
 	if (tex && src->cm.effect) {
@@ -613,8 +633,9 @@ static void roi_render(void *data, gs_effect_t *effect)
 	}
 
 	// comparing: the reference frame fills the left half, with a divider line
-	if (src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
-	    src->ref_h == src->cm.texrender_height) {
+	const bool comparing = src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
+			       src->ref_h == src->cm.texrender_height;
+	if (comparing) {
 		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
 		while (gs_effect_loop(def, "Draw"))
@@ -631,10 +652,6 @@ static void roi_render(void *data, gs_effect_t *effect)
 			gs_vertex2f(xm + 1.0f * ts.ux, h);
 			gs_render_stop(GS_TRISTRIP);
 		}
-		text_draw(&ts, obs_module_text("ROI.Reference"), xm - 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f, 0xFFFF59D9,
-			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
-		text_draw(&ts, obs_module_text("ROI.Live"), xm + 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f, 0xFFFFFFFF,
-			  TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
 	}
 
 	pthread_mutex_lock(&src->shapes_mutex);
@@ -644,13 +661,37 @@ static void roi_render(void *data, gs_effect_t *effect)
 	}
 	pthread_mutex_unlock(&src->shapes_mutex);
 
-	draw_pins(src, w, h);
-
 	if (src->dragging) {
 		int x0, y0, x1, y1;
 		drag_box(src, &x0, &y0, &x1, &y1);
 		draw_shape_outline(draw_mode_shape(src->draw_mode), (float)x0, (float)y0, (float)x1, (float)y1,
 				   COLOR_DRAWING);
+	}
+
+	if (zoomed)
+		gs_matrix_pop();
+
+	// labels keep their size: drawn in view coordinates
+	const struct text_scale ts = text_scale_from_viewport(w, h);
+	if (comparing) {
+		const float xm = ((float)(src->ref_w / 2) - view_x) * zoom;
+		if (xm > 0.0f && xm < w) {
+			text_draw(&ts, obs_module_text("ROI.Reference"), xm - 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f,
+				  0xFFFF59D9, TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+			text_draw(&ts, obs_module_text("ROI.Live"), xm + 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f,
+				  0xFFFFFFFF, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+		}
+	}
+
+	draw_pins(src, w, h, zoom, view_x, view_y);
+
+	if (zoomed) {
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%.1fx", zoom);
+		fill_quad(w - text_width(&ts, buf, 12.0f) - 10.0f * ts.ux, 4.0f * ts.uy, w - 4.0f * ts.ux,
+			  (4.0f + 16.0f) * ts.uy, 0xA0000000);
+		text_draw(&ts, buf, w - 7.0f * ts.ux, 6.0f * ts.uy, 12.0f, 0xFFFFFFFF, TEXT_ALIGN_RIGHT,
+			  TEXT_VALIGN_TOP);
 	}
 
 	gs_blend_state_pop();
@@ -725,6 +766,51 @@ static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 
 /* ---------- mouse ---------- */
 
+/* ---------- zoom ---------- */
+
+#define ROI_ZOOM_MAX 8.0f
+
+static void clamp_view(struct roi_source *src)
+{
+	const float w = (float)roi_get_width(src), h = (float)roi_get_height(src);
+	const float max_x = w - w / src->zoom, max_y = h - h / src->zoom;
+	src->view_x = src->view_x < 0.0f ? 0.0f : src->view_x > max_x ? max_x : src->view_x;
+	src->view_y = src->view_y < 0.0f ? 0.0f : src->view_y > max_y ? max_y : src->view_y;
+}
+
+/* Mouse events arrive in view coordinates; shapes and pins live in picture coordinates. */
+static inline int to_picture_x(const struct roi_source *src, int x)
+{
+	return (int)floorf(x / src->zoom + src->view_x);
+}
+static inline int to_picture_y(const struct roi_source *src, int y)
+{
+	return (int)floorf(y / src->zoom + src->view_y);
+}
+
+/* The wheel zooms around the pointer; back at 1x the whole picture shows again. */
+static void roi_mouse_wheel(void *data, const struct obs_mouse_event *event, int x_delta, int y_delta)
+{
+	UNUSED_PARAMETER(x_delta);
+	struct roi_source *src = data;
+	if (!y_delta || !event)
+		return;
+
+	const float px = event->x / src->zoom + src->view_x;
+	const float py = event->y / src->zoom + src->view_y;
+
+	float zoom = src->zoom * (y_delta > 0 ? 1.25f : 0.8f);
+	if (zoom < 1.05f)
+		zoom = 1.0f;
+	if (zoom > ROI_ZOOM_MAX)
+		zoom = ROI_ZOOM_MAX;
+
+	src->zoom = zoom;
+	src->view_x = px - event->x / zoom;
+	src->view_y = py - event->y / zoom;
+	clamp_view(src);
+}
+
 static void roi_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
 {
 	struct roi_source *src = data;
@@ -734,8 +820,16 @@ static void roi_mouse_move(void *data, const struct obs_mouse_event *event, bool
 	}
 
 	src->shift_down = !!(event->modifiers & INTERACT_SHIFT_KEY);
-	src->x_mouse = event->x;
-	src->y_mouse = event->y;
+
+	if (src->panning) {
+		src->view_x = src->pan_view_x - (event->x - src->pan_mouse_x) / src->zoom;
+		src->view_y = src->pan_view_y - (event->y - src->pan_mouse_y) / src->zoom;
+		clamp_view(src);
+		return;
+	}
+
+	src->x_mouse = to_picture_x(src, event->x);
+	src->y_mouse = to_picture_y(src, event->y);
 }
 
 static void finish_drag(struct roi_source *src)
@@ -792,23 +886,35 @@ static void roi_mouse_click(void *data, const struct obs_mouse_event *event, int
 
 	UNUSED_PARAMETER(click_count);
 
+	// Pan with the middle button, or with the left one while no tool is on.
+	const bool pan_button = type == MOUSE_MIDDLE || (type == MOUSE_LEFT && src->draw_mode == ROI_DRAW_NONE);
+	if (pan_button) {
+		if (!mouse_up && src->zoom > 1.001f) {
+			src->panning = true;
+			src->pan_mouse_x = event->x;
+			src->pan_mouse_y = event->y;
+			src->pan_view_x = src->view_x;
+			src->pan_view_y = src->view_y;
+		} else if (mouse_up) {
+			src->panning = false;
+		}
+		return;
+	}
+
 	if (type != MOUSE_LEFT)
 		return;
 
 	src->shift_down = !!(event->modifiers & INTERACT_SHIFT_KEY);
-	src->x_mouse = event->x;
-	src->y_mouse = event->y;
+	src->x_mouse = to_picture_x(src, event->x);
+	src->y_mouse = to_picture_y(src, event->y);
 
 	if (!mouse_up) {
 		if (src->draw_mode == ROI_DRAW_PIN) {
-			add_pin(src, event->x, event->y);
+			add_pin(src, src->x_mouse, src->y_mouse);
 			return;
 		}
-		// Only draw while a shape button in the toolbar is active.
-		if (src->draw_mode == ROI_DRAW_NONE)
-			return;
-		src->x_start = event->x;
-		src->y_start = event->y;
+		src->x_start = src->x_mouse;
+		src->y_start = src->y_mouse;
 		src->dragging = true;
 		return;
 	}
@@ -1000,4 +1106,5 @@ const struct obs_source_info colormonitor_roi = {
 	.video_tick = roi_tick,
 	.mouse_move = roi_mouse_move,
 	.mouse_click = roi_mouse_click,
+	.mouse_wheel = roi_mouse_wheel,
 };

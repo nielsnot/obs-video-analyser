@@ -10,6 +10,13 @@ To open the dock,
 Click `Tools` and `New Video Analyser Dock...` in the menu of OBS Studio.
 Input the name and clock OK.
 
+## Zooming the ROI view
+
+The ROI view is where you pick the region of interest (ROI): the part of the picture the scopes analyze.
+Scroll on it to zoom in, up to 8x, around the pointer. Drag with the middle mouse button, or with the left
+button while no tool is on, to move around. Scroll back to 1x to see the whole picture again.
+Shapes and pins can be drawn while zoomed in; they land on the right spot in the picture.
+
 ## Selecting areas with the toolbar
 
 A slim toolbar at the top of the dock selects which parts of the picture the scopes analyze.

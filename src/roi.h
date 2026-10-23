@@ -63,6 +63,12 @@ struct roi_source
 
 	struct cm_mask mask;
 
+	// view zoom: the picture is shown zoomed by `zoom` with view_x/view_y (picture pixels) at the top left
+	float zoom, view_x, view_y;
+	volatile bool panning;
+	int pan_mouse_x, pan_mouse_y; // view coordinates where the pan started
+	float pan_view_x, pan_view_y;
+
 	// snapshot reference: the frame at the moment of the snapshot, shown left of a split
 	volatile bool want_snapshot;
 	volatile bool compare;
