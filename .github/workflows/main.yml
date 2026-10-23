@@ -366,23 +366,48 @@ jobs:
             screenshots/*
 
   release:
-    # A tag such as 0.1.0 publishes a release page with every installer once all builds pass.
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    # Publishes a release page with every installer once all builds pass:
+    # on a push to main when the version in CMakeLists.txt has no release yet,
+    # or on a version tag (its packages are added to a release made on GitHub).
+    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
     needs: [linux_build, macos_build, windows_build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide the version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag=$(sed -n 's/^project([^ ]* VERSION \([0-9.]*\)).*/\1/p' CMakeLists.txt)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version $tag"
+
       - name: Download packages
+        if: ${{ steps.version.outputs.exists == 'false' || startsWith(github.ref, 'refs/tags/') }}
         uses: actions/download-artifact@v4
         with:
           pattern: ${{ env.artifactName }}-*
           path: packages
           merge-multiple: true
 
-      - name: Create release
+      - name: Publish
+        if: ${{ steps.version.outputs.exists == 'false' || startsWith(github.ref, 'refs/tags/') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           ls -la packages
           cat > notes.md <<'NOTES'
@@ -403,7 +428,12 @@ jobs:
 
           See the [README](https://github.com/${{ github.repository }}#readme) for a quick start guide.
           NOTES
-          gh release create "${{ github.ref_name }}" packages/* \
-            --repo "${{ github.repository }}" \
-            --title "Video Analyser ${{ github.ref_name }}" \
-            --notes-file notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" packages/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Video Analyser $TAG" \
+              --notes-file notes.md
+          fi
