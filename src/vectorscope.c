@@ -147,8 +147,8 @@ static void vss_destroy(void *data)
 	gs_texture_destroy(src->tex_vs);
 	gs_texture_destroy(src->tex_ref);
 	gs_image_file_free(&src->graticule_img);
-	gs_vertexbuffer_destroy(src->graticule_vbuf);
-	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 	obs_leave_graphics();
 
 	cm_destroy(&src->cm);
@@ -327,9 +327,9 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 {
 	if (src->update_graticule || colorspace != src->graticule_cs) {
 		src->update_graticule = false;
-		gs_vertexbuffer_destroy(src->graticule_vbuf);
+		vertexbuffer_destroy_safe(src->graticule_vbuf);
 		src->graticule_vbuf = NULL;
-		gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+		vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 		src->graticule_line_vbuf = NULL;
 	} else if (src->graticule_vbuf) {
 		return;
@@ -390,7 +390,7 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 	}
 
 	// box
-	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 	src->graticule_line_vbuf = NULL;
 	gs_render_start(true);
 	for (int i = 0; i < 12; i++) {

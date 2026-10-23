@@ -117,7 +117,7 @@ static void his_destroy(void *data)
 	obs_enter_graphics();
 	gs_texture_destroy(src->tex_hi);
 	gs_texture_destroy(src->tex_ref);
-	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 	obs_leave_graphics();
 
 	cm_destroy(&src->cm);
@@ -533,7 +533,7 @@ static void create_graticule_vbuf(struct his_source *src)
 	bool has_graticule_vertical = src->graticule_vertical_lines > 0;
 	bool has_graticule_horizontal = y_step > 1.0f / GRATICULE_H_MAX;
 
-	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 	src->graticule_line_vbuf = NULL;
 
 	if (!has_graticule_vertical && !has_graticule_horizontal)

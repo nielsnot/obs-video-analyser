@@ -129,7 +129,7 @@ static void wvs_destroy(void *data)
 	obs_enter_graphics();
 	gs_texture_destroy(src->tex_wv);
 	gs_texture_destroy(src->tex_ref);
-	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 	obs_leave_graphics();
 	bfree(src->ref_buf);
 
@@ -378,7 +378,7 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 static void create_graticule_vbuf(struct wvs_source *src)
 {
 	obs_enter_graphics();
-	gs_vertexbuffer_destroy(src->graticule_line_vbuf);
+	vertexbuffer_destroy_safe(src->graticule_line_vbuf);
 	src->graticule_line_vbuf = NULL;
 	if (src->graticule_lines > 0) {
 		gs_render_start(true);

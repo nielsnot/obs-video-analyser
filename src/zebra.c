@@ -263,7 +263,7 @@ static void zb_destroy(struct zb_source *src)
 		obs_enter_graphics();
 		gs_texture_destroy(src->key_tex);
 		gs_image_file_free(&src->key_label_img);
-		gs_vertexbuffer_destroy(src->key_label_vbuf);
+		vertexbuffer_destroy_safe(src->key_label_vbuf);
 		obs_leave_graphics();
 	}
 
