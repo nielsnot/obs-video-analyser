@@ -219,9 +219,10 @@ static void set_actual_size_matrix(uint32_t cx, uint32_t cy)
 	gs_matrix_mul(&tr);
 }
 
-static void set_effect_params(struct fp_source *src, uint32_t cx, uint32_t cy)
+static void set_effect_params(struct fp_source *src, uint32_t cx, uint32_t cy, bool mask_outside)
 {
 	gs_effect_t *e = src->effect;
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "mask_outside"), mask_outside ? 1.0f : 0.0f);
 
 	const struct vec2 dxy = {
 		.x = 1.0f / cx,
@@ -258,7 +259,8 @@ static void fps_render(void *data, gs_effect_t *effect)
 		}
 
 		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
-		set_effect_params(&src->fp, cx, cy);
+		// one texel of the texture sampled, which can be taller than the picture shown
+		set_effect_params(&src->fp, gs_texture_get_width(tex), gs_texture_get_height(tex), true);
 		const char *draw = draw_name();
 		while (gs_effect_loop(e, draw))
 			gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
@@ -289,7 +291,7 @@ static void fpf_render(void *data, gs_effect_t *effect)
 	uint32_t cx = obs_source_get_base_width(target);
 	uint32_t cy = obs_source_get_base_height(target);
 
-	set_effect_params(&src->fp, cx, cy);
+	set_effect_params(&src->fp, cx, cy, false);
 
 	gs_blend_state_push();
 	gs_reset_blend_state();

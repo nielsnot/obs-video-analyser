@@ -675,9 +675,10 @@ static const char *draw_name(int colorspace, bool is_falsecolor)
 		return "DrawZebra709";
 }
 
-static void set_effect_params(struct zb_source *src)
+static void set_effect_params(struct zb_source *src, bool mask_outside)
 {
 	gs_effect_t *e = src->effect;
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "mask_outside"), mask_outside ? 1.0f : 0.0f);
 
 	if (!src->is_falsecolor) {
 		/* zebra */
@@ -840,7 +841,7 @@ static void zb_render_key(struct zb_source *src, const char *draw, uint32_t widt
 	if (!effect)
 		return;
 	gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), src->key_tex);
-	set_effect_params(src);
+	set_effect_params(src, false);
 
 	gs_matrix_push();
 	struct matrix4 tran;
@@ -1016,7 +1017,7 @@ static void zbs_render(void *data, gs_effect_t *effect)
 		uint32_t cy = cm_bypass_get_height(&src->cm);
 
 		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
-		set_effect_params(&src->zb);
+		set_effect_params(&src->zb, true);
 		const char *draw = draw_name(src->cm.colorspace, src->zb.is_falsecolor);
 		while (gs_effect_loop(e, draw))
 			gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
@@ -1045,7 +1046,7 @@ static void zbf_render(void *data, gs_effect_t *effect)
 	if (!obs_source_process_filter_begin(src->context, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING))
 		return;
 
-	set_effect_params(&src->zb);
+	set_effect_params(&src->zb, false);
 
 	gs_blend_state_push();
 	gs_reset_blend_state();

@@ -23,11 +23,22 @@ VertInOut VSDefault(VertInOut vert_in)
 	return vert_out;
 }
 
+// 1 for the scope sources: pixels outside the dock's selection have alpha 0 and are shown dark.
+uniform float mask_outside = 0.0;
+
+float4 outside_selection(float4 rgba)
+{
+	float g = dot(rgba.xyz, float3(0.2126, 0.7152, 0.0722)) * 0.3;
+	return float4(g, g, g, 1.0);
+}
+
 float4 PSDrawFocusPeaking(VertInOut vert_in) : TARGET
 {
 	float2 dx = float2(dxy.x, 0.0);
 	float2 dy = float2(0.0, dxy.y);
 	float4 rgba = image.Sample(def_sampler, vert_in.uv);
+	if (mask_outside > 0.5 && rgba.a < 0.5)
+		return outside_selection(rgba);
 	float3 rgb1 = image.Sample(def_sampler, vert_in.uv + dx).xyz;
 	float3 rgb2 = image.Sample(def_sampler, vert_in.uv + dy).xyz;
 	float3 rgb3 = image.Sample(def_sampler, vert_in.uv - dx).xyz;

@@ -206,6 +206,7 @@ static void vss_get_defaults(obs_data_t *settings)
 {
 	vss_get_defaults_v1(settings);
 	obs_data_set_default_int(settings, "color_type", (long long)color_type_uv);
+	obs_data_set_default_bool(settings, "hue_ring", true);
 }
 
 static obs_properties_t *vss_get_properties(void *data)

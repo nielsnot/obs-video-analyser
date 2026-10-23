@@ -175,6 +175,8 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 	gs_texrender_reset(item->texrender);
 	if (src->effect && gs_texrender_begin(item->texrender, item->width, item->sheight)) {
 		PROFILE_START(prof_convert_yuv_name);
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 
 		struct vec4 background;
 		vec4_zero(&background);
@@ -212,6 +214,7 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 				}
 			}
 		}
+		gs_blend_state_pop();
 		gs_texrender_end(item->texrender);
 		gs_projection_pop();
 		PROFILE_END(prof_convert_yuv_name);
@@ -355,8 +358,10 @@ static void cm_pipeline_thread_loop(struct cm_surface_queue_item *item)
 		.height = item->height,
 		.colorspace = item->colorspace,
 	};
-	if (item->flags & CM_FLAG_CONVERT_RGB) {
-		surface_data.rgb_data = video_data;
+	// The first rows hold RGB or the raw picture (render_rgb_yuv draws either), YUV follows.
+	if (item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_RAW_TEXTURE)) {
+		if (item->flags & CM_FLAG_CONVERT_RGB)
+			surface_data.rgb_data = video_data;
 		video_data += video_linesize * item->height;
 	}
 	if (item->flags & CM_FLAG_CONVERT_YUV) {
