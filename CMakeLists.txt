@@ -8,7 +8,7 @@ set(MACOS_BUNDLEID "io.github.obs-video-analyser")
 set(ID_PREFIX "obs-video-analyser.")
 set(MACOS_PACKAGE_UUID "17C7FC7C-3669-4232-93EE-BFBE2AF23DB8")
 set(MACOS_INSTALLER_UUID "5F24DF5A-CC8E-4E1A-A02A-C855CDEBDCC2")
-set(PLUGIN_URL "https://github.com/norihiro/obs-color-monitor")
+set(PLUGIN_URL "https://github.com/nielsnot/obs-video-analyser")
 
 set(LINUX_MAINTAINER_EMAIL "notenboom.niels@gmail.com")
 
