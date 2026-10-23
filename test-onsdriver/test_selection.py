@@ -62,12 +62,13 @@ class SelectionTest(obstest.OBSTest):
             path += '.json'
         with open(path, encoding='utf-8') as fr:
             collection = json.load(fr)
-        collection[DOCK_KEY] = dock_data()
+        # OBS keeps the data of plugins' save callbacks under "modules"
+        collection.setdefault('modules', {})[DOCK_KEY] = dock_data()
         with open(path, 'w', encoding='utf-8') as fw:
             json.dump(collection, fw)
         scenes_dir = os.path.dirname(path)
         notice(f'scene collection {path}; files: {sorted(os.listdir(scenes_dir))}; '
-               f'keys: {sorted(collection.keys())}')
+               f'module keys: {sorted(collection["modules"].keys())}')
         self.obs.run()
 
     def screenshot(self, cl, name, width=None, height=None, repeat=40):
