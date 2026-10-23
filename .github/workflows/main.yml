@@ -173,7 +173,7 @@ jobs:
           arch=${{ matrix.arch }}
           deps=/tmp/deps-${{ matrix.obs }}-${{ matrix.arch }}
           MACOSX_DEPLOYMENT_TARGET=${{ steps.obsdeps.outputs.MACOSX_DEPLOYMENT_TARGET }}
-          GIT_TAG=$(git describe --tags --always)
+          GIT_TAG=$(sed -n 's/^project([^ ]* VERSION \([0-9.]*\)).*/\1/p' CMakeLists.txt)
           PKG_SUFFIX=-${GIT_TAG}-obs${{ matrix.obs }}-macos-${{ matrix.arch }}
           set -e
           cmake -S . -B build -G Ninja \

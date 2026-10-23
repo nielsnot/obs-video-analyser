@@ -3,9 +3,7 @@ call "build\ci\ci_includes.generated.cmd"
 mkdir package
 cd package
 
-git describe --tags --always > package-version.txt
-set /p PackageVersion=<package-version.txt
-del package-version.txt
+set PackageVersion=%PluginVersion%
 
 copy ..\LICENSE          ..\release\data\obs-plugins\%PluginName%\LICENCE-%PluginName%.txt
 
