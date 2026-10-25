@@ -7,6 +7,8 @@
 #include "obs-convenience.h"
 #include "common.h"
 #include "util.h"
+#include "text-render.h"
+#include "markers.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -82,6 +84,8 @@ struct vss_source
 	gs_texture_t *tex_ref;
 
 	float zoom;
+
+	struct cm_markers markers;
 };
 
 static void vss_update(void *, obs_data_t *);
@@ -107,6 +111,7 @@ static void vss_compare_cb(void *data, calldata_t *cd)
 static void *vss_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct vss_source *src = bzalloc(sizeof(struct vss_source));
+	cm_markers_init(&src->markers);
 
 	src->cm.flags = CM_FLAG_CONVERT_YUV;
 	src->zoom = 1.0f;
@@ -155,6 +160,7 @@ static void vss_destroy(void *data)
 	bfree(src->tex_buf[0]);
 	bfree(src->tex_buf[1]);
 	bfree(src->ref_buf);
+	cm_markers_free(&src->markers);
 	bfree(src);
 }
 
@@ -162,6 +168,7 @@ static void vss_update(void *data, obs_data_t *settings)
 {
 	struct vss_source *src = data;
 	cm_update(&src->cm, settings);
+	cm_markers_load(&src->markers, settings);
 
 	src->intensity = (int)obs_data_get_int(settings, "intensity");
 	if (src->intensity < 1)
@@ -553,6 +560,54 @@ static void draw_hue_ring(int colorspace)
 	}
 }
 
+/* User markers: points at a hue and saturation, or lines from the center towards a hue.
+ * Drawn after the zoom transform so line widths and labels keep their pixel size. */
+static void vss_render_markers(struct vss_source *src)
+{
+	struct cm_marker items[CM_MARKERS_MAX];
+	const int n = cm_markers_copy(&src->markers, items);
+	if (!n)
+		return;
+
+	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+	const float zoom = src->zoom > 1.01f ? src->zoom : 1.0f;
+	const float c = 127.5f;
+	const float px = 10.0f;
+
+	for (int i = 0; i < n; i++) {
+		const struct cm_marker *k = items + i;
+		if (k->kind != CM_MARKER_POINT && k->kind != CM_MARKER_LINE)
+			continue;
+		const float a = k->hue * (float)M_PI / 180.0f;
+		const float r = (k->kind == CM_MARKER_LINE ? 1.0f : k->sat) * 127.0f * zoom;
+		const float x = c + r * cosf(a), y = c - r * sinf(a);
+		if (k->kind == CM_MARKER_LINE) {
+			cm_marker_draw_line(c, c, x, y, k->color, k->style, k->width, ts.ux, ts.uy);
+		} else {
+			if (x < -8.0f || x > VS_SIZE + 8.0f || y < -8.0f || y > VS_SIZE + 8.0f)
+				continue;
+			cm_marker_draw_point(x, y, k->color, k->shape, k->width, ts.ux, ts.uy);
+		}
+		if (k->show_label && k->name[0]) {
+			// beside the point, away from the center
+			const float off = (k->kind == CM_MARKER_LINE ? 4.0f : 8.0f + k->width * 2.0f);
+			float lx = x + cosf(a) * off * ts.ux, ly = y - sinf(a) * off * ts.uy;
+			if (k->kind == CM_MARKER_LINE) {
+				// near the end of the line, inside the scope
+				lx = c + (r - 14.0f * ts.ux) * cosf(a);
+				ly = c - (r - 14.0f * ts.uy) * sinf(a);
+			}
+			const int align = cosf(a) < -0.3f  ? TEXT_ALIGN_RIGHT
+					  : cosf(a) > 0.3f ? TEXT_ALIGN_LEFT
+							   : TEXT_ALIGN_CENTER;
+			const int valign = sinf(a) > 0.3f    ? TEXT_VALIGN_BOTTOM
+					   : sinf(a) < -0.3f ? TEXT_VALIGN_TOP
+							     : TEXT_VALIGN_MIDDLE;
+			text_draw(&ts, k->name, lx, ly, px, k->color | 0xFF000000, align, valign);
+		}
+	}
+}
+
 static void vss_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -676,6 +731,8 @@ static void vss_render(void *data, gs_effect_t *effect)
 	if (b_zoom) {
 		gs_matrix_pop();
 	}
+
+	vss_render_markers(src);
 
 	PROFILE_END(prof_render_name);
 }

@@ -92,7 +92,11 @@ void cm_update(struct cm_source *src, obs_data_t *settings)
 	src->bypass = obs_data_get_bool(settings, "bypass");
 
 	int colorspace = (int)obs_data_get_int(settings, "colorspace");
+	const int prev = src->colorspace;
 	src->colorspace = calc_colorspace(colorspace);
+	if (src->colorspace != prev)
+		blog(LOG_INFO, "'%s': color space %d (setting %d)", obs_source_get_name(src->self), src->colorspace,
+		     colorspace);
 }
 
 void cm_enum_sources(void *data, obs_source_enum_proc_t enum_callback, void *param)
@@ -312,6 +316,8 @@ void cm_render_target(struct cm_source *src)
 	if (!src->texrender) {
 		src->texrender = gs_texrender_create(format, GS_ZS_NONE);
 		src->texrender_format = format;
+		blog(LOG_INFO, "'%s': capturing in %s", obs_source_get_name(src->self),
+		     hdr ? "linear float for HLG" : "8-bit R'G'B'");
 	}
 
 	if (!render_target_to_texrender(target, target_width, target_height, src->texrender, scaled_width,

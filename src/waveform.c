@@ -5,6 +5,7 @@
 #include "common.h"
 #include "util.h"
 #include "text-render.h"
+#include "markers.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -72,6 +73,8 @@ struct wvs_source
 	// vertical zoom with the mouse wheel; zoom_off is the top of the view in trace units
 	float zoom, zoom_off;
 
+	struct cm_markers markers;
+
 	// snapshot reference, shown over the live trace while comparing
 	volatile bool want_snapshot;
 	volatile bool compare;
@@ -109,6 +112,7 @@ static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, wvs_surface_cb, src);
 	src->zoom = 1.0f;
+	cm_markers_init(&src->markers);
 
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	proc_handler_add(ph, "void va_snapshot()", wvs_snapshot_cb, src);
@@ -138,6 +142,7 @@ static void wvs_destroy(void *data)
 
 	bfree(src->tex_buf[0]);
 	bfree(src->tex_buf[1]);
+	cm_markers_free(&src->markers);
 
 	bfree(src);
 }
@@ -146,6 +151,7 @@ static void wvs_update(void *data, obs_data_t *settings)
 {
 	struct wvs_source *src = data;
 	cm_update(&src->cm, settings);
+	cm_markers_load(&src->markers, settings);
 
 	src->display = (int)obs_data_get_int(settings, "display");
 
@@ -631,6 +637,64 @@ static void wvs_render_hlg_reference(struct wvs_source *src, float width, float 
 	}
 }
 
+/* Labels sit on a dark backing so they stay readable over the trace. */
+static void draw_label(const struct text_scale *ts, const char *text, float x, float y, float px, uint32_t color,
+		       int align, int valign)
+{
+	const float tw = text_width(ts, text, px);
+	const float pad = 3.0f * ts->ux;
+	float x0 = align == TEXT_ALIGN_RIGHT ? x - tw : align == TEXT_ALIGN_CENTER ? x - tw * 0.5f : x;
+	float y0 = valign == TEXT_VALIGN_BOTTOM   ? y - px * ts->uy
+		   : valign == TEXT_VALIGN_MIDDLE ? y - px * 0.5f * ts->uy
+						  : y;
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xA0000000);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(x0 - pad, y0);
+		gs_vertex2f(x0 + tw + pad, y0);
+		gs_vertex2f(x0 - pad, y0 + px * ts->uy);
+		gs_vertex2f(x0 + tw + pad, y0 + px * ts->uy);
+		gs_render_stop(GS_TRISTRIP);
+	}
+	text_draw(ts, text, x, y, px, color, align, valign);
+}
+
+/* User markers: a line at each marker's level, in every stacked trace. */
+static void wvs_render_markers(struct wvs_source *src, float width, float height)
+{
+	struct cm_marker items[CM_MARKERS_MAX];
+	const int n = cm_markers_copy(&src->markers, items);
+	if (!n)
+		return;
+
+	const struct text_scale ts = text_scale_from_viewport(width, height);
+	const bool stack = src->display == DISP_STACK;
+	const int n_stack = stack ? (int)n_components(src) : 1;
+	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
+	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
+	const float px = 10.0f;
+
+	for (int i = 0; i < n; i++) {
+		const struct cm_marker *k = items + i;
+		if (k->kind != CM_MARKER_LEVEL)
+			continue;
+		for (int s = 0; s < n_stack; s++) {
+			const float base = (float)(WV_SIZE * s);
+			const float y = base + (WV_SIZE * (1.0f - k->level) - off) * zoom;
+			if (y < base || y > base + WV_SIZE)
+				continue;
+			cm_marker_draw_line(0.0f, y, width, y, k->color, k->style, k->width, ts.ux, ts.uy);
+			if (k->show_label && k->name[0]) {
+				const bool below = y - (px + 2.0f) * ts.uy < base;
+				draw_label(&ts, k->name, width - 6.0f * ts.ux,
+					   below ? y + 2.0f * ts.uy : y - 2.0f * ts.uy, px, k->color | 0xFF000000,
+					   TEXT_ALIGN_RIGHT, below ? TEXT_VALIGN_TOP : TEXT_VALIGN_BOTTOM);
+			}
+		}
+	}
+}
+
 static void wvs_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -682,6 +746,7 @@ static void wvs_render(void *data, gs_effect_t *effect)
 
 	wvs_render_scale(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 	wvs_render_hlg_reference(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
+	wvs_render_markers(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 
 	PROFILE_END(prof_render_name);
 }
