@@ -13,6 +13,11 @@ uniform float2 qual_hue = {0.0, 180.0};
 uniform float2 qual_sat = {0.0, 1.0};
 uniform float2 qual_luma = {0.0, 1.0};
 
+// HDR: the captured picture is linear Rec. 709 light (1.0 = SDR white) and is encoded to the
+// Rec. 2100 HLG signal with Rec. 2020 primaries, as OBS encodes its own HLG output.
+uniform float hdr_hlg = 0.0;
+uniform float sdr_white_over_max = 0.03; // SDR white level / 10000 nits
+
 sampler_state cnv_sampler {
 	Filter   = Point;
 	AddressU = Clamp;
@@ -30,6 +35,57 @@ VertInOut VSDefault(VertInOut vert_in)
 	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
 	vert_out.uv  = vert_in.uv;
 	return vert_out;
+}
+
+float3 rec709_to_rec2020(float3 v)
+{
+	float r = dot(v, float3(0.62740389593469903, 0.32928303837788370, 0.043313065687417225));
+	float g = dot(v, float3(0.069097289358232075, 0.91954039507545871, 0.011362315566309178));
+	float b = dot(v, float3(0.016391438875150280, 0.088013307877225749, 0.89559525324762401));
+	return float3(r, g, b);
+}
+
+float linear_to_hlg_channel(float u)
+{
+	float ln2_i = 1.0 / log(2.0);
+	float m = 0.17883277 / ln2_i;
+	return (u <= (1.0 / 12.0)) ? sqrt(3.0 * u) : ((log2((12.0 * u) - 0.28466892) * m) + 0.55991073);
+}
+
+// Display light relative to 10000 nits to the HLG signal: inverse OOTF for the nominal peak, then the OETF.
+float3 linear_to_hlg(float3 rgb)
+{
+	// relative to a 1000 nits display, as OBS does for a nominal peak up to 1000 nits;
+	// OBS tone maps higher peaks down to 1000 nits, here they clip
+	rgb = saturate(rgb * 10.0);
+	float Yd = dot(rgb, float3(0.2627, 0.678, 0.0593));
+	Yd = max(6.10352e-5, Yd);
+	rgb *= pow(Yd, -1.0 / 6.0);
+	return float3(linear_to_hlg_channel(rgb.r), linear_to_hlg_channel(rgb.g), linear_to_hlg_channel(rgb.b));
+}
+
+float srgb_linear_to_nonlinear_channel(float u)
+{
+	return (u <= 0.0031308) ? (12.92 * u) : ((1.055 * pow(u, 1.0 / 2.4)) - 0.055);
+}
+
+// The signal the scopes measure: R'G'B' as captured for SDR, the HLG signal for HDR.
+float4 to_signal(float4 c)
+{
+	if (hdr_hlg < 0.5)
+		return c;
+	float3 rgb = rec709_to_rec2020(max(c.rgb, float3(0.0, 0.0, 0.0)) * sdr_white_over_max);
+	return float4(linear_to_hlg(rgb), c.a);
+}
+
+// For the SDR dock display: HDR is shown as SDR with highlights above SDR white clipped.
+float4 to_display(float4 c)
+{
+	if (hdr_hlg < 0.5)
+		return c;
+	float3 rgb = saturate(c.rgb);
+	return float4(srgb_linear_to_nonlinear_channel(rgb.r), srgb_linear_to_nonlinear_channel(rgb.g),
+		      srgb_linear_to_nonlinear_channel(rgb.b), c.a);
 }
 
 float in_shape(float2 uv)
@@ -88,7 +144,7 @@ float mask_value(float2 uv, float3 rgb)
 
 float4 PSMaskRGB(VertInOut vert_in) : TARGET
 {
-	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
 	// Pixels outside the mask get alpha 0; the scopes skip them.
 	rgb.a = rgb.a * mask_value(vert_in.uv, rgb.rgb);
 	return rgb;
@@ -96,16 +152,22 @@ float4 PSMaskRGB(VertInOut vert_in) : TARGET
 
 float4 PSDrawDimmed(VertInOut vert_in) : TARGET
 {
-	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	float4 c = image.Sample(cnv_sampler, vert_in.uv);
+	float4 rgb = to_display(c);
 	// For display: keep the selection as is, darken the rest.
-	float m = mask_value(vert_in.uv, rgb.rgb);
+	float m = mask_value(vert_in.uv, to_signal(c).rgb);
 	float k = 0.5 + 0.5 * m;
 	return float4(rgb.rgb * k, rgb.a);
 }
 
+float4 PSDrawDisplay(VertInOut vert_in) : TARGET
+{
+	return to_display(image.Sample(cnv_sampler, vert_in.uv));
+}
+
 float4 PSConvertRGB_YUV601(VertInOut vert_in) : TARGET
 {
-	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
 	float4 uv00;
 	uv00.z = -0.147643 * rgb.x -0.289855 * rgb.y +0.437500 * rgb.z +0.5 - 1.0/256.0; // U
 	uv00.y = +0.299000 * rgb.x +0.587000 * rgb.y +0.114000 * rgb.z; // Y
@@ -116,13 +178,42 @@ float4 PSConvertRGB_YUV601(VertInOut vert_in) : TARGET
 
 float4 PSConvertRGB_YUV709(VertInOut vert_in) : TARGET
 {
-	float4 rgb = image.Sample(cnv_sampler, vert_in.uv);
+	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
 	float4 uv00;
 	uv00.z = -0.100643 * rgb.x -0.338571 * rgb.y +0.439216 * rgb.z +0.5 - 1.0/256.0; // U
 	uv00.y = +0.212600 * rgb.x +0.715200 * rgb.y +0.072200 * rgb.z; // Y
 	uv00.x = +0.439216 * rgb.x -0.398941 * rgb.y -0.040273 * rgb.z +0.5; // V
 	uv00.a = mask_value(vert_in.uv, rgb.rgb);
 	return uv00;
+}
+
+float4 PSConvertRGB_YUV2020(VertInOut vert_in) : TARGET
+{
+	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
+	float4 uv00;
+	uv00.z = -0.122655 * rgb.x -0.316561 * rgb.y +0.439216 * rgb.z +0.5 - 1.0/256.0; // U
+	uv00.y = +0.262700 * rgb.x +0.678000 * rgb.y +0.059300 * rgb.z; // Y
+	uv00.x = +0.439216 * rgb.x -0.403891 * rgb.y -0.035325 * rgb.z +0.5; // V
+	uv00.a = mask_value(vert_in.uv, rgb.rgb);
+	return uv00;
+}
+
+technique DrawDisplay
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawDisplay(vert_in);
+	}
+}
+
+technique ConvertRGB_YUV2020
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSConvertRGB_YUV2020(vert_in);
+	}
 }
 
 technique MaskRGB

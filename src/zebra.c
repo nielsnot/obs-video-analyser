@@ -54,6 +54,7 @@ enum fc_preset_e {
 	FC_PRESET_SKIN = 2,
 	FC_PRESET_SPECTRUM = 3,
 	FC_PRESET_CUSTOM = 4,
+	FC_PRESET_HLG = 5,
 };
 
 static const struct fc_preset_band fc_preset_exposure[] = {
@@ -82,6 +83,17 @@ static const struct fc_preset_band fc_preset_spectrum[] = {
 	{0.50f, 0xFF00C040, "FC.Band.Decile"}, {0.60f, 0xFF90E000, "FC.Band.Decile"},
 	{0.70f, 0xFFF0E000, "FC.Band.Decile"}, {0.80f, 0xFFFFA000, "FC.Band.Decile"},
 	{0.90f, 0xFFFF5000, "FC.Band.Decile"}, {2.00f, 0xFFFF0040, "FC.Band.Decile"},
+};
+
+/* HLG signal levels (Rec. 2100 HLG, BT.2408): 18% grey near 38%, skin around 50-65%,
+ * reference white at 75%. */
+static const struct fc_preset_band fc_preset_hlg[] = {
+	{0.02f, 0xFFD938FF, "FC.Band.BlackClip"}, {0.20f, 0xFF548CFF, "FC.Band.Shadow"},
+	{0.35f, 0xFF4D4D4D, "FC.Band.Dark"},      {0.41f, 0xFF99FF00, "FC.Band.MidGrey"},
+	{0.50f, 0xFF808080, "FC.Band.Mid"},       {0.65f, 0xFFF29E9E, "FC.Band.Skin"},
+	{0.73f, 0xFFB3B3B3, "FC.Band.Bright"},    {0.77f, 0xFF40E0F0, "FC.Band.RefWhite"},
+	{0.90f, 0xFFB3B300, "FC.Band.Highlight"}, {0.98f, 0xFFFFFF00, "FC.Band.BrightHighlight"},
+	{1.00f, 0xFFE68000, "FC.Band.NearClip"},  {2.00f, 0xFFE63300, "FC.Band.Clip"},
 };
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
@@ -344,6 +356,9 @@ static void fc_load_scheme(struct zb_source *src, obs_data_t *settings)
 	case FC_PRESET_SPECTRUM:
 		fc_set_bands(src, fc_preset_spectrum, ARRAY_LEN(fc_preset_spectrum));
 		return;
+	case FC_PRESET_HLG:
+		fc_set_bands(src, fc_preset_hlg, ARRAY_LEN(fc_preset_hlg));
+		return;
 	case FC_PRESET_CUSTOM:
 		break;
 	default:
@@ -531,6 +546,7 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Clipping"), FC_PRESET_CLIPPING);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Skin"), FC_PRESET_SKIN);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Spectrum"), FC_PRESET_SPECTRUM);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.HLG"), FC_PRESET_HLG);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Custom"), FC_PRESET_CUSTOM);
 		obs_property_set_modified_callback(prop, fc_scheme_props_changed);
 
@@ -665,10 +681,10 @@ static uint32_t fcf_get_height(void *data)
 
 static const char *draw_name(int colorspace, bool is_falsecolor)
 {
-	if (colorspace == 1 && is_falsecolor)
-		return "DrawFalseColor601";
-	else if (colorspace == 1)
-		return "DrawZebra601";
+	if (colorspace == CM_CS_601)
+		return is_falsecolor ? "DrawFalseColor601" : "DrawZebra601";
+	else if (colorspace == CM_CS_2100_HLG)
+		return is_falsecolor ? "DrawFalseColor2020" : "DrawZebra2020";
 	else if (is_falsecolor)
 		return "DrawFalseColor709";
 	else
@@ -1018,7 +1034,7 @@ static void zbs_render(void *data, gs_effect_t *effect)
 
 		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
 		set_effect_params(&src->zb, true);
-		const char *draw = draw_name(src->cm.colorspace, src->zb.is_falsecolor);
+		const char *draw = draw_name(cm_get_colorspace(&src->cm), src->zb.is_falsecolor);
 		while (gs_effect_loop(e, draw))
 			gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
 

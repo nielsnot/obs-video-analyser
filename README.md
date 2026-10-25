@@ -36,8 +36,8 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 
 | Scope | Shows | Highlights |
 |-------|-------|------------|
-| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit or 10-bit; mouse wheel zooms in (for example into the blacks) |
-| **Vectorscope** | Hue and saturation | Skin tone line, ring scale with degree ticks, colored hue ring, Lows / Mids / Highs luma ranges, mouse wheel zoom |
+| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit, 10-bit or nits (HLG); mouse wheel zooms in (for example into the blacks) |
+| **Vectorscope** | Hue and saturation | Skin tone line, ring scale with degree ticks, colored hue ring, Lows / Mids / Highs luma ranges, mouse wheel zoom, Rec. 2020 targets for HLG |
 | **Histogram** | Distribution of levels | RGB, Luma, Chroma, YUV, plus Hue and Saturation; drag across a hue or saturation histogram to select that range |
 | **CIE diagram** | Chromaticity | Spectral locus, Rec. 709, DCI-P3 and Rec. 2020 triangles, D65 white point |
 | **Diamond** | RGB gamut | Anything outside the dashed outlines is out of gamut |
@@ -59,6 +59,23 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 More details: [Dock](doc/dock.md), [Waveform](doc/waveform.md), [Vectorscope](doc/vectorscope.md),
 [Histogram](doc/histogram.md), [False Color](doc/falsecolor.md), [Zebra](doc/zebra.md),
 [Focus Peaking](doc/focuspeaking.md), [Global Configuration](doc/global_config.md).
+
+## HDR (HLG)
+
+Video Analyser can measure Rec. 2100 HLG. Set your OBS project to HDR HLG (`Settings` → `Advanced` → `Video`:
+color format P010 or I010, color space Rec. 2100 (HLG)) and the dock follows automatically; or right-click the
+ROI view and set `Color space` to `Rec. 2100 HLG (HDR)` yourself.
+
+- The picture is captured in linear float and encoded to the HLG signal exactly as OBS encodes its HLG output,
+  with Rec. 2020 primaries and matrix. OBS's `SDR white level` decides where SDR material lands (203 nits = 75 %).
+- **Waveform:** a dashed line marks 75 % reference white; `Scale values` → `Nits (HLG)` labels the lines in nits
+  on a 1000 nits display.
+- **Vectorscope:** Rec. 2020 targets, skin tone line and hue ring.
+- **False color:** the `HDR HLG levels` preset (18 % grey near 38 %, skin, reference white at 75 %).
+- **CIE diagram:** plots in Rec. 2020; compare with the Rec. 709 triangle to see wide-gamut colors.
+- The ROI view shows the picture as SDR with highlights above SDR white clipped.
+
+PQ is not supported yet.
 
 ## Scopes as sources
 

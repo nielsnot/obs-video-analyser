@@ -25,7 +25,8 @@ enum scale_labels_e {
 	SCALE_PERCENT = 1,
 	SCALE_IRE = 2,
 	SCALE_8BIT = 3,
-	SCALE_10BIT = 4, // legal range, 64 at black and 940 at white
+	SCALE_10BIT = 4,    // legal range, 64 at black and 940 at white
+	SCALE_HLG_NITS = 5, // display light of an HLG signal level on a 1000 nits display
 };
 
 #define ZOOM_MAX 8.0f
@@ -227,6 +228,7 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.IRE"), SCALE_IRE);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.8bit"), SCALE_8BIT);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.10bit"), SCALE_10BIT);
+	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.HLGNits"), SCALE_HLG_NITS);
 
 	return props;
 }
@@ -522,6 +524,17 @@ static const char *scale_label(int scale, float level, char *buf, size_t size)
 	case SCALE_10BIT:
 		snprintf(buf, size, "%d", (int)lroundf(64.0f + level * 876.0f));
 		break;
+	case SCALE_HLG_NITS: {
+		// inverse HLG OETF to scene light, then the OOTF with system gamma 1.2 for 1000 nits
+		const float e = level <= 0.5f ? level * level / 3.0f
+					      : (expf((level - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
+		const float nits = 1000.0f * powf(fmaxf(e, 0.0f), 1.2f);
+		if (nits < 10.0f)
+			snprintf(buf, size, "%.1f", nits);
+		else
+			snprintf(buf, size, "%d", (int)lroundf(nits));
+		break;
+	}
 	default:
 		buf[0] = 0;
 	}
@@ -582,6 +595,42 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 	}
 }
 
+/* HLG: a line at 75 %, the reference white level of BT.2408 (203 nits). */
+static void wvs_render_hlg_reference(struct wvs_source *src, float width, float height)
+{
+	if (cm_get_colorspace(&src->cm) != CM_CS_2100_HLG || src->graticule_lines <= 0)
+		return;
+
+	const struct text_scale ts = text_scale_from_viewport(width, height);
+	const bool stack = src->display == DISP_STACK;
+	const int n_stack = stack ? (int)n_components(src) : 1;
+	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
+	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
+	const float px = 10.0f;
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	for (int k = 0; k < n_stack; k++) {
+		const float base = (float)(WV_SIZE * k);
+		const float y = base + (WV_SIZE * 0.25f - off) * zoom;
+		if (y < base || y > base + WV_SIZE)
+			continue;
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xB040E0F0);
+		while (gs_effect_loop(solid, "Solid")) {
+			// dashed
+			gs_render_start(false);
+			// at most 200 dashes: an immediate batch holds 512 vertices
+			const float step = fmaxf(12.0f * ts.ux, width / 200.0f);
+			for (float x = 0.0f; x < width; x += step) {
+				gs_vertex2f(x, y);
+				gs_vertex2f(fminf(x + step * 0.6f, width), y);
+			}
+			gs_render_stop(GS_LINES);
+		}
+		text_draw(&ts, "75% ref white", width - 3.0f * ts.ux, y - 1.0f * ts.uy, px, 0xE040E0F0,
+			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+	}
+}
+
 static void wvs_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -632,6 +681,7 @@ static void wvs_render(void *data, gs_effect_t *effect)
 		gs_matrix_pop();
 
 	wvs_render_scale(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
+	wvs_render_hlg_reference(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 
 	PROFILE_END(prof_render_name);
 }

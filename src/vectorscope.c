@@ -323,10 +323,21 @@ static void vss_surface_cb(void *data, struct cm_surface_data *surface_data)
 	src->w_tex_buf ^= 1;
 }
 
+/* 8-bit U and V of a full-range R'G'B' color (0..1) for the color space's matrix. */
+static void rgb_to_uv8(int colorspace, float r, float g, float b, float *u, float *v)
+{
+	const float kr = colorspace == CM_CS_601 ? 0.299f : colorspace == CM_CS_2100_HLG ? 0.2627f : 0.2126f;
+	const float kb = colorspace == CM_CS_601 ? 0.114f : colorspace == CM_CS_2100_HLG ? 0.0593f : 0.0722f;
+	const float y = kr * r + (1.0f - kr - kb) * g + kb * b;
+	*u = 128.0f + 112.0f * (b - y) / (1.0f - kb);
+	*v = 128.0f + 112.0f * (r - y) / (1.0f - kr);
+}
+
 static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 {
 	if (src->update_graticule || colorspace != src->graticule_cs) {
 		src->update_graticule = false;
+		src->graticule_cs = colorspace;
 		vertexbuffer_destroy_safe(src->graticule_vbuf);
 		src->graticule_vbuf = NULL;
 		vertexbuffer_destroy_safe(src->graticule_line_vbuf);
@@ -371,12 +382,23 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 			{44, 136},
 		},
 	};
-	const int ppi = colorspace - 1;
+	// Rec. 2020 (HLG): 100 % and 75 % bars from the matrix; label order R, B, C, Y, G, M
+	float pp2020[12][2];
+	{
+		const float bars[6][3] = {{1, 0, 0}, {0, 0, 1}, {0, 1, 1}, {1, 1, 0}, {0, 1, 0}, {1, 0, 1}};
+		for (int i = 0; i < 12; i++) {
+			const float k = i < 6 ? 1.0f : 0.75f;
+			const float *c = bars[i % 6];
+			rgb_to_uv8(CM_CS_2100_HLG, c[0] * k, c[1] * k, c[2] * k, &pp2020[i][0], &pp2020[i][1]);
+		}
+	}
+	const float(*pts)[2] = colorspace == CM_CS_2100_HLG ? (const float(*)[2])pp2020
+							    : pp[colorspace == CM_CS_601 ? 0 : 1];
 
 	// label
 	for (int i = 0; i < 6; i++) {
-		float x = pp[ppi][i][0];
-		float y = 256.f - pp[ppi][i][1];
+		float x = pts[i][0];
+		float y = 256.f - pts[i][1];
 		if (x < 72)
 			y += 20;
 		else if (x > 184)
@@ -394,8 +416,8 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 	src->graticule_line_vbuf = NULL;
 	gs_render_start(true);
 	for (int i = 0; i < 12; i++) {
-		const float x = pp[ppi][i][0];
-		const float y = 256.f - pp[ppi][i][1];
+		const float x = pts[i][0];
+		const float y = 256.f - pts[i][1];
 		const float box[16][2] = {
 			{-6, -6}, {-2, -6}, {-6, -6}, {-6, -2}, {+6, -6}, {+2, -6}, {+6, -6}, {+6, -2},
 			{-6, +6}, {-2, +6}, {-6, +6}, {-6, +2}, {+6, +6}, {+2, +6}, {+6, +6}, {+6, +2},
@@ -413,6 +435,9 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 	case 1: // BT.601
 		stl_u = (float)RGB2U_601(stl_r, stl_g, stl_b);
 		stl_v = (float)RGB2V_601(stl_r, stl_g, stl_b);
+		break;
+	case CM_CS_2100_HLG: // BT.2020
+		rgb_to_uv8(colorspace, stl_r / 255.0f, stl_g / 255.0f, stl_b / 255.0f, &stl_u, &stl_v);
 		break;
 	default: // BT.709
 		stl_u = (float)RGB2U_709(stl_r, stl_g, stl_b);
@@ -496,10 +521,11 @@ static void draw_hue_ring(int colorspace)
 	const float r0 = 123.0f, r1 = 127.5f;
 	const int n_seg = 180;
 	// U/V to R'G'B' for the matrix in use
-	const float kr_v = colorspace == 1 ? 1.402f : 1.5748f;
-	const float kg_u = colorspace == 1 ? 0.3441f : 0.1873f;
-	const float kg_v = colorspace == 1 ? 0.7141f : 0.4681f;
-	const float kb_u = colorspace == 1 ? 1.772f : 1.8556f;
+	const bool bt2020 = colorspace == CM_CS_2100_HLG;
+	const float kr_v = colorspace == 1 ? 1.402f : bt2020 ? 1.4746f : 1.5748f;
+	const float kg_u = colorspace == 1 ? 0.3441f : bt2020 ? 0.16455f : 0.1873f;
+	const float kg_v = colorspace == 1 ? 0.7141f : bt2020 ? 0.57135f : 0.4681f;
+	const float kb_u = colorspace == 1 ? 1.772f : bt2020 ? 1.8814f : 1.8556f;
 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF); // vertex colors as they are
@@ -579,6 +605,13 @@ static void vss_render(void *data, gs_effect_t *effect)
 				const struct vec4 color = {{{0.5f, 0.5f, 0.5f, 1.0f}}};
 				const struct vec3 color_u = {{{0.0f, -0.3441f, +1.772f, 0.0f}}};
 				const struct vec3 color_v = {{{+1.402f, -0.7141f, 0.0f, 0.0f}}};
+				gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
+				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_u"), &color_u);
+				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_v"), &color_v);
+			} else if (src->tex_cs[r_tex_buf] == CM_CS_2100_HLG) /* BT.2020 */ {
+				const struct vec4 color = {{{0.5f, 0.5f, 0.5f, 1.0f}}};
+				const struct vec3 color_u = {{{0.0f, -0.16455f, +1.8814f, 0.0f}}};
+				const struct vec3 color_v = {{{+1.4746f, -0.57135f, 0.0f, 0.0f}}};
 				gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
 				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_u"), &color_u);
 				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_v"), &color_v);

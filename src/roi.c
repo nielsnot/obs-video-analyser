@@ -620,6 +620,7 @@ static void roi_render(void *data, gs_effect_t *effect)
 		// Darkens everything outside the shapes and the qualifier.
 		gs_effect_t *dim = src->cm.effect;
 		cm_set_mask_params(dim, &src->mask);
+		cm_set_signal_params(dim, src->cm.colorspace);
 		gs_effect_set_texture(gs_effect_get_param_by_name(dim, "image"), tex);
 		while (gs_effect_loop(dim, "DrawDimmed")) {
 			gs_draw_sprite(tex, 0, src->cm.texrender_width, src->cm.texrender_height);
@@ -636,9 +637,13 @@ static void roi_render(void *data, gs_effect_t *effect)
 	const bool comparing = src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
 			       src->ref_h == src->cm.texrender_height;
 	if (comparing) {
-		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		// the reference has the captured format: linear float for HDR, shown the same way as the live picture
+		const bool hdr_ref = gs_texture_get_color_format(src->ref_tex) == GS_RGBA16F && src->cm.effect;
+		gs_effect_t *def = hdr_ref ? src->cm.effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		if (hdr_ref)
+			cm_set_signal_params(def, CM_CS_2100_HLG);
 		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
-		while (gs_effect_loop(def, "Draw"))
+		while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
 			gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, src->ref_w / 2, src->ref_h);
 		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFF59D9);

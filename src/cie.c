@@ -1,7 +1,8 @@
 /*
  * CIE 1931 chromaticity diagram.
  *
- * Each pixel is converted from Rec. 709 R'G'B' to linear light, then to CIE XYZ and plotted at
+ * Each pixel is converted from Rec. 709 R'G'B' (or the Rec. 2100 HLG signal with Rec. 2020
+ * primaries) to linear light, then to CIE XYZ and plotted at
  * its xy chromaticity. The spectral locus, the Rec. 709, DCI-P3 and Rec. 2020 gamut triangles
  * and the D65 white point are drawn as reference.
  */
@@ -26,7 +27,8 @@ struct cie_source
 	uint8_t *tex_buf[2];
 	volatile int w_tex_buf;
 	gs_effect_t *effect;
-	float lin[256]; // R'G'B' code value to linear light
+	float lin[256];     // R'G'B' code value to linear light
+	float lin_hlg[256]; // HLG signal code value to scene light
 
 	int intensity;
 	bool show_709, show_p3, show_2020, show_grid;
@@ -48,6 +50,12 @@ static void *cie_create(obs_data_t *settings, obs_source_t *source)
 	// BT.1886-like display gamma
 	for (int i = 0; i < 256; i++)
 		src->lin[i] = powf(i / 255.0f, 2.4f);
+	// inverse HLG OETF; the OOTF scales R, G and B alike and leaves the chromaticity as it is
+	for (int i = 0; i < 256; i++) {
+		const float e = i / 255.0f;
+		src->lin_hlg[i] = e <= 0.5f ? e * e / 3.0f
+					    : (expf((e - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
+	}
 
 	src->cm.flags = CM_FLAG_CONVERT_RGB;
 	cm_create(&src->cm, settings, source);
@@ -129,16 +137,22 @@ static void cie_draw(const struct cie_source *src, uint8_t *dbuf, const struct c
 {
 	memset(dbuf, 0, CIE_W * CIE_H);
 
+	const bool hlg = surface_data->colorspace == CM_CS_2100_HLG;
+	const float *lin = hlg ? src->lin_hlg : src->lin;
+	// RGB to XYZ, D65: Rec. 2020 primaries for HLG, Rec. 709 / sRGB otherwise
+	static const float m709[9] = {0.4124f, 0.3576f, 0.1805f, 0.2126f, 0.7152f, 0.0722f, 0.0193f, 0.1192f, 0.9505f};
+	static const float m2020[9] = {0.6370f, 0.1446f, 0.1689f, 0.2627f, 0.6780f, 0.0593f, 0.0000f, 0.0281f, 1.0610f};
+	const float *m = hlg ? m2020 : m709;
+
 	for (uint32_t y = 0; y < surface_data->height; y++) {
 		const uint8_t *p = surface_data->rgb_data + (size_t)surface_data->linesize * y;
 		for (uint32_t x = 0; x < surface_data->width; x++, p += 4) {
 			if (!p[3])
 				continue; // outside the selection
-			const float b = src->lin[p[0]], g = src->lin[p[1]], r = src->lin[p[2]];
-			// Rec. 709 / sRGB primaries, D65
-			const float X = 0.4124f * r + 0.3576f * g + 0.1805f * b;
-			const float Y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-			const float Z = 0.0193f * r + 0.1192f * g + 0.9505f * b;
+			const float b = lin[p[0]], g = lin[p[1]], r = lin[p[2]];
+			const float X = m[0] * r + m[1] * g + m[2] * b;
+			const float Y = m[3] * r + m[4] * g + m[5] * b;
+			const float Z = m[6] * r + m[7] * g + m[8] * b;
 			const float sum = X + Y + Z;
 			if (sum < 0.0005f)
 				continue; // black has no chromaticity

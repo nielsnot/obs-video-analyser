@@ -60,6 +60,20 @@ float4 PSDrawZebra709(VertInOut vert_in) : TARGET
 		return rgba;
 }
 
+float4 PSDrawZebra2020(VertInOut vert_in) : TARGET
+{
+	float4 rgba = image.Sample(def_sampler, vert_in.uv);
+	if (mask_outside > 0.5 && rgba.a < 0.5)
+		return outside_selection(rgba);
+	float y = dot(rgba.xyz, float3(0.262700, 0.678000, 0.059300));
+	int xy = int(vert_in.pos.x + vert_in.pos.y + zebra_tm);
+	xy = xy - (xy / 6) * 6;
+	if (zebra_th_low<=y && y<=zebra_th_high && xy<3)
+		return float4(0.0, 0.0, 0.0, 1.0);
+	else
+		return rgba;
+}
+
 technique DrawZebra601
 {
 	pass
@@ -74,5 +88,14 @@ technique DrawZebra709
 	{
 		vertex_shader = VSDefault(vert_in);
 		pixel_shader  = PSDrawZebra709(vert_in);
+	}
+}
+
+technique DrawZebra2020
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawZebra2020(vert_in);
 	}
 }

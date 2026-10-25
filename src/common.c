@@ -139,10 +139,11 @@ static void prepare_stagesurface(struct cm_surface_queue_item *item, uint32_t wi
 }
 
 static bool render_target_to_texrender(obs_source_t *target, uint32_t target_width, uint32_t target_height,
-				       gs_texrender_t *texrender, uint32_t width, uint32_t height)
+				       gs_texrender_t *texrender, uint32_t width, uint32_t height, bool hdr)
 {
 	gs_texrender_reset(texrender);
-	if (!gs_texrender_begin(texrender, width, height))
+	// HDR: linear Rec. 709 light where 1.0 is SDR white, as OBS composites its HDR canvas
+	if (!gs_texrender_begin_with_color_space(texrender, width, height, hdr ? GS_CS_709_EXTENDED : GS_CS_SRGB))
 		return false;
 
 	struct vec4 background;
@@ -191,6 +192,7 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 			uint32_t offset = 0;
 
 			cm_set_mask_params(src->effect, src->mask);
+			cm_set_signal_params(src->effect, src->colorspace);
 
 			if (item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_RAW_TEXTURE)) {
 				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
@@ -206,8 +208,9 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 					gs_matrix_translate3f(0.0f, (float)offset, 0.0f);
 				}
 
-				const char *conversion = src->colorspace == 1 ? "ConvertRGB_YUV601"
-									      : "ConvertRGB_YUV709";
+				const char *conversion = src->colorspace == CM_CS_601        ? "ConvertRGB_YUV601"
+							 : src->colorspace == CM_CS_2100_HLG ? "ConvertRGB_YUV2020"
+											     : "ConvertRGB_YUV709";
 				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
 				while (gs_effect_loop(src->effect, conversion)) {
 					gs_draw_sprite_subregion(tex, 0, x, y, item->width, item->height);
@@ -300,11 +303,19 @@ void cm_render_target(struct cm_source *src)
 
 	prepare_stagesurface(item, cx, cy, sheight);
 
-	if (!src->texrender)
-		src->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	const bool hdr = src->colorspace == CM_CS_2100_HLG;
+	const enum gs_color_format format = hdr ? GS_RGBA16F : GS_BGRA;
+	if (src->texrender && src->texrender_format != format) {
+		gs_texrender_destroy(src->texrender);
+		src->texrender = NULL;
+	}
+	if (!src->texrender) {
+		src->texrender = gs_texrender_create(format, GS_ZS_NONE);
+		src->texrender_format = format;
+	}
 
 	if (!render_target_to_texrender(target, target_width, target_height, src->texrender, scaled_width,
-					scaled_height)) {
+					scaled_height, hdr)) {
 		obs_source_release(target);
 		return;
 	}
@@ -656,4 +667,19 @@ void cm_set_mask_params(gs_effect_t *effect, const struct cm_mask *mask)
 		set_vec2(effect, "qual_sat", mask->sat_min, mask->sat_max);
 		set_vec2(effect, "qual_luma", mask->luma_min, mask->luma_max);
 	}
+}
+
+void cm_set_signal_params(gs_effect_t *effect, int colorspace)
+{
+	if (!effect)
+		return;
+	set_float(effect, "hdr_hlg", colorspace == CM_CS_2100_HLG ? 1.0f : 0.0f);
+	set_float(effect, "sdr_white_over_max", obs_get_video_sdr_white_level() / 10000.0f);
+}
+
+int cm_get_colorspace(const struct cm_source *src)
+{
+	if (cm_is_roi(src))
+		return src->roi->cm.colorspace;
+	return src->colorspace;
 }

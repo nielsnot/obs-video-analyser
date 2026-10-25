@@ -67,6 +67,7 @@ struct cm_source
 	volatile int i_read_queue;
 	int i_bypass_queue;
 	gs_texrender_t *texrender;
+	enum gs_color_format texrender_format; // GS_RGBA16F holds linear light for HDR
 	uint32_t texrender_width, texrender_height;
 	gs_effect_t *effect;
 	bool rendered;
@@ -120,6 +121,10 @@ void cm_tick(void *data, float unused);
 
 void cm_request(struct cm_source *src, cm_surface_cb_t callback, void *data);
 void cm_set_mask_params(gs_effect_t *effect, const struct cm_mask *mask);
+/* Sets the uniforms that encode the captured picture (hdr_hlg, sdr_white_over_max). */
+void cm_set_signal_params(gs_effect_t *effect, int colorspace);
+/* The color space the scope's data is in: the ROI's when the scope follows the dock selection. */
+int cm_get_colorspace(const struct cm_source *src);
 
 uint32_t cm_bypass_get_width(struct cm_source *src);
 uint32_t cm_bypass_get_height(struct cm_source *src);
