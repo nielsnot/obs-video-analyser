@@ -33,6 +33,10 @@
 #include <QApplication>
 #include <QPointer>
 #include <QKeyEvent>
+#include <QDoubleSpinBox>
+#include <QWidgetAction>
+#include <QColor>
+#include <memory>
 #include "plugin-macros.generated.h"
 #include "scope-widget.hpp"
 #include "scope-widget-properties.hpp"
@@ -1424,6 +1428,13 @@ QFrame#ScopeOptions QSlider::handle:horizontal {
 	background: #f0f0f2; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
 }
 QFrame#ScopeOptions QFrame#Divider { background: #303036; max-height: 1px; min-height: 1px; border: none; }
+QFrame#ScopeOptions QDoubleSpinBox {
+	background: #2a2a2f; color: #e8e8ec; border: 1px solid #3c3c43; border-radius: 6px;
+	padding: 2px 4px; min-height: 20px;
+}
+QFrame#ScopeOptions QDoubleSpinBox:focus { border-color: #6fcf86; }
+QFrame#ScopeOptions QFrame#MarkerCard { background: #232327; border: 1px solid #333339; border-radius: 8px; }
+QFrame#ScopeOptions QPushButton#Swatch { border: 1px solid #55555c; border-radius: 5px; padding: 0px; }
 )";
 
 static QLabel *section_label(QWidget *parent, const QString &text)
@@ -1645,6 +1656,353 @@ protected:
 };
 #endif
 
+/* ---------- markers ---------- */
+
+// mirrors struct cm_marker (markers.h); percentages and degrees as shown in the panel
+struct marker_ui
+{
+	std::string name;
+	int kind = 0;        // 0 level (waveform), 1 point, 2 line (vectorscope)
+	double level = 75.0; // %
+	double hue = 123.0;  // degrees, counter-clockwise from +U
+	double sat = 40.0;   // % of the outer ring
+	uint32_t color = 0xFFFFD040;
+	int style = 0;      // solid, dashed, dotted
+	int shape = 0;      // circle, cross, square, dot
+	double width = 1.5; // px
+	bool show_label = true;
+};
+
+static const uint32_t marker_palette[] = {0xFFFFD040, 0xFF40E0F0, 0xFFFF5A5A, 0xFF6FCF86, 0xFFFF9F40,
+					  0xFFB070FF, 0xFFFFFFFF, 0xFFFF70C0, 0xFF4090FF, 0xFFA0A0A8};
+
+static std::vector<marker_ui> load_markers(obs_source_t *src)
+{
+	std::vector<marker_ui> v;
+	OBSDataAutoRelease settings = obs_source_get_settings(src);
+	OBSDataArrayAutoRelease array = obs_data_get_array(settings, "markers");
+	const size_t n = array ? obs_data_array_count(array) : 0;
+	for (size_t i = 0; i < n; i++) {
+		OBSDataAutoRelease d = obs_data_array_item(array, i);
+		marker_ui m;
+		m.name = obs_data_get_string(d, "name");
+		m.kind = (int)obs_data_get_int(d, "kind");
+		m.level = obs_data_get_double(d, "level");
+		m.hue = obs_data_get_double(d, "hue");
+		m.sat = obs_data_get_double(d, "sat");
+		if (obs_data_has_user_value(d, "color"))
+			m.color = (uint32_t)obs_data_get_int(d, "color");
+		m.style = (int)obs_data_get_int(d, "style");
+		m.shape = (int)obs_data_get_int(d, "shape");
+		if (obs_data_has_user_value(d, "width"))
+			m.width = obs_data_get_double(d, "width");
+		if (obs_data_has_user_value(d, "show_label"))
+			m.show_label = obs_data_get_bool(d, "show_label");
+		v.push_back(m);
+	}
+	return v;
+}
+
+static void save_markers(obs_source_t *src, const std::vector<marker_ui> &v)
+{
+	OBSDataArrayAutoRelease array = obs_data_array_create();
+	for (const marker_ui &m : v) {
+		OBSDataAutoRelease d = obs_data_create();
+		obs_data_set_string(d, "name", m.name.c_str());
+		obs_data_set_int(d, "kind", m.kind);
+		obs_data_set_double(d, "level", m.level);
+		obs_data_set_double(d, "hue", m.hue);
+		obs_data_set_double(d, "sat", m.sat);
+		obs_data_set_int(d, "color", (long long)m.color);
+		obs_data_set_int(d, "style", m.style);
+		obs_data_set_int(d, "shape", m.shape);
+		obs_data_set_double(d, "width", m.width);
+		obs_data_set_bool(d, "show_label", m.show_label);
+		obs_data_array_push_back(array, d);
+	}
+	update_one(src, [&](obs_data_t *d) { obs_data_set_array(d, "markers", array); });
+}
+
+static void set_swatch_color(QPushButton *b, uint32_t argb)
+{
+	const QColor c = QColor::fromRgba(argb);
+	b->setStyleSheet(QStringLiteral("QPushButton#Swatch { background: %1; }").arg(c.name()));
+}
+
+/* Vectorscope angle (degrees) and distance (% of the outer ring) of an R'G'B' color. */
+static void color_to_hue_sat(int colorspace, int r, int g, int b, double *hue, double *sat)
+{
+	const double kr = colorspace == 1 ? 0.299 : colorspace == 3 ? 0.2627 : 0.2126;
+	const double kb = colorspace == 1 ? 0.114 : colorspace == 3 ? 0.0593 : 0.0722;
+	const double R = r / 255.0, G = g / 255.0, B = b / 255.0;
+	const double y = kr * R + (1.0 - kr - kb) * G + kb * B;
+	const double u = 112.0 * (B - y) / (1.0 - kb);
+	const double v = 112.0 * (R - y) / (1.0 - kr);
+	double a = std::atan2(v, u) * 180.0 / M_PI;
+	if (a < 0.0)
+		a += 360.0;
+	*hue = a;
+	*sat = std::hypot(u, v) / 127.0 * 100.0;
+}
+
+static QDoubleSpinBox *marker_spin(QWidget *parent, double lo, double hi, double step, double value, const char *suffix,
+				   int decimals = 1)
+{
+	auto *spin = new QDoubleSpinBox(parent);
+	spin->setRange(lo, hi);
+	spin->setSingleStep(step);
+	spin->setDecimals(decimals);
+	spin->setSuffix(QString::fromUtf8(suffix));
+	spin->setValue(value);
+	spin->setKeyboardTracking(false);
+	return spin;
+}
+
+/* The MARKERS section of the options panel: a card per marker and an Add button. */
+void ScopeWidget::addMarkerControls(QWidget *panel, QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
+				    const std::function<void()> &reopen)
+{
+	auto markers = std::make_shared<std::vector<marker_ui>>(load_markers(src));
+	auto save = [markers, src]() { save_markers(src, *markers); };
+
+	vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Markers"))));
+
+	for (size_t i = 0; i < markers->size(); i++) {
+		marker_ui &m = (*markers)[i];
+		auto *card = new QFrame(panel);
+		card->setObjectName("MarkerCard");
+		auto *cv = new QVBoxLayout(card);
+		cv->setContentsMargins(8, 6, 8, 6);
+		cv->setSpacing(4);
+
+		// color, name, delete
+		{
+			auto *row = new QHBoxLayout();
+			auto *swatch = new QPushButton(card);
+			swatch->setObjectName("Swatch");
+			swatch->setFixedSize(22, 22);
+			swatch->setToolTip(QString::fromUtf8(obs_module_text("Markers.Color")));
+			set_swatch_color(swatch, m.color);
+			connect(swatch, &QPushButton::clicked, this, [this, swatch, markers, i, save]() {
+				QMenu menu(swatch);
+				for (uint32_t c : marker_palette) {
+					QPixmap pm(14, 14);
+					pm.fill(QColor::fromRgba(c));
+					QAction *a = menu.addAction(QIcon(pm), QColor::fromRgba(c).name().toUpper());
+					connect(a, &QAction::triggered, this, [swatch, markers, i, save, c]() {
+						(*markers)[i].color = c;
+						set_swatch_color(swatch, c);
+						save();
+					});
+				}
+				menu.addSeparator();
+				auto *hex =
+					new QLineEdit(QColor::fromRgba((*markers)[i].color).name().toUpper(), &menu);
+				hex->setPlaceholderText(QStringLiteral("#RRGGBB"));
+				auto *wa = new QWidgetAction(&menu);
+				wa->setDefaultWidget(hex);
+				menu.addAction(wa);
+				connect(hex, &QLineEdit::returnPressed, &menu,
+					[&menu, hex, swatch, markers, i, save]() {
+						const QColor c(hex->text().trimmed());
+						if (c.isValid()) {
+							(*markers)[i].color = 0xFF000000 | (c.rgb() & 0xFFFFFF);
+							set_swatch_color(swatch, (*markers)[i].color);
+							save();
+						}
+						menu.close();
+					});
+				menu.exec(swatch->mapToGlobal(QPoint(0, swatch->height())));
+			});
+			row->addWidget(swatch);
+
+			auto *name = new QLineEdit(QString::fromStdString(m.name), card);
+			name->setPlaceholderText(QString::fromUtf8(obs_module_text("Markers.Name")));
+			connect(name, &QLineEdit::textEdited, this, [markers, i, save](const QString &t) {
+				(*markers)[i].name = t.toStdString();
+				save();
+			});
+			row->addWidget(name, 1);
+
+			auto *del = new QPushButton(QStringLiteral("✕"), card);
+			del->setObjectName("Flat");
+			del->setToolTip(QString::fromUtf8(obs_module_text("Markers.Delete")));
+			connect(del, &QPushButton::clicked, this, [markers, i, save, reopen]() {
+				markers->erase(markers->begin() + (long)i);
+				save();
+				reopen();
+			});
+			row->addWidget(del);
+			cv->addLayout(row);
+		}
+
+		auto add_style_combo = [&](QHBoxLayout *row) {
+			auto *style = new QComboBox(card);
+			style->addItem(QString::fromUtf8(obs_module_text("Markers.Solid")));
+			style->addItem(QString::fromUtf8(obs_module_text("Markers.Dashed")));
+			style->addItem(QString::fromUtf8(obs_module_text("Markers.Dotted")));
+			style->setCurrentIndex(std::clamp(m.style, 0, 2));
+			connect(style, QOverload<int>::of(&QComboBox::activated), this, [markers, i, save](int v) {
+				(*markers)[i].style = v;
+				save();
+			});
+			row->addWidget(style, 1);
+		};
+		auto add_width_spin = [&](QHBoxLayout *row) {
+			auto *w = marker_spin(card, 0.5, 8.0, 0.5, m.width, " px");
+			w->setToolTip(QString::fromUtf8(obs_module_text("Markers.Width")));
+			connect(w, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+				[markers, i, save](double v) {
+					(*markers)[i].width = v;
+					save();
+				});
+			row->addWidget(w);
+		};
+
+		if (!vectorscope) {
+			auto *row = new QHBoxLayout();
+			auto *level = marker_spin(card, -7.0, 109.0, 0.5, m.level, " %");
+			level->setToolTip(QString::fromUtf8(obs_module_text("Markers.Level")));
+			connect(level, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+				[markers, i, save](double v) {
+					(*markers)[i].level = v;
+					save();
+				});
+			row->addWidget(level);
+			add_style_combo(row);
+			add_width_spin(row);
+			cv->addLayout(row);
+		} else {
+			auto *row = new QHBoxLayout();
+			auto *kind = new QComboBox(card);
+			kind->addItem(QString::fromUtf8(obs_module_text("Markers.Point")), 1);
+			kind->addItem(QString::fromUtf8(obs_module_text("Markers.Line")), 2);
+			kind->setCurrentIndex(m.kind == 2 ? 1 : 0);
+			connect(kind, QOverload<int>::of(&QComboBox::activated), this,
+				[markers, i, save, reopen](int v) {
+					(*markers)[i].kind = v == 1 ? 2 : 1;
+					save();
+					reopen();
+				});
+			row->addWidget(kind, 1);
+			auto *hue = marker_spin(card, 0.0, 359.9, 1.0, m.hue, "°");
+			hue->setWrapping(true);
+			hue->setToolTip(QString::fromUtf8(obs_module_text("Markers.Angle")));
+			connect(hue, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+				[markers, i, save](double v) {
+					(*markers)[i].hue = v;
+					save();
+				});
+			row->addWidget(hue);
+			QDoubleSpinBox *sat = nullptr;
+			if (m.kind != 2) {
+				sat = marker_spin(card, 0.0, 120.0, 1.0, m.sat, " %");
+				sat->setToolTip(QString::fromUtf8(obs_module_text("Markers.Saturation")));
+				connect(sat, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+					[markers, i, save](double v) {
+						(*markers)[i].sat = v;
+						save();
+					});
+				row->addWidget(sat);
+			}
+			cv->addLayout(row);
+
+			auto *row2 = new QHBoxLayout();
+			if (m.kind == 2) {
+				add_style_combo(row2);
+			} else {
+				auto *shape = new QComboBox(card);
+				shape->addItem(QString::fromUtf8(obs_module_text("Markers.Circle")));
+				shape->addItem(QString::fromUtf8(obs_module_text("Markers.Cross")));
+				shape->addItem(QString::fromUtf8(obs_module_text("Markers.Square")));
+				shape->addItem(QString::fromUtf8(obs_module_text("Markers.Dot")));
+				shape->setCurrentIndex(std::clamp(m.shape, 0, 3));
+				connect(shape, QOverload<int>::of(&QComboBox::activated), this,
+					[markers, i, save](int v) {
+						(*markers)[i].shape = v;
+						save();
+					});
+				row2->addWidget(shape, 1);
+			}
+			add_width_spin(row2);
+
+			// put the marker on the color under a picker pin
+			auto *pick = new QPushButton(QStringLiteral("⊕"), card);
+			pick->setObjectName("Flat");
+			pick->setToolTip(QString::fromUtf8(obs_module_text("Markers.FromPin")));
+			connect(pick, &QPushButton::clicked, this, [this, pick, markers, i, save, hue, sat]() {
+				struct roi_source *roi = widget_roi(data);
+				QMenu menu(pick);
+				bool any = false;
+				if (roi) {
+					pthread_mutex_lock(&roi->shapes_mutex);
+					for (size_t p = 0; p < roi->pins.num; p++) {
+						const struct roi_pin &pin = roi->pins.array[p];
+						if (!pin.valid)
+							continue;
+						const int r = pin.r, g = pin.g, b = pin.b;
+						QPixmap pm(14, 14);
+						pm.fill(QColor(r, g, b));
+						QAction *a = menu.addAction(
+							QIcon(pm), QString::fromUtf8(obs_module_text("Markers.Pin"))
+									   .arg((int)p + 1));
+						const int cs = roi->cm.colorspace;
+						connect(a, &QAction::triggered, this,
+							[markers, i, save, hue, sat, cs, r, g, b]() {
+								double h, sv;
+								color_to_hue_sat(cs, r, g, b, &h, &sv);
+								(*markers)[i].hue = h;
+								(*markers)[i].sat = sv;
+								hue->blockSignals(true);
+								hue->setValue(h);
+								hue->blockSignals(false);
+								if (sat) {
+									sat->blockSignals(true);
+									sat->setValue(sv);
+									sat->blockSignals(false);
+								}
+								save();
+							});
+						any = true;
+					}
+					pthread_mutex_unlock(&roi->shapes_mutex);
+				}
+				if (!any)
+					menu.addAction(QString::fromUtf8(obs_module_text("Markers.NoPins")))
+						->setEnabled(false);
+				menu.exec(pick->mapToGlobal(QPoint(0, pick->height())));
+			});
+			row2->addWidget(pick);
+			cv->addLayout(row2);
+		}
+
+		auto *label = new QCheckBox(QString::fromUtf8(obs_module_text("Markers.ShowLabel")), card);
+		label->setChecked(m.show_label);
+		connect(label, &QCheckBox::toggled, this, [markers, i, save](bool on) {
+			(*markers)[i].show_label = on;
+			save();
+		});
+		cv->addWidget(label);
+
+		vbox->addWidget(card);
+	}
+
+	if (markers->size() < 16) {
+		auto *add = new QPushButton(QString::fromUtf8(obs_module_text("Markers.Add")), panel);
+		connect(add, &QPushButton::clicked, this, [markers, vectorscope, save, reopen]() {
+			marker_ui m;
+			const size_t n = markers->size();
+			m.name = QString::fromUtf8(obs_module_text("Markers.Default")).arg((int)n + 1).toStdString();
+			m.kind = vectorscope ? 1 : 0;
+			m.color = marker_palette[n % (sizeof(marker_palette) / sizeof(marker_palette[0]))];
+			markers->push_back(m);
+			save();
+			reopen();
+		});
+		vbox->addWidget(add);
+	}
+}
+
 void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 {
 	obs_source_t *src = tile_source(data, tile);
@@ -1803,6 +2161,11 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 			add_property_controls(panel, vbox, src, props, settings, reopen);
 			obs_properties_destroy(props);
 		}
+	}
+
+	if (e && (e->type == TYPE_WAVEFORM || e->type == TYPE_VECTORSCOPE)) {
+		vbox->addWidget(divider(panel));
+		addMarkerControls(panel, vbox, src, e->type == TYPE_VECTORSCOPE, reopen);
 	}
 
 	vbox->addWidget(divider(panel));

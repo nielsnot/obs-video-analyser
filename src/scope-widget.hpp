@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <obs.h>
 #include <QWidget>
 #include <memory>
@@ -48,6 +50,8 @@ private:
 	void rebuildTabs();
 	void openTabMenu(const QPoint &pos);
 	void openOptions(int tile, const QPoint &globalPos);
+	void addMarkerControls(class QWidget *panel, class QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
+			       const std::function<void()> &reopen);
 	void insertScope(int type, obs_data_t *prop, obs_data_t *meta, int index);
 
 public slots:

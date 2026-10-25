@@ -1,9 +1,10 @@
 '''
 Check the HDR HLG signal path.
 
-A white color source fills the picture. A luma waveform in a dock shows where white lands:
-- SDR (Rec. 709): at 100 %.
-- HLG: SDR white (OBS default 300 nits) encoded like OBS's own HLG output, about 81 %.
+A white color source fills the picture. False color shows where white lands:
+- SDR (Rec. 709): at 100 %, the "clipped" band (red).
+- HLG: SDR white (OBS default 300 nits) encoded like OBS's own HLG output is about 81 %,
+  the "highlights" band (dark yellow) of the Exposure preset.
 
 The second test switches the OBS project itself to Rec. 2100 HLG, so the picture is captured
 from OBS's HDR canvas in linear float.
@@ -13,15 +14,16 @@ import base64
 import io
 import json
 import os
+import re
 import time
 import unittest
 from onsdriver import obstest
 
 DOCK_KEY = 'obs-video-analyser-dock'
 PREFIX = 'obs-video-analyser.'
-WV_SIZE = 256
-# HLG signal of SDR white at 300 nits on a 1000 nits display
-HLG_WHITE = 0.813
+
+CLIP = (230, 51, 0)         # Exposure preset, 100 % and above
+HIGHLIGHT = (179, 179, 0)   # Exposure preset, 78-84 %
 
 
 def notice(msg):
@@ -30,13 +32,20 @@ def notice(msg):
 
 
 def dock_data(colorspace):
-    'A dock with a luma waveform following the selection.'
-    scopes = [{
-        'type': 'waveform',
-        'label': 'WV', 'show_label': False, 'use_roi': True, 'target': '',
-        'prop': {'components': 0x20, 'display': 0, 'graticule_lines': 0, 'scale_labels': 0,
-                 'intensity': 255, 'target_scale': 2},
-    }]
+    'A dock with a false color scope and a luma waveform following the selection.'
+    scopes = [
+        {
+            'type': 'falsecolor',
+            'label': 'FC', 'show_label': False, 'use_roi': True, 'target': '',
+            'prop': {'fc_preset': 0, 'show_key': 0, 'target_scale': 2},
+        },
+        {
+            'type': 'waveform',
+            'label': 'WV', 'show_label': False, 'use_roi': True, 'target': '',
+            'prop': {'components': 0x20, 'display': 0, 'graticule_lines': 0, 'scale_labels': 0,
+                     'intensity': 255, 'target_scale': 2},
+        },
+    ]
     return {
         'docks': [{
             'name': 'HLG test',
@@ -47,6 +56,11 @@ def dock_data(colorspace):
             'views': [{'name': 'View 1', 'state': {'layout': 0, 'roi-shown': True, 'scopes': scopes}}],
         }],
     }
+
+
+def near(a, b, tol=40):
+    'Colors within a tolerance.'
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
 
 
 class HLGTestBase(obstest.OBSTest):
@@ -66,17 +80,29 @@ class HLGTestBase(obstest.OBSTest):
             json.dump(collection, fw)
         if self.hdr_project:
             profile = self.obs.config.get_profile()
-            profile['AdvVideo']['ColorSpace'] = '2100HLG'
-            profile['AdvVideo']['ColorFormat'] = 'P010'
-            profile['AdvVideo']['ColorRange'] = 'Partial'
+            video = profile['AdvVideo']
+            video['ColorSpace'] = '2100HLG'
+            video['ColorFormat'] = 'P010'
+            video['ColorRange'] = 'Partial'
             profile.save()
+            notice(f'profile {profile.path}: AdvVideo {dict(video)}')
         self.obs.run()
 
-    def screenshot(self, cl, name, repeat=40):
+    def log_video_settings(self):
+        'Show the video settings OBS reports in its log.'
+        log = self.obs.get_logfile()
+        if not log:
+            return
+        with open(log, encoding='utf-8', errors='replace') as fr:
+            lines = [l.strip() for l in fr if re.search(r'color space|format:|sdr white|hdr nominal', l, re.I)]
+        notice('OBS video: ' + ' | '.join(lines[:8]))
+
+    def screenshot(self, cl, name, repeat=40, size=None):
         'Render the source repeatedly so its pipeline has data, then return the last image.'
         from PIL import Image  # pylint: disable=import-outside-toplevel
-        # the waveform has no width until its first data arrives; until then the screenshot fails
-        req = {'sourceName': name, 'imageFormat': 'png', 'imageWidth': WV_SIZE, 'imageHeight': WV_SIZE}
+        req = {'sourceName': name, 'imageFormat': 'png'}
+        if size:
+            req['imageWidth'], req['imageHeight'] = size
         data = None
         for _ in range(repeat):
             try:
@@ -91,51 +117,44 @@ class HLGTestBase(obstest.OBSTest):
         img.save(f'screenshots/{self.name}-{name}-{int(time.time() * 1000)}.png')
         return img
 
-    @staticmethod
-    def trace_level(img):
-        'Level (0..1) of the brightest row of the waveform, and a short profile of the lit rows.'
-        totals = [sum(sum(img.getpixel((x, y))) for x in range(0, img.width, 4)) for y in range(img.height)]
-        best_row = max(range(img.height), key=lambda y: totals[y])
-        lit = [f'{y}:{t}' for y, t in enumerate(totals) if t > 0][:12]
-        notice(f'waveform {img.size}: brightest row {best_row} ({totals[best_row]}); lit rows {lit}')
-        return 1.0 - (best_row + 0.5) / img.height, totals[best_row]
+    def source_of(self, cl, kind):
+        'Name of the dock source of a kind.'
+        names = [i['inputName'] for i in cl.send('GetInputList').inputs if i['inputKind'].startswith(PREFIX + kind)]
+        self.assertTrue(names, f'no {kind} source')
+        return names[0]
 
-    def white_level(self):
-        'Fill the picture with white and return where the luma waveform shows it.'
-        cl = self.obs.get_obsws()
+    def measure(self, cl, what):
+        'Center color of the false color scope, with the waveform profile for reference.'
+        fc = self.screenshot(cl, self.source_of(cl, 'falsecolor_source'))
+        color = fc.getpixel((fc.width // 2, fc.height // 2))
+        wv = self.screenshot(cl, self.source_of(cl, 'waveform_source'), repeat=10, size=(256, 256))
+        totals = [sum(sum(wv.getpixel((x, y))) for x in range(0, wv.width, 4)) for y in range(wv.height)]
+        lit = [f'{y}:{t}' for y, t in enumerate(totals) if t > 0][:10]
+        notice(f'{what}: false color center {color} (size {fc.size}); waveform lit rows {lit}')
+        return color
+
+    def add_white(self, cl):
+        'A white color source over the whole picture.'
         video = cl.send('GetVideoSettings')
         cl.send('CreateInput', {
             'sceneName': 'Scene', 'inputName': 'White', 'inputKind': 'color_source_v3',
             'inputSettings': {'color': 0xFFFFFFFF, 'width': video.base_width, 'height': video.base_height},
         })
-        names = [i['inputName'] for i in cl.send('GetInputList').inputs
-                 if i['inputKind'].startswith(PREFIX + 'waveform_source')]
-        self.assertTrue(names, 'the dock waveform was not created')
-        img = self.screenshot(cl, names[0])
-        self.assertEqual(img.height, WV_SIZE)
-        level, strength = self.trace_level(img)
-        return level, strength
 
 
 class SDRProjectTest(HLGTestBase):
     'SDR project: Rec. 709 versus HLG chosen for the dock'
 
     def test_sdr_and_forced_hlg(self):
-        'White at 100 % in Rec. 709, at the HLG level of SDR white when HLG is chosen'
-        level, strength = self.white_level()
-        notice(f'SDR project, Auto: white at {level:.3f} (strength {strength})')
-        self.assertGreater(level, 0.97, 'white is not at 100 % in Rec. 709')
-
+        'White clips at 100 % in Rec. 709 and lands in the highlights when HLG is chosen'
         cl = self.obs.get_obsws()
-        roi = [i['inputName'] for i in cl.send('GetInputList').inputs
-               if i['inputKind'].startswith(PREFIX + 'roi')][0]
-        cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'colorspace': 3}})
-        names = [i['inputName'] for i in cl.send('GetInputList').inputs
-                 if i['inputKind'].startswith(PREFIX + 'waveform_source')]
-        img = self.screenshot(cl, names[0])
-        level, strength = self.trace_level(img)
-        notice(f'SDR project, HLG chosen: white at {level:.3f} (strength {strength})')
-        self.assertAlmostEqual(level, HLG_WHITE, delta=0.03, msg='white is not at the HLG level of SDR white')
+        self.add_white(cl)
+        color = self.measure(cl, 'SDR project, Auto')
+        self.assertTrue(near(color, CLIP), f'white is not at 100 % in Rec. 709: {color}')
+
+        cl.send('SetInputSettings', {'inputName': self.source_of(cl, 'roi'), 'inputSettings': {'colorspace': 3}})
+        color = self.measure(cl, 'SDR project, HLG chosen')
+        self.assertTrue(near(color, HIGHLIGHT), f'white is not at the HLG level of SDR white: {color}')
 
 
 class HLGProjectTest(HLGTestBase):
@@ -143,10 +162,12 @@ class HLGProjectTest(HLGTestBase):
     hdr_project = True
 
     def test_hlg_project(self):
-        'White from the HDR canvas lands at the HLG level of SDR white'
-        level, strength = self.white_level()
-        notice(f'HLG project, Auto: white at {level:.3f} (strength {strength})')
-        self.assertAlmostEqual(level, HLG_WHITE, delta=0.03, msg='white is not at the HLG level of SDR white')
+        'White from the HDR canvas lands in the highlights'
+        cl = self.obs.get_obsws()
+        self.log_video_settings()
+        self.add_white(cl)
+        color = self.measure(cl, 'HLG project, Auto')
+        self.assertTrue(near(color, HIGHLIGHT), f'white is not at the HLG level of SDR white: {color}')
 
 
 if __name__ == '__main__':
