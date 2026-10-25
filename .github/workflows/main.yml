@@ -443,3 +443,34 @@ jobs:
               --title "Video Analyser $TAG" \
               --notes-file notes.md
           fi
+
+      - name: Refresh release notes from the changelog
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for v in $(awk '/^## [0-9]/{print $2}' CHANGELOG.md); do
+            gh release view "$v" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 || continue
+            awk -v v="$v" '/^## /{p = ($2 == v)} p' CHANGELOG.md | sed '1s/.*/## What is new/' > notes-$v.md
+            echo >> notes-$v.md
+            cat >> notes-$v.md <<'NOTES'
+          ## Which file do I need?
+
+          Check your OBS version under **Help → About** in OBS, then pick the file with that `obsNN` in its name.
+          For **OBS 33** use the `obs32` files.
+
+          | System | File |
+          |---|---|
+          | Windows | `…-obsNN-Windows-Installer.exe` (or the `.zip` to copy by hand) |
+          | macOS (Intel and Apple Silicon) | `…-obsNN-macos-universal.pkg` |
+          | Ubuntu / Debian | `…-obsNN-ubuntu-…-x86_64.deb` |
+
+          Close OBS before installing. In OBS, open **Tools → New Video Analyser Dock...**
+
+          **macOS:** the installer is not signed by Apple. If macOS blocks it, right-click the `.pkg` and choose **Open**,
+          or allow it under System Settings → Privacy & Security.
+
+          See the [README](https://github.com/${{ github.repository }}#readme) for a quick start guide.
+          NOTES
+            gh release edit "$v" --repo "$GITHUB_REPOSITORY" --notes-file notes-$v.md
+          done
