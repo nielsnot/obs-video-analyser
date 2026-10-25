@@ -80,12 +80,12 @@ class HLGTestBase(obstest.OBSTest):
             json.dump(collection, fw)
         if self.hdr_project:
             profile = self.obs.config.get_profile()
-            video = profile['AdvVideo']
+            video = profile['Video']
             video['ColorSpace'] = '2100HLG'
             video['ColorFormat'] = 'P010'
             video['ColorRange'] = 'Partial'
             profile.save()
-            notice(f'profile {profile.path}: AdvVideo {dict(video)}')
+            notice(f'profile {profile.path}: Video {dict(video)}')
         self.obs.run()
 
     def log_video_settings(self):
