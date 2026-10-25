@@ -125,7 +125,8 @@ class HLGTestBase(obstest.OBSTest):
 
     def measure(self, cl, what):
         'Center color of the false color scope, with the waveform profile for reference.'
-        fc = self.screenshot(cl, self.source_of(cl, 'falsecolor_source'))
+        # an explicit size: a scope following the selection has no size until the selection has rendered
+        fc = self.screenshot(cl, self.source_of(cl, 'falsecolor_source'), size=(320, 180))
         color = fc.getpixel((fc.width // 2, fc.height // 2))
         wv = self.screenshot(cl, self.source_of(cl, 'waveform_source'), repeat=10, size=(256, 256))
         totals = [sum(sum(wv.getpixel((x, y))) for x in range(0, wv.width, 4)) for y in range(wv.height)]
