@@ -258,6 +258,15 @@ static obs_properties_t *roi_get_properties(void *data)
 	obs_properties_add_int(props, "interleave", obs_module_text("Interleave"), 0, 1, 1);
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
 
+	obs_properties_t *lp = obs_properties_create();
+	obs_property_t *mode = obs_properties_add_list(lp, "lut_mode", obs_module_text("LUT.Mode"), OBS_COMBO_TYPE_LIST,
+						       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(mode, obs_module_text("LUT.Off"), CM_LUT_OFF);
+	obs_property_list_add_int(mode, obs_module_text("LUT.View"), CM_LUT_VIEW);
+	obs_property_list_add_int(mode, obs_module_text("LUT.Scopes"), CM_LUT_SCOPES);
+	obs_properties_add_path(lp, "lut_file", obs_module_text("LUT.File"), OBS_PATH_FILE, "Cube LUT (*.cube)", NULL);
+	obs_properties_add_group(props, "lut", obs_module_text("LUT"), OBS_GROUP_NORMAL, lp);
+
 	obs_properties_t *qp = obs_properties_create();
 	obs_properties_add_int_slider(qp, "qual_hue_center", obs_module_text("Qualifier.HueCenter"), 0, 360, 1);
 	obs_properties_add_int_slider(qp, "qual_hue_width", obs_module_text("Qualifier.HueWidth"), 1, 360, 1);
@@ -621,6 +630,7 @@ static void roi_render(void *data, gs_effect_t *effect)
 		gs_effect_t *dim = src->cm.effect;
 		cm_set_mask_params(dim, &src->mask);
 		cm_set_signal_params(dim, src->cm.colorspace);
+		cm_set_lut_params(dim, &src->cm, true);
 		gs_effect_set_texture(gs_effect_get_param_by_name(dim, "image"), tex);
 		while (gs_effect_loop(dim, "DrawDimmed")) {
 			gs_draw_sprite(tex, 0, src->cm.texrender_width, src->cm.texrender_height);
@@ -640,8 +650,11 @@ static void roi_render(void *data, gs_effect_t *effect)
 		// the reference has the captured format: linear float for HDR, shown the same way as the live picture
 		const bool hdr_ref = gs_texture_get_color_format(src->ref_tex) == GS_RGBA16F && src->cm.effect;
 		gs_effect_t *def = hdr_ref ? src->cm.effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
-		if (hdr_ref)
-			cm_set_signal_params(def, CM_CS_2100_HLG);
+		if (hdr_ref) {
+			cm_set_signal_params(def,
+					     cm_cs_is_hdr(src->cm.colorspace) ? src->cm.colorspace : CM_CS_2100_HLG);
+			cm_set_lut_params(def, NULL, true);
+		}
 		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
 		while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
 			gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, src->ref_w / 2, src->ref_h);

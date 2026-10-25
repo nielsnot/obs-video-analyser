@@ -20,12 +20,13 @@ obs_property_t *properties_add_colorspace(obs_properties_t *props, const char *n
 	obs_property_list_add_int(prop, obs_module_text("601"), 1);
 	obs_property_list_add_int(prop, obs_module_text("709"), 2);
 	obs_property_list_add_int(prop, obs_module_text("HLG"), CM_CS_2100_HLG);
+	obs_property_list_add_int(prop, obs_module_text("PQ"), CM_CS_2100_PQ);
 	return prop;
 }
 
 int calc_colorspace(int colorspace)
 {
-	if (1 <= colorspace && colorspace <= CM_CS_2100_HLG)
+	if (1 <= colorspace && colorspace <= CM_CS_2100_PQ)
 		return colorspace;
 	struct obs_video_info ovi;
 	if (obs_get_video_info(&ovi)) {
@@ -36,6 +37,8 @@ int calc_colorspace(int colorspace)
 			return 2;
 		case VIDEO_CS_2100_HLG:
 			return CM_CS_2100_HLG;
+		case VIDEO_CS_2100_PQ:
+			return CM_CS_2100_PQ;
 		default:
 			return 2; // TODO: Implement
 		}

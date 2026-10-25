@@ -27,7 +27,7 @@ enum scale_labels_e {
 	SCALE_IRE = 2,
 	SCALE_8BIT = 3,
 	SCALE_10BIT = 4,    // legal range, 64 at black and 940 at white
-	SCALE_HLG_NITS = 5, // display light of an HLG signal level on a 1000 nits display
+	SCALE_HLG_NITS = 5, // nits: HLG on a 1000 nits display, PQ absolute, SDR on a 100 nits display
 };
 
 #define ZOOM_MAX 8.0f
@@ -539,7 +539,7 @@ static inline bool zoom_active(const struct wvs_source *src)
 	return src->zoom > 1.001f && src->display != DISP_STACK;
 }
 
-static const char *scale_label(int scale, float level, char *buf, size_t size)
+static const char *scale_label(int scale, int colorspace, float level, char *buf, size_t size)
 {
 	switch (scale) {
 	case SCALE_PERCENT:
@@ -555,10 +555,14 @@ static const char *scale_label(int scale, float level, char *buf, size_t size)
 		snprintf(buf, size, "%d", (int)lroundf(64.0f + level * 876.0f));
 		break;
 	case SCALE_HLG_NITS: {
-		// inverse HLG OETF to scene light, then the OOTF with system gamma 1.2 for 1000 nits
-		const float e = level <= 0.5f ? level * level / 3.0f
-					      : (expf((level - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
-		const float nits = 1000.0f * powf(fmaxf(e, 0.0f), 1.2f);
+		float nits;
+		if (colorspace == CM_CS_2100_PQ)
+			nits = 10000.0f * pq_to_linear(level);
+		else if (colorspace == CM_CS_2100_HLG)
+			// inverse HLG OETF to scene light, then the OOTF with system gamma 1.2 for 1000 nits
+			nits = 1000.0f * powf(fmaxf(hlg_to_scene(level), 0.0f), 1.2f);
+		else
+			nits = 100.0f * powf(fmaxf(level, 0.0f), 2.4f); // BT.1886 on a 100 nits display
 		if (nits < 10.0f)
 			snprintf(buf, size, "%.1f", nits);
 		else
@@ -594,7 +598,7 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 			if (y < base - 1.0f || y > base + WV_SIZE + 1.0f)
 				continue; // outside the zoomed view
 			char buf[16];
-			scale_label(src->scale_labels, level, buf, sizeof(buf));
+			scale_label(src->scale_labels, cm_get_colorspace(&src->cm), level, buf, sizeof(buf));
 			const float tw = text_width(&ts, buf, px);
 			// keep labels inside the trace area
 			int valign = TEXT_VALIGN_MIDDLE;
@@ -628,7 +632,8 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 /* HLG: a line at 75 %, the reference white level of BT.2408 (203 nits). */
 static void wvs_render_hlg_reference(struct wvs_source *src, float width, float height)
 {
-	if (cm_get_colorspace(&src->cm) != CM_CS_2100_HLG || src->graticule_lines <= 0)
+	const int cs = cm_get_colorspace(&src->cm);
+	if (!cm_cs_is_hdr(cs) || src->graticule_lines <= 0)
 		return;
 
 	const struct text_scale ts = text_scale_from_viewport(width, height);
@@ -641,7 +646,9 @@ static void wvs_render_hlg_reference(struct wvs_source *src, float width, float 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	for (int k = 0; k < n_stack; k++) {
 		const float base = (float)(WV_SIZE * k);
-		const float y = base + (WV_SIZE * 0.25f - off) * zoom;
+		// 203 nits: 75 % in HLG, 58 % in PQ
+		const float ref = cs == CM_CS_2100_PQ ? 0.58f : 0.75f;
+		const float y = base + (WV_SIZE * (1.0f - ref) - off) * zoom;
 		if (y < base || y > base + WV_SIZE)
 			continue;
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xB040E0F0);
@@ -656,8 +663,8 @@ static void wvs_render_hlg_reference(struct wvs_source *src, float width, float 
 			}
 			gs_render_stop(GS_LINES);
 		}
-		text_draw(&ts, "75% ref white", width - 3.0f * ts.ux, y - 1.0f * ts.uy, px, 0xE040E0F0,
-			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+		text_draw(&ts, cs == CM_CS_2100_PQ ? "58% ref white" : "75% ref white", width - 3.0f * ts.ux,
+			  y - 1.0f * ts.uy, px, 0xE040E0F0, TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
 	}
 }
 

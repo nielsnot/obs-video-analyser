@@ -1,5 +1,7 @@
 #pragma once
 
+#include <math.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,8 +15,30 @@ obs_property_t *properties_add_colorspace(obs_properties_t *props, const char *n
 #define CM_CS_601 1
 #define CM_CS_709 2
 #define CM_CS_2100_HLG 3
+#define CM_CS_2100_PQ 4
+
+/* HDR color spaces: captured in linear float, Rec. 2020 primaries and matrix. */
+static inline bool cm_cs_is_hdr(int cs)
+{
+	return cs == CM_CS_2100_HLG || cs == CM_CS_2100_PQ;
+}
 
 int calc_colorspace(int);
+
+/* PQ (SMPTE ST 2084) signal 0..1 to display light relative to 10000 nits. */
+static inline float pq_to_linear(float e)
+{
+	const float m1 = 0.1593017578f, m2 = 78.84375f, c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+	const float p = powf(e > 0.0f ? e : 0.0f, 1.0f / m2);
+	const float num = p - c1 > 0.0f ? p - c1 : 0.0f;
+	return powf(num / (c2 - c3 * p), 1.0f / m1);
+}
+
+/* HLG signal 0..1 to scene light 0..1 (inverse OETF). */
+static inline float hlg_to_scene(float e)
+{
+	return e <= 0.5f ? e * e / 3.0f : (expf((e - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
+}
 
 gs_effect_t *create_effect_from_module_file(const char *basename);
 

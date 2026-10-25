@@ -29,6 +29,7 @@ struct cie_source
 	gs_effect_t *effect;
 	float lin[256];     // R'G'B' code value to linear light
 	float lin_hlg[256]; // HLG signal code value to scene light
+	float lin_pq[256];  // PQ signal code value to display light
 
 	int intensity;
 	bool show_709, show_p3, show_2020, show_grid;
@@ -52,9 +53,8 @@ static void *cie_create(obs_data_t *settings, obs_source_t *source)
 		src->lin[i] = powf(i / 255.0f, 2.4f);
 	// inverse HLG OETF; the OOTF scales R, G and B alike and leaves the chromaticity as it is
 	for (int i = 0; i < 256; i++) {
-		const float e = i / 255.0f;
-		src->lin_hlg[i] = e <= 0.5f ? e * e / 3.0f
-					    : (expf((e - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
+		src->lin_hlg[i] = hlg_to_scene(i / 255.0f);
+		src->lin_pq[i] = pq_to_linear(i / 255.0f);
 	}
 
 	src->cm.flags = CM_FLAG_CONVERT_RGB;
@@ -137,8 +137,10 @@ static void cie_draw(const struct cie_source *src, uint8_t *dbuf, const struct c
 {
 	memset(dbuf, 0, CIE_W * CIE_H);
 
-	const bool hlg = surface_data->colorspace == CM_CS_2100_HLG;
-	const float *lin = hlg ? src->lin_hlg : src->lin;
+	const bool hlg = cm_cs_is_hdr(surface_data->colorspace);
+	const float *lin = surface_data->colorspace == CM_CS_2100_PQ    ? src->lin_pq
+			   : surface_data->colorspace == CM_CS_2100_HLG ? src->lin_hlg
+									: src->lin;
 	// RGB to XYZ, D65: Rec. 2020 primaries for HLG, Rec. 709 / sRGB otherwise
 	static const float m709[9] = {0.4124f, 0.3576f, 0.1805f, 0.2126f, 0.7152f, 0.0722f, 0.0193f, 0.1192f, 0.9505f};
 	static const float m2020[9] = {0.6370f, 0.1446f, 0.1689f, 0.2627f, 0.6780f, 0.0593f, 0.0000f, 0.0281f, 1.0610f};

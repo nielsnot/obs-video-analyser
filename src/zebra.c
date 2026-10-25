@@ -681,7 +681,7 @@ static const char *draw_name(int colorspace, bool is_falsecolor)
 {
 	if (colorspace == CM_CS_601)
 		return is_falsecolor ? "DrawFalseColor601" : "DrawZebra601";
-	else if (colorspace == CM_CS_2100_HLG)
+	else if (cm_cs_is_hdr(colorspace))
 		return is_falsecolor ? "DrawFalseColor2020" : "DrawZebra2020";
 	else if (is_falsecolor)
 		return "DrawFalseColor709";

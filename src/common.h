@@ -96,11 +96,24 @@ struct cm_source
 	// optional selection mask, owned by the ROI source
 	const struct cm_mask *mask;
 
+	// optional 3D LUT on the analyzed signal
+	gs_texture_t *lut_tex;
+	int lut_size;
+	float lut_dmin[3], lut_dmax[3];
+	int lut_mode; // cm_lut_mode_e
+	char *lut_path;
+
 	// properties
 	int target_scale;
 	int colorspace; // get from ovi if auto
 	uint32_t flags;
 	bool bypass;
+};
+
+enum cm_lut_mode_e {
+	CM_LUT_OFF = 0,
+	CM_LUT_VIEW = 1,   // the picture in the ROI view only
+	CM_LUT_SCOPES = 2, // the picture and everything the scopes measure
 };
 
 #define CM_FLAG_CONVERT_RGB 1
@@ -121,8 +134,11 @@ void cm_tick(void *data, float unused);
 
 void cm_request(struct cm_source *src, cm_surface_cb_t callback, void *data);
 void cm_set_mask_params(gs_effect_t *effect, const struct cm_mask *mask);
-/* Sets the uniforms that encode the captured picture (hdr_hlg, sdr_white_over_max). */
+/* Sets the uniforms that encode the captured picture (hdr_mode, sdr_white_over_max). */
 void cm_set_signal_params(gs_effect_t *effect, int colorspace);
+/* Sets the LUT uniforms; for_view selects the ROI view, otherwise the analyzed signal. */
+void cm_set_lut_params(gs_effect_t *effect, const struct cm_source *src, bool for_view);
+
 /* The color space the scope's data is in: the ROI's when the scope follows the dock selection. */
 int cm_get_colorspace(const struct cm_source *src);
 

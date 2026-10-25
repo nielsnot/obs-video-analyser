@@ -6,6 +6,7 @@
 #include "common.h"
 #include "util.h"
 #include "roi.h"
+#include "lut.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -57,7 +58,9 @@ void cm_destroy(struct cm_source *src)
 	}
 	if (src->texrender)
 		gs_texrender_destroy(src->texrender);
+	gs_texture_destroy(src->lut_tex);
 	obs_leave_graphics();
+	bfree(src->lut_path);
 
 	pthread_mutex_destroy(&src->pipeline_mutex);
 	pthread_cond_destroy(&src->pipeline_cond);
@@ -90,6 +93,30 @@ void cm_update(struct cm_source *src, obs_data_t *settings)
 		src->target_scale = 1;
 
 	src->bypass = obs_data_get_bool(settings, "bypass");
+
+	src->lut_mode = (int)obs_data_get_int(settings, "lut_mode");
+	const char *lut_path = obs_data_get_string(settings, "lut_file");
+	if (!lut_path)
+		lut_path = "";
+	if (strcmp(lut_path, src->lut_path ? src->lut_path : "") != 0) {
+		bfree(src->lut_path);
+		src->lut_path = bstrdup(lut_path);
+		struct cube_lut lut = {0};
+		const bool ok = *lut_path && cube_lut_load(lut_path, &lut);
+		obs_enter_graphics();
+		gs_texture_destroy(src->lut_tex);
+		src->lut_tex = NULL;
+		src->lut_size = 0;
+		if (ok) {
+			const uint8_t *data = (const uint8_t *)lut.data;
+			src->lut_tex = gs_voltexture_create(lut.size, lut.size, lut.size, GS_RGBA32F, 1, &data, 0);
+			src->lut_size = src->lut_tex ? lut.size : 0;
+			memcpy(src->lut_dmin, lut.domain_min, sizeof(src->lut_dmin));
+			memcpy(src->lut_dmax, lut.domain_max, sizeof(src->lut_dmax));
+		}
+		obs_leave_graphics();
+		cube_lut_free(&lut);
+	}
 
 	int colorspace = (int)obs_data_get_int(settings, "colorspace");
 	const int prev = src->colorspace;
@@ -197,6 +224,7 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 
 			cm_set_mask_params(src->effect, src->mask);
 			cm_set_signal_params(src->effect, src->colorspace);
+			cm_set_lut_params(src->effect, src, false);
 
 			if (item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_RAW_TEXTURE)) {
 				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
@@ -212,9 +240,9 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 					gs_matrix_translate3f(0.0f, (float)offset, 0.0f);
 				}
 
-				const char *conversion = src->colorspace == CM_CS_601        ? "ConvertRGB_YUV601"
-							 : src->colorspace == CM_CS_2100_HLG ? "ConvertRGB_YUV2020"
-											     : "ConvertRGB_YUV709";
+				const char *conversion = src->colorspace == CM_CS_601    ? "ConvertRGB_YUV601"
+							 : cm_cs_is_hdr(src->colorspace) ? "ConvertRGB_YUV2020"
+											 : "ConvertRGB_YUV709";
 				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
 				while (gs_effect_loop(src->effect, conversion)) {
 					gs_draw_sprite_subregion(tex, 0, x, y, item->width, item->height);
@@ -307,7 +335,7 @@ void cm_render_target(struct cm_source *src)
 
 	prepare_stagesurface(item, cx, cy, sheight);
 
-	const bool hdr = src->colorspace == CM_CS_2100_HLG;
+	const bool hdr = cm_cs_is_hdr(src->colorspace);
 	const enum gs_color_format format = hdr ? GS_RGBA16F : GS_BGRA;
 	if (src->texrender && src->texrender_format != format) {
 		gs_texrender_destroy(src->texrender);
@@ -317,7 +345,7 @@ void cm_render_target(struct cm_source *src)
 		src->texrender = gs_texrender_create(format, GS_ZS_NONE);
 		src->texrender_format = format;
 		blog(LOG_INFO, "'%s': capturing in %s", obs_source_get_name(src->self),
-		     hdr ? "linear float for HLG" : "8-bit R'G'B'");
+		     hdr ? "linear float for HDR" : "8-bit R'G'B'");
 	}
 
 	if (!render_target_to_texrender(target, target_width, target_height, src->texrender, scaled_width,
@@ -679,7 +707,7 @@ void cm_set_signal_params(gs_effect_t *effect, int colorspace)
 {
 	if (!effect)
 		return;
-	set_float(effect, "hdr_hlg", colorspace == CM_CS_2100_HLG ? 1.0f : 0.0f);
+	set_float(effect, "hdr_mode", colorspace == CM_CS_2100_HLG ? 1.0f : colorspace == CM_CS_2100_PQ ? 2.0f : 0.0f);
 	set_float(effect, "sdr_white_over_max", obs_get_video_sdr_white_level() / 10000.0f);
 }
 
@@ -688,4 +716,26 @@ int cm_get_colorspace(const struct cm_source *src)
 	if (cm_is_roi(src))
 		return src->roi->cm.colorspace;
 	return src->colorspace;
+}
+
+void cm_set_lut_params(gs_effect_t *effect, const struct cm_source *src, bool for_view)
+{
+	if (!effect)
+		return;
+	const bool on = src && src->lut_tex && src->lut_size >= 2 &&
+			(for_view ? src->lut_mode >= CM_LUT_VIEW : src->lut_mode == CM_LUT_SCOPES);
+	set_float(effect, "lut_apply", on ? 1.0f : 0.0f);
+	gs_eparam_t *p = gs_effect_get_param_by_name(effect, "lut_tex");
+	if (p)
+		gs_effect_set_texture(p, on ? src->lut_tex : NULL);
+	if (!on)
+		return;
+	set_float(effect, "lut_size", (float)src->lut_size);
+	struct vec3 v;
+	vec3_set(&v, src->lut_dmin[0], src->lut_dmin[1], src->lut_dmin[2]);
+	if ((p = gs_effect_get_param_by_name(effect, "lut_dmin")))
+		gs_effect_set_vec3(p, &v);
+	vec3_set(&v, src->lut_dmax[0], src->lut_dmax[1], src->lut_dmax[2]);
+	if ((p = gs_effect_get_param_by_name(effect, "lut_dmax")))
+		gs_effect_set_vec3(p, &v);
 }

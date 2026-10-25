@@ -332,8 +332,8 @@ static void vss_surface_cb(void *data, struct cm_surface_data *surface_data)
 /* 8-bit U and V of a full-range R'G'B' color (0..1) for the color space's matrix. */
 static void rgb_to_uv8(int colorspace, float r, float g, float b, float *u, float *v)
 {
-	const float kr = colorspace == CM_CS_601 ? 0.299f : colorspace == CM_CS_2100_HLG ? 0.2627f : 0.2126f;
-	const float kb = colorspace == CM_CS_601 ? 0.114f : colorspace == CM_CS_2100_HLG ? 0.0593f : 0.0722f;
+	const float kr = colorspace == CM_CS_601 ? 0.299f : cm_cs_is_hdr(colorspace) ? 0.2627f : 0.2126f;
+	const float kb = colorspace == CM_CS_601 ? 0.114f : cm_cs_is_hdr(colorspace) ? 0.0593f : 0.0722f;
 	const float y = kr * r + (1.0f - kr - kb) * g + kb * b;
 	*u = 128.0f + 112.0f * (b - y) / (1.0f - kb);
 	*v = 128.0f + 112.0f * (r - y) / (1.0f - kr);
@@ -398,8 +398,8 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 			rgb_to_uv8(CM_CS_2100_HLG, c[0] * k, c[1] * k, c[2] * k, &pp2020[i][0], &pp2020[i][1]);
 		}
 	}
-	const float(*pts)[2] = colorspace == CM_CS_2100_HLG ? (const float(*)[2])pp2020
-							    : pp[colorspace == CM_CS_601 ? 0 : 1];
+	const float(*pts)[2] = cm_cs_is_hdr(colorspace) ? (const float(*)[2])pp2020
+							: pp[colorspace == CM_CS_601 ? 0 : 1];
 
 	// label
 	for (int i = 0; i < 6; i++) {
@@ -443,6 +443,7 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 		stl_v = (float)RGB2V_601(stl_r, stl_g, stl_b);
 		break;
 	case CM_CS_2100_HLG: // BT.2020
+	case CM_CS_2100_PQ:
 		rgb_to_uv8(colorspace, stl_r / 255.0f, stl_g / 255.0f, stl_b / 255.0f, &stl_u, &stl_v);
 		break;
 	default: // BT.709
@@ -527,7 +528,7 @@ static void draw_hue_ring(int colorspace)
 	const float r0 = 123.0f, r1 = 127.5f;
 	const int n_seg = 180;
 	// U/V to R'G'B' for the matrix in use
-	const bool bt2020 = colorspace == CM_CS_2100_HLG;
+	const bool bt2020 = cm_cs_is_hdr(colorspace);
 	const float kr_v = colorspace == 1 ? 1.402f : bt2020 ? 1.4746f : 1.5748f;
 	const float kg_u = colorspace == 1 ? 0.3441f : bt2020 ? 0.16455f : 0.1873f;
 	const float kg_v = colorspace == 1 ? 0.7141f : bt2020 ? 0.57135f : 0.4681f;
@@ -662,7 +663,7 @@ static void vss_render(void *data, gs_effect_t *effect)
 				gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
 				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_u"), &color_u);
 				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_v"), &color_v);
-			} else if (src->tex_cs[r_tex_buf] == CM_CS_2100_HLG) /* BT.2020 */ {
+			} else if (cm_cs_is_hdr(src->tex_cs[r_tex_buf])) /* BT.2020 */ {
 				const struct vec4 color = {{{0.5f, 0.5f, 0.5f, 1.0f}}};
 				const struct vec3 color_u = {{{0.0f, -0.16455f, +1.8814f, 0.0f}}};
 				const struct vec3 color_v = {{{+1.4746f, -0.57135f, 0.0f, 0.0f}}};

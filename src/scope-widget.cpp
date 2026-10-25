@@ -34,6 +34,7 @@
 #include <QPointer>
 #include <QKeyEvent>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QWidgetAction>
 #include <QColor>
 #include <memory>
@@ -1633,7 +1634,40 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 				const std::string v = edit->text().toStdString();
 				update_one(src, [&](obs_data_t *d) { obs_data_set_string(d, key.c_str(), v.c_str()); });
 			});
-			vbox->addWidget(edit);
+			if (obs_property_get_type(p) != OBS_PROPERTY_PATH) {
+				vbox->addWidget(edit);
+				break;
+			}
+			// a file dialog cannot open inside the popup panel: close it, then ask
+			auto *row = new QHBoxLayout();
+			row->addWidget(edit, 1);
+			auto *browse = new QPushButton(QString::fromUtf8(obs_module_text("Options.Browse")), panel);
+			const bool save = obs_property_path_type(p) == OBS_PATH_FILE_SAVE;
+			const QString filter = QString::fromUtf8(obs_property_path_filter(p));
+			QObject::connect(
+				browse, &QPushButton::clicked, panel, [panel, src, key, desc, filter, save, edit]() {
+					const QString start = edit->text();
+					panel->window()->close();
+					OBSWeakSourceAutoRelease weak = obs_source_get_weak_source(src);
+					QTimer::singleShot(
+						0, qApp,
+						[w = OBSWeakSource(weak.Get()), key, desc, filter, save, start]() {
+							const QString file =
+								save ? QFileDialog::getSaveFileName(nullptr, desc,
+												    start, filter)
+								     : QFileDialog::getOpenFileName(nullptr, desc,
+												    start, filter);
+							OBSSourceAutoRelease s = obs_weak_source_get_source(w);
+							if (file.isEmpty() || !s)
+								return;
+							const std::string v = file.toStdString();
+							update_one(s, [&](obs_data_t *d) {
+								obs_data_set_string(d, key.c_str(), v.c_str());
+							});
+						});
+				});
+			row->addWidget(browse);
+			vbox->addLayout(row);
 			break;
 		}
 		case OBS_PROPERTY_BUTTON: {
@@ -1766,8 +1800,8 @@ static void set_swatch_color(QPushButton *b, uint32_t argb)
 /* Vectorscope angle (degrees) and distance (% of the outer ring) of an R'G'B' color. */
 static void color_to_hue_sat(int colorspace, int r, int g, int b, double *hue, double *sat)
 {
-	const double kr = colorspace == 1 ? 0.299 : colorspace == 3 ? 0.2627 : 0.2126;
-	const double kb = colorspace == 1 ? 0.114 : colorspace == 3 ? 0.0593 : 0.0722;
+	const double kr = colorspace == 1 ? 0.299 : colorspace >= 3 ? 0.2627 : 0.2126;
+	const double kb = colorspace == 1 ? 0.114 : colorspace >= 3 ? 0.0593 : 0.0722;
 	const double R = r / 255.0, G = g / 255.0, B = b / 255.0;
 	const double y = kr * R + (1.0 - kr - kb) * G + kb * B;
 	const double u = 112.0 * (B - y) / (1.0 - kb);

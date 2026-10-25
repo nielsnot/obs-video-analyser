@@ -79,12 +79,14 @@ struct qc_source
 	uint64_t last_hash;
 	uint64_t hash_since;
 
-	float lin_hlg[256];
+	float lin_hlg[256]; // HLG code value to scene light
+	float nits_pq[256]; // PQ code value to nits
 
 	// settings
 	bool enabled[QC_N_CHECKS];
 	float luma_hi, luma_lo, tolerance, min_duration, freeze_seconds;
 	int border_px;
+	bool lowpass;
 	char *log_file;
 	volatile bool want_reset;
 };
@@ -103,9 +105,8 @@ static void *qc_create(obs_data_t *settings, obs_source_t *source)
 	struct qc_source *src = bzalloc(sizeof(struct qc_source));
 	pthread_mutex_init(&src->mutex, NULL);
 	for (int i = 0; i < 256; i++) {
-		const float e = i / 255.0f;
-		src->lin_hlg[i] = e <= 0.5f ? e * e / 3.0f
-					    : (expf((e - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
+		src->lin_hlg[i] = hlg_to_scene(i / 255.0f);
+		src->nits_pq[i] = pq_to_linear(i / 255.0f) * 10000.0f;
 	}
 
 	src->cm.flags = CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV;
@@ -138,6 +139,7 @@ static void qc_update(void *data, obs_data_t *settings)
 	src->min_duration = (float)obs_data_get_double(settings, "qc_min_duration");
 	src->freeze_seconds = (float)obs_data_get_double(settings, "qc_freeze_seconds");
 	src->border_px = (int)obs_data_get_int(settings, "qc_border_px");
+	src->lowpass = obs_data_get_bool(settings, "qc_lowpass");
 
 	pthread_mutex_lock(&src->mutex);
 	bfree(src->log_file);
@@ -192,6 +194,7 @@ static obs_properties_t *qc_get_properties(void *data)
 	obs_properties_add_int_slider(limits, "qc_border_px", obs_module_text("QC.BorderPx"), 1, 100, 1);
 	obs_properties_add_float_slider(limits, "qc_freeze_seconds", obs_module_text("QC.FreezeSeconds"), 0.5, 30.0,
 					0.5);
+	obs_properties_add_bool(limits, "qc_lowpass", obs_module_text("QC.Lowpass"));
 	obs_properties_add_group(props, "qc_limits", obs_module_text("QC.Limits"), OBS_GROUP_NORMAL, limits);
 
 	obs_properties_add_path(props, "qc_log_file", obs_module_text("QC.LogFile"), OBS_PATH_FILE_SAVE, "CSV (*.csv)",
@@ -277,7 +280,8 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 		f->max[c] = 0.0f;
 	}
 
-	const bool hlg = sd->colorspace == CM_CS_2100_HLG;
+	const bool hdr = cm_cs_is_hdr(sd->colorspace);
+	const bool pq = sd->colorspace == CM_CS_2100_PQ;
 	const uint8_t hi = (uint8_t)fminf(src->luma_hi * 255.0f, 255.0f);
 	const uint8_t lo = (uint8_t)fmaxf(src->luma_lo * 255.0f, 0.0f);
 	uint64_t n = 0, n_clip = 0, n_crush = 0, n_rgb = 0, n_gamut = 0;
@@ -304,18 +308,33 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 				if (v[c] > mx[c])
 					mx[c] = v[c];
 			}
-			if (l >= hi)
+			// EBU R103 low-pass: short overshoots between neighbors do not count
+			int lf = l;
+			if (src->lowpass && x > 0 && x + 1 < sd->width)
+				lf = (yuv[-3] + 2 * l + yuv[5] + 2) / 4;
+			if (lf >= hi)
 				n_clip++;
-			if (l <= lo)
+			if (lf <= lo)
 				n_crush++;
 			if (r >= hi || g >= hi || b >= hi || r <= lo || g <= lo || b <= lo)
 				n_rgb++;
-			if (hlg) {
-				const float er = src->lin_hlg[r], eg = src->lin_hlg[g], eb = src->lin_hlg[b];
-				const float ys = 0.2627f * er + 0.6780f * eg + 0.0593f * eb;
-				const float m = fmaxf(er, fmaxf(eg, eb));
-				// HLG OOTF for a 1000 nits display, system gamma 1.2
-				const float nits = ys > 0.0f ? 1000.0f * powf(ys, 0.2f) * m : 0.0f;
+			if (hdr) {
+				float er, eg, eb, m, nits;
+				if (pq) {
+					er = src->nits_pq[r];
+					eg = src->nits_pq[g];
+					eb = src->nits_pq[b];
+					m = fmaxf(er, fmaxf(eg, eb));
+					nits = m;
+				} else {
+					er = src->lin_hlg[r];
+					eg = src->lin_hlg[g];
+					eb = src->lin_hlg[b];
+					const float ys = 0.2627f * er + 0.6780f * eg + 0.0593f * eb;
+					m = fmaxf(er, fmaxf(eg, eb));
+					// HLG OOTF for a 1000 nits display, system gamma 1.2
+					nits = ys > 0.0f ? 1000.0f * powf(ys, 0.2f) * m : 0.0f;
+				}
 				sum_nits += nits;
 				if (nits > cll)
 					cll = nits;
@@ -432,7 +451,7 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 		memset(src->logged, 0, sizeof(src->logged));
 	}
 	src->frame = f;
-	if (f.valid && f.colorspace == CM_CS_2100_HLG) {
+	if (f.valid && cm_cs_is_hdr(f.colorspace)) {
 		if (f.cll > src->max_cll)
 			src->max_cll = f.cll;
 		if (f.fall > src->max_fall)
@@ -447,8 +466,7 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 	snprintf(d, sizeof(d), "%.1f%% of pixels", f.rgb_share * 100.0f);
 	update_check(src, QC_RGB, f.valid && f.rgb_share > src->tolerance, d, now);
 	snprintf(d, sizeof(d), "%.1f%% of pixels", f.gamut_share * 100.0f);
-	update_check(src, QC_GAMUT, f.valid && f.colorspace == CM_CS_2100_HLG && f.gamut_share > src->tolerance, d,
-		     now);
+	update_check(src, QC_GAMUT, f.valid && cm_cs_is_hdr(f.colorspace) && f.gamut_share > src->tolerance, d, now);
 
 	// borders in pixels of the source picture
 	const int scale = src->cm.target_scale > 0 ? src->cm.target_scale : 1;
@@ -534,8 +552,12 @@ static void qc_render(void *data, gs_effect_t *effect)
 	int n_bad = 0;
 	for (int i = 0; i < QC_N_CHECKS; i++)
 		n_bad += active[i] && src->enabled[i];
-	const bool hlg = f.colorspace == CM_CS_2100_HLG;
-	text_draw(&ts, hlg ? "QC  HLG" : "QC", pad, y, px + 2.0f, COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	const bool hlg = cm_cs_is_hdr(f.colorspace);
+	text_draw(&ts,
+		  f.colorspace == CM_CS_2100_PQ ? "QC  PQ"
+		  : hlg                         ? "QC  HLG"
+						: "QC",
+		  pad, y, px + 2.0f, COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 	{
 		char buf[48];
 		if (!f.valid)

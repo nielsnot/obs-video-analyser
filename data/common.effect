@@ -14,9 +14,23 @@ uniform float2 qual_sat = {0.0, 1.0};
 uniform float2 qual_luma = {0.0, 1.0};
 
 // HDR: the captured picture is linear Rec. 709 light (1.0 = SDR white) and is encoded to the
-// Rec. 2100 HLG signal with Rec. 2020 primaries, as OBS encodes its own HLG output.
-uniform float hdr_hlg = 0.0;
+// Rec. 2100 HLG or PQ signal with Rec. 2020 primaries, as OBS encodes its own HDR output.
+uniform float hdr_mode = 0.0; // 0 SDR, 1 HLG, 2 PQ
 uniform float sdr_white_over_max = 0.03; // SDR white level / 10000 nits
+
+// Optional 3D LUT on the signal (.cube, red fastest), with its input domain.
+uniform texture3d lut_tex;
+uniform float lut_apply = 0.0;
+uniform float lut_size = 33.0;
+uniform float3 lut_dmin = {0.0, 0.0, 0.0};
+uniform float3 lut_dmax = {1.0, 1.0, 1.0};
+
+sampler_state lut_sampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+	AddressW = Clamp;
+};
 
 sampler_state cnv_sampler {
 	Filter   = Point;
@@ -69,19 +83,47 @@ float srgb_linear_to_nonlinear_channel(float u)
 	return (u <= 0.0031308) ? (12.92 * u) : ((1.055 * pow(u, 1.0 / 2.4)) - 0.055);
 }
 
-// The signal the scopes measure: R'G'B' as captured for SDR, the HLG signal for HDR.
+float linear_to_st2084_channel(float x)
+{
+	float c = pow(abs(x), 0.1593017578);
+	return pow((0.8359375 + 18.8515625 * c) / (1.0 + 18.6875 * c), 78.84375);
+}
+
+// The signal the scopes measure: R'G'B' as captured for SDR, the HLG or PQ signal for HDR.
 float4 to_signal(float4 c)
 {
-	if (hdr_hlg < 0.5)
+	if (hdr_mode < 0.5)
 		return c;
+	// display light relative to 10000 nits
 	float3 rgb = rec709_to_rec2020(max(c.rgb, float3(0.0, 0.0, 0.0)) * sdr_white_over_max);
+	if (hdr_mode > 1.5) {
+		rgb = saturate(rgb);
+		return float4(linear_to_st2084_channel(rgb.r), linear_to_st2084_channel(rgb.g),
+			      linear_to_st2084_channel(rgb.b), c.a);
+	}
 	return float4(linear_to_hlg(rgb), c.a);
+}
+
+float3 apply_lut(float3 rgb)
+{
+	float3 t = saturate((rgb - lut_dmin) / max(lut_dmax - lut_dmin, float3(1e-6, 1e-6, 1e-6)));
+	float3 c = t * ((lut_size - 1.0) / lut_size) + 0.5 / lut_size;
+	return lut_tex.Sample(lut_sampler, c).rgb;
+}
+
+// What the scopes measure: the signal, through the LUT when it applies to the scopes.
+float4 to_scope(float4 c)
+{
+	float4 s = to_signal(c);
+	if (lut_apply > 0.5)
+		s.rgb = apply_lut(s.rgb);
+	return s;
 }
 
 // For the SDR dock display: HDR is shown as SDR with highlights above SDR white clipped.
 float4 to_display(float4 c)
 {
-	if (hdr_hlg < 0.5)
+	if (hdr_mode < 0.5)
 		return c;
 	float3 rgb = saturate(c.rgb);
 	return float4(srgb_linear_to_nonlinear_channel(rgb.r), srgb_linear_to_nonlinear_channel(rgb.g),
@@ -144,7 +186,7 @@ float mask_value(float2 uv, float3 rgb)
 
 float4 PSMaskRGB(VertInOut vert_in) : TARGET
 {
-	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
+	float4 rgb = to_scope(image.Sample(cnv_sampler, vert_in.uv));
 	// Pixels outside the mask get alpha 0; the scopes skip them.
 	rgb.a = rgb.a * mask_value(vert_in.uv, rgb.rgb);
 	return rgb;
@@ -154,6 +196,8 @@ float4 PSDrawDimmed(VertInOut vert_in) : TARGET
 {
 	float4 c = image.Sample(cnv_sampler, vert_in.uv);
 	float4 rgb = to_display(c);
+	if (lut_apply > 0.5)
+		rgb = float4(apply_lut(to_signal(c).rgb), c.a);
 	// For display: keep the selection as is, darken the rest.
 	float m = mask_value(vert_in.uv, to_signal(c).rgb);
 	float k = 0.5 + 0.5 * m;
@@ -167,7 +211,7 @@ float4 PSDrawDisplay(VertInOut vert_in) : TARGET
 
 float4 PSConvertRGB_YUV601(VertInOut vert_in) : TARGET
 {
-	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
+	float4 rgb = to_scope(image.Sample(cnv_sampler, vert_in.uv));
 	float4 uv00;
 	uv00.z = -0.147643 * rgb.x -0.289855 * rgb.y +0.437500 * rgb.z +0.5 - 1.0/256.0; // U
 	uv00.y = +0.299000 * rgb.x +0.587000 * rgb.y +0.114000 * rgb.z; // Y
@@ -178,7 +222,7 @@ float4 PSConvertRGB_YUV601(VertInOut vert_in) : TARGET
 
 float4 PSConvertRGB_YUV709(VertInOut vert_in) : TARGET
 {
-	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
+	float4 rgb = to_scope(image.Sample(cnv_sampler, vert_in.uv));
 	float4 uv00;
 	uv00.z = -0.100643 * rgb.x -0.338571 * rgb.y +0.439216 * rgb.z +0.5 - 1.0/256.0; // U
 	uv00.y = +0.212600 * rgb.x +0.715200 * rgb.y +0.072200 * rgb.z; // Y
@@ -189,7 +233,7 @@ float4 PSConvertRGB_YUV709(VertInOut vert_in) : TARGET
 
 float4 PSConvertRGB_YUV2020(VertInOut vert_in) : TARGET
 {
-	float4 rgb = to_signal(image.Sample(cnv_sampler, vert_in.uv));
+	float4 rgb = to_scope(image.Sample(cnv_sampler, vert_in.uv));
 	float4 uv00;
 	uv00.z = -0.122655 * rgb.x -0.316561 * rgb.y +0.439216 * rgb.z +0.5 - 1.0/256.0; // U
 	uv00.y = +0.262700 * rgb.x +0.678000 * rgb.y +0.059300 * rgb.z; // Y
