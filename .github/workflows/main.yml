@@ -412,10 +412,14 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           ls -la packages
-          cat > notes.md <<'NOTES'
+          # what is new: this version's section of CHANGELOG.md
+          awk -v v="$TAG" '/^## /{p = ($2 == v)} p' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then sed -i '1s/.*/## What is new/' notes.md; echo >> notes.md; fi
+          cat >> notes.md <<'NOTES'
           ## Which file do I need?
 
           Check your OBS version under **Help → About** in OBS, then pick the file with that `obsNN` in its name.
+          For **OBS 33** use the `obs32` files.
 
           | System | File |
           |---|---|

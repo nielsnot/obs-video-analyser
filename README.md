@@ -11,8 +11,9 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 
 ## Quick start
 
-1. **Install.** Download the package for your system and OBS version from the latest build
-   (Windows installer, macOS `.pkg` or Linux `.deb`) and restart OBS.
+1. **Install.** Download the package for your system and OBS version from the
+   [latest release](https://github.com/nielsnot/obs-video-analyser/releases/latest)
+   (Windows installer, macOS `.pkg` or Linux `.deb`; for OBS 33 take the obs32 files) and restart OBS.
 2. **Open a dock.** In OBS choose `Tools` → `New Video Analyser Dock...`, pick Program or Preview and click OK.
    The dock starts with an RGB parade, a luma waveform, a vectorscope and a histogram.
 3. **Make it yours.** Click `+ Scope` to add scopes, right-click a scope to change it,
@@ -97,8 +98,10 @@ raise `Scale` to analyze a smaller image; `Bypass` shows that image to check you
 
 ## Building
 
-GitHub Actions builds the plugin for Windows, macOS and Linux for OBS 30, 31 and 32 on every push to `main`;
-the packages are under the run's Artifacts. Locally the plugin builds with CMake against OBS Studio and Qt 6.
+GitHub Actions builds the plugin for Windows, macOS and Linux for OBS 30, 31 and 32 (the OBS 32 build also runs on
+OBS 33) on every push to `main`, tests it in OBS, and publishes a release when the version in `CMakeLists.txt` is new.
+What changed in each version is in the [changelog](CHANGELOG.md). Locally the plugin builds with CMake against
+OBS Studio and Qt 6.
 
 ## License
 
