@@ -76,6 +76,8 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "satlum_source", "satlum", "SatLum", FIT_SQUARE},
 	{ID_PREFIX "lineplot_source", "lineplot", "LinePlot", FIT_FILL},
 	{ID_PREFIX "info_source", "info", "Info", FIT_ASPECT},
+	{ID_PREFIX "audio_source", "audio", "Audio", FIT_ASPECT},
+	{ID_PREFIX "cube_source", "cube", "Cube", FIT_SQUARE},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -1512,7 +1514,8 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 		switch (obs_property_get_type(p)) {
 		case OBS_PROPERTY_LIST: {
 			const obs_combo_format fmt = obs_property_list_format(p);
-			if (fmt != OBS_COMBO_FORMAT_INT && fmt != OBS_COMBO_FORMAT_FLOAT)
+			if (fmt != OBS_COMBO_FORMAT_INT && fmt != OBS_COMBO_FORMAT_FLOAT &&
+			    fmt != OBS_COMBO_FORMAT_STRING)
 				break;
 			auto *combo = new QComboBox(panel);
 			combo->setEnabled(enabled);
@@ -1520,7 +1523,12 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 			int current = -1;
 			for (size_t i = 0; i < n; i++) {
 				const QString item = QString::fromUtf8(obs_property_list_item_name(p, i));
-				if (fmt == OBS_COMBO_FORMAT_INT) {
+				if (fmt == OBS_COMBO_FORMAT_STRING) {
+					const char *v = obs_property_list_item_string(p, i);
+					combo->addItem(item, QString::fromUtf8(v ? v : ""));
+					if (v && strcmp(obs_data_get_string(settings, name), v) == 0)
+						current = (int)i;
+				} else if (fmt == OBS_COMBO_FORMAT_INT) {
 					long long v = obs_property_list_item_int(p, i);
 					combo->addItem(item, QVariant(v));
 					if (obs_data_get_int(settings, name) == v)
@@ -1537,7 +1545,10 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 					 [combo, src, key, fmt, sig, check_layout](int idx) {
 						 const QVariant v = combo->itemData(idx);
 						 update_one(src, [&](obs_data_t *d) {
-							 if (fmt == OBS_COMBO_FORMAT_INT)
+							 if (fmt == OBS_COMBO_FORMAT_STRING)
+								 obs_data_set_string(d, key.c_str(),
+										     v.toString().toUtf8().constData());
+							 else if (fmt == OBS_COMBO_FORMAT_INT)
 								 obs_data_set_int(d, key.c_str(), v.toLongLong());
 							 else
 								 obs_data_set_double(d, key.c_str(), v.toDouble());

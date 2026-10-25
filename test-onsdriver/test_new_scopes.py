@@ -42,6 +42,8 @@ def dock_data():
         scope('info', 'Info', {'text': 'Studio A'}),
         scope('waveform', 'WV', {'components': 0x20, 'colorize': True, 'markers': markers}),
         scope('vectorscope', 'VS', {'markers': vs_markers}),
+        scope('audio', 'Audio'),
+        scope('cube', 'Cube'),
     ]
     return {
         'docks': [{
@@ -105,10 +107,11 @@ class NewScopesTest(obstest.OBSTest):
                 kind = kind.rsplit('_v', 1)[0]
             kinds.setdefault(kind, i['inputName'])
         for kind in ('qc_source', 'satlum_source', 'lineplot_source', 'info_source', 'waveform_source',
-                     'vectorscope_source'):
+                     'vectorscope_source', 'audio_source', 'cube_source'):
             self.assertIn(PREFIX + kind, kinds, f'{kind} was not created')
 
-        for kind in ('satlum_source', 'lineplot_source', 'info_source', 'waveform_source', 'vectorscope_source'):
+        for kind in ('satlum_source', 'lineplot_source', 'info_source', 'waveform_source', 'vectorscope_source',
+                     'audio_source', 'cube_source'):
             img = self.screenshot(cl, kinds[PREFIX + kind])
             lit = sum(1 for x in range(0, img.width, 4) for y in range(0, img.height, 4)
                       if sum(img.getpixel((x, y))) > 60)

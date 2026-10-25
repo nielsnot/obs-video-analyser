@@ -25,7 +25,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | # | Element | What it does |
 |---|---------|--------------|
 | 1 | **View tabs** and `+ View` | Several layouts per dock, each with its own scopes. Right-click a tab to rename, duplicate or delete it. |
-| 2 | `+ Scope` | Adds a scope: waveform, vectorscope, histogram, CIE diagram, diamond, false color, zebra or focus peaking. Also a preset with three Lows / Mids / Highs vectorscopes. |
+| 2 | `+ Scope` | Adds a scope (see the list below), or a preset with three Lows / Mids / Highs vectorscopes. |
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
 | 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
 | 5 | **ROI view** | The picture being analyzed. Shapes are outlined in green, everything outside them is darkened. Pins show RGB, luma and HSL values. |
@@ -44,6 +44,12 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **False color** | Exposure as colors | Presets (Exposure, Clipping only, Skin and mid grey, Spectrum) or your own bands; optional table with the share of the picture in each band |
 | **Zebra** | Over- and underexposure | Adjustable thresholds |
 | **Focus peaking** | Sharp edges | Color and threshold |
+| **QC and MinMax** | Signal checks | Min/max of R, G, B and luma, APL, clipped and crushed share, black borders, black and frozen picture, MaxCLL/MaxFALL and out-of-Rec. 709 share for HDR; a timestamped error log, also as CSV; optional EBU R103 low-pass |
+| **Sat / Lum** | Saturation against luma | Shows whether highlights or shadows carry too much color |
+| **Line plot** | One picture line | R, G, B and luma of the line you choose |
+| **3D color cube** | Every pixel in the RGB cube | Turns by itself; drag to turn, wheel to zoom |
+| **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term, integrated) against a target, phase correlation and goniometer |
+| **Info and timecode** | Time and format | Time-of-day timecode, clock, date, video format and your own text |
 
 ## Tools
 
@@ -55,27 +61,33 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 - **Own source per scope.** In a scope's options, set `Source` to a camera or scene instead of the dock selection,
   so one dock can show scopes for several cameras.
 - **Snapshot and compare.** Take a reference with `◉ Snapshot`, then match a second camera or a new grade against it.
+- **Markers.** In the options of a waveform or vectorscope, add markers: lines at a level, or points and lines at a
+  hue and saturation on the vectorscope (also straight from a color picker pin). Each has a name, color and style.
+- **3D LUT.** In the ROI options, load a `.cube` LUT and apply it to the ROI view only or to everything the scopes
+  measure, for example to check a log camera through its conversion LUT or an HLG to SDR conversion.
+- **Waveform colorize.** A luma waveform can draw its trace in the colors of the picture.
 
 More details: [Dock](doc/dock.md), [Waveform](doc/waveform.md), [Vectorscope](doc/vectorscope.md),
 [Histogram](doc/histogram.md), [False Color](doc/falsecolor.md), [Zebra](doc/zebra.md),
 [Focus Peaking](doc/focuspeaking.md), [Global Configuration](doc/global_config.md).
 
-## HDR (HLG)
+## HDR (HLG and PQ)
 
-Video Analyser can measure Rec. 2100 HLG. Set your OBS project to HDR HLG (`Settings` → `Advanced` → `Video`:
-color format P010 or I010, color space Rec. 2100 (HLG)) and the dock follows automatically; or right-click the
-ROI view and set `Color space` to `Rec. 2100 HLG (HDR)` yourself.
+Video Analyser measures Rec. 2100 HLG and PQ. Set your OBS project to HDR (`Settings` → `Advanced` → `Video`:
+color format P010 or I010, color space Rec. 2100 (HLG) or (PQ)) and the dock follows automatically; or right-click
+the ROI view and set `Color space` yourself.
 
-- The picture is captured in linear float and encoded to the HLG signal exactly as OBS encodes its HLG output,
-  with Rec. 2020 primaries and matrix. OBS's `SDR white level` decides where SDR material lands (203 nits = 75 %).
-- **Waveform:** a dashed line marks 75 % reference white; `Scale values` → `Nits (HLG)` labels the lines in nits
-  on a 1000 nits display.
+- The picture is captured in linear float and encoded to the HLG or PQ signal exactly as OBS encodes its HDR
+  output, with Rec. 2020 primaries and matrix. OBS's `SDR white level` decides where SDR material lands
+  (203 nits = 75 % in HLG, 58 % in PQ).
+- **Waveform:** a dashed line marks reference white; `Scale values` → `Nits` labels the lines in nits.
+- **QC:** MaxCLL and MaxFALL, and the share of colors outside Rec. 709.
 - **Vectorscope:** Rec. 2020 targets, skin tone line and hue ring.
 - **False color:** the `HDR HLG levels` preset (18 % grey near 38 %, skin, reference white at 75 %).
 - **CIE diagram:** plots in Rec. 2020; compare with the Rec. 709 triangle to see wide-gamut colors.
 - The ROI view shows the picture as SDR with highlights above SDR white clipped.
 
-PQ is not supported yet.
+The scopes measure the HDR signal in 8 bits.
 
 ## Scopes as sources
 
