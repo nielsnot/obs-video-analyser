@@ -75,10 +75,16 @@ class HLGTestBase(obstest.OBSTest):
     def screenshot(self, cl, name, repeat=40):
         'Render the source repeatedly so its pipeline has data, then return the last image.'
         from PIL import Image  # pylint: disable=import-outside-toplevel
+        # the waveform has no width until its first data arrives; until then the screenshot fails
+        req = {'sourceName': name, 'imageFormat': 'png', 'imageWidth': WV_SIZE, 'imageHeight': WV_SIZE}
         data = None
         for _ in range(repeat):
-            data = cl.send('GetSourceScreenshot', {'sourceName': name, 'imageFormat': 'png'}).image_data
+            try:
+                data = cl.send('GetSourceScreenshot', req).image_data
+            except Exception:  # pylint: disable=broad-except
+                data = None
             time.sleep(0.05)
+        self.assertTrue(data, f'no screenshot of {name}')
         raw = base64.b64decode(data.split(',', 1)[1])
         img = Image.open(io.BytesIO(raw)).convert('RGB')
         os.makedirs('screenshots', exist_ok=True)
