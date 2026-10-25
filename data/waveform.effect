@@ -38,6 +38,18 @@ float4 PSDrawOverlay(VertInOut vert_in) : TARGET
 	return rgb;
 }
 
+// Colorize: rgb holds the average color of the pixels in the bin, alpha the count.
+float4 PSDrawColorize(VertInOut vert_in) : TARGET
+{
+	float4 t = image.Sample(def_sampler, vert_in.uv);
+	float k = t.a * intensity;
+	if (k > 1.0) k = 1.0;
+	float m = max(t.r, max(t.g, t.b));
+	// lift dark colors so the trace stays visible near black
+	float3 c = lerp(t.rgb, t.rgb / max(m, 0.05), 0.6);
+	return float4(c * k, 1.0);
+}
+
 float4 PSDrawStack(VertInOut vert_in) : TARGET
 {
 	int i = int(vert_in.uv.y * 3);
@@ -250,5 +262,14 @@ technique DrawRef
 	{
 		vertex_shader = VSDefault(vert_in);
 		pixel_shader  = PSDrawRef(vert_in);
+	}
+}
+
+technique DrawColorize
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawColorize(vert_in);
 	}
 }

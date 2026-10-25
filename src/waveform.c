@@ -69,6 +69,7 @@ struct wvs_source
 	int intensity;
 	int graticule_lines, graticule_lines_prev;
 	int scale_labels; // scale_labels_e
+	bool colorize;    // luma trace in the color of the pixels
 
 	// vertical zoom with the mouse wheel; zoom_off is the top of the view in trace units
 	float zoom, zoom_off;
@@ -156,7 +157,8 @@ static void wvs_update(void *data, obs_data_t *settings)
 	src->display = (int)obs_data_get_int(settings, "display");
 
 	src->components = (uint32_t)obs_data_get_int(settings, "components");
-	src->cm.flags = (src->components & COMP_RGB ? CM_FLAG_CONVERT_RGB : 0) |
+	src->colorize = obs_data_get_bool(settings, "colorize") && src->components == COMP_Y;
+	src->cm.flags = (src->components & COMP_RGB || src->colorize ? CM_FLAG_CONVERT_RGB : 0) |
 			(src->components & COMP_YUV || is_yrgb(src->components) ? CM_FLAG_CONVERT_YUV : 0);
 
 	src->intensity = (int)obs_data_get_int(settings, "intensity");
@@ -235,6 +237,7 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.8bit"), SCALE_8BIT);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.10bit"), SCALE_10BIT);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.HLGNits"), SCALE_HLG_NITS);
+	obs_properties_add_bool(props, "colorize", obs_module_text("WV.Prop.Colorize"));
 
 	return props;
 }
@@ -309,6 +312,24 @@ static inline void wvs_draw_waveform(struct wvs_source *src, uint8_t *dbuf, cons
 	const bool calc_g = (src->components & 0x22) ? true : false;
 	const bool calc_r = (src->components & 0x44) ? true : false;
 
+	if (src->colorize && surface_data->rgb_data && surface_data->yuv_data) {
+		// each bin keeps a running average of the colors that land in it, the count in alpha
+		for (uint32_t y = 0; y < height; y++) {
+			const uint8_t *c = surface_data->rgb_data + surface_data->linesize * y;
+			const uint8_t *l = surface_data->yuv_data + surface_data->linesize * y;
+			for (uint32_t x = 0; x < width; x++, c += 4, l += 4) {
+				if (!c[3])
+					continue;
+				uint8_t *d = dbuf + x * 4 + (WV_SIZE - 1 - l[1]) * width * 4;
+				const int n = d[3] < 255 ? d[3] + 1 : 255;
+				d[3] = (uint8_t)n;
+				for (int k = 0; k < 3; k++)
+					d[k] = (uint8_t)(d[k] + ((int)c[k] - (int)d[k]) / n);
+			}
+		}
+		return;
+	}
+
 	if (is_yrgb(src->components)) {
 		const uint8_t *yuv_data = surface_data->yuv_data;
 		if (!yuv_data)
@@ -351,7 +372,7 @@ static inline void wvs_draw_waveform(struct wvs_source *src, uint8_t *dbuf, cons
 static void wvs_set_image(struct wvs_source *src, const uint8_t *tex_buf, uint32_t width)
 {
 	// YRGB keeps luma in the fourth channel, so it needs a texture with alpha.
-	const bool alpha = is_yrgb(src->components);
+	const bool alpha = is_yrgb(src->components) || src->colorize;
 	if (src->tex_wv && src->tex_wv_width == width && src->tex_wv_alpha == alpha) {
 		gs_texture_set_image(src->tex_wv, tex_buf, width * 4, false);
 		return;
@@ -505,6 +526,9 @@ static void render_waveform(struct wvs_source *src)
 			name = n == 4 ? "DrawOverlayYRGB" : "DrawOverlay";
 			break;
 		}
+
+	if (src->colorize && src->effect)
+		name = "DrawColorize";
 
 	while (gs_effect_loop(effect, name))
 		gs_draw_sprite(src->tex_wv, 0, w, h);

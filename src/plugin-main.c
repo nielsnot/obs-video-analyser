@@ -41,6 +41,10 @@ extern const struct obs_source_info colormonitor_focuspeaking_filter;
 extern const struct obs_source_info colormonitor_roi;
 extern const struct obs_source_info colormonitor_diamond;
 extern const struct obs_source_info colormonitor_cie;
+extern const struct obs_source_info colormonitor_qc;
+extern const struct obs_source_info colormonitor_satlum;
+extern const struct obs_source_info colormonitor_lineplot;
+extern const struct obs_source_info colormonitor_info;
 void scope_docks_init();
 void text_render_init(void);
 void text_render_free(void);
@@ -105,6 +109,14 @@ bool obs_module_load(void)
 	if (!register_source_with_flags(&colormonitor_diamond, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_cie, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_qc, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_satlum, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_lineplot, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_info, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_roi, src_flags))
 		return false;

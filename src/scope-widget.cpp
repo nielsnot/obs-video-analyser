@@ -71,6 +71,10 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "focuspeaking_source", "focuspeaking", "FocusPeaking.Name", FIT_FOCUSPEAKING},
 	{ID_PREFIX "diamond_source", "diamond", "Diamond", FIT_SQUARE},
 	{ID_PREFIX "cie_source", "cie", "CIE", FIT_ASPECT},
+	{ID_PREFIX "qc_source", "qc", "QC", FIT_ASPECT},
+	{ID_PREFIX "satlum_source", "satlum", "SatLum", FIT_SQUARE},
+	{ID_PREFIX "lineplot_source", "lineplot", "LinePlot", FIT_FILL},
+	{ID_PREFIX "info_source", "info", "Info", FIT_ASPECT},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -1614,6 +1618,36 @@ static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_
 			}
 			if (obs_properties_t *content = obs_property_group_content(p))
 				add_property_controls(panel, vbox, src, content, settings, on_layout_change);
+			break;
+		}
+		case OBS_PROPERTY_TEXT:
+		case OBS_PROPERTY_PATH: {
+			if (obs_property_get_type(p) == OBS_PROPERTY_TEXT &&
+			    obs_property_text_type(p) != OBS_TEXT_DEFAULT)
+				break;
+			flush_grid();
+			vbox->addWidget(section_label(panel, desc));
+			auto *edit = new QLineEdit(QString::fromUtf8(obs_data_get_string(settings, name)), panel);
+			edit->setEnabled(enabled);
+			QObject::connect(edit, &QLineEdit::editingFinished, panel, [src, key, edit]() {
+				const std::string v = edit->text().toStdString();
+				update_one(src, [&](obs_data_t *d) { obs_data_set_string(d, key.c_str(), v.c_str()); });
+			});
+			vbox->addWidget(edit);
+			break;
+		}
+		case OBS_PROPERTY_BUTTON: {
+			flush_grid();
+			auto *btn = new QPushButton(desc, panel);
+			btn->setEnabled(enabled);
+			QObject::connect(btn, &QPushButton::clicked, panel, [src, key]() {
+				// the panel's properties are gone by now; look the button up again
+				obs_properties_t *pp = obs_source_properties(src);
+				if (obs_property_t *bp = pp ? obs_properties_get(pp, key.c_str()) : nullptr)
+					obs_property_button_clicked(bp, src);
+				obs_properties_destroy(pp);
+			});
+			vbox->addWidget(btn);
 			break;
 		}
 		default:
