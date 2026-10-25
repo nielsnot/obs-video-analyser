@@ -252,6 +252,8 @@ jobs:
         with:
           obs-plugins: package/*.zip
           first-time-log: ./logs/
+          # OBS 33 logs a GL error on its first run on the hosted macOS runners
+          obs-version: '==${{ matrix.obs }}.*'
 
       - name: 'Test with onsdriver'
         run: |

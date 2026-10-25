@@ -93,13 +93,12 @@ class HLGTestBase(obstest.OBSTest):
 
     @staticmethod
     def trace_level(img):
-        'Level (0..1) of the brightest row of the waveform.'
-        best_row, best = 0, -1
-        for y in range(img.height):
-            total = sum(sum(img.getpixel((x, y))) for x in range(0, img.width, 4))
-            if total > best:
-                best, best_row = total, y
-        return 1.0 - (best_row + 0.5) / img.height, best
+        'Level (0..1) of the brightest row of the waveform, and a short profile of the lit rows.'
+        totals = [sum(sum(img.getpixel((x, y))) for x in range(0, img.width, 4)) for y in range(img.height)]
+        best_row = max(range(img.height), key=lambda y: totals[y])
+        lit = [f'{y}:{t}' for y, t in enumerate(totals) if t > 0][:12]
+        notice(f'waveform {img.size}: brightest row {best_row} ({totals[best_row]}); lit rows {lit}')
+        return 1.0 - (best_row + 0.5) / img.height, totals[best_row]
 
     def white_level(self):
         'Fill the picture with white and return where the luma waveform shows it.'
