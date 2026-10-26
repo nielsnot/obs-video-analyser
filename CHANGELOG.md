@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.7
+
+- **Quick controls** no longer flicker while the mouse moves: they stay a moment after the pointer leaves the scope.
+
 ## 0.7.6
 
 - **Quick controls** that do not fit next to each other in a narrow scope go to a second row instead of dropping off.

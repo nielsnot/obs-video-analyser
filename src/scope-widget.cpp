@@ -2,6 +2,7 @@
 #include <obs.h>
 #include <obs-frontend-api.h>
 #include <util/threading.h>
+#include <util/platform.h>
 #include <util/dstr.hpp>
 #include <string>
 #include <vector>
@@ -205,6 +206,8 @@ struct scope_widget_s
 
 	// quick controls shown on the tile under the mouse
 	volatile int hover_tile = -1;
+	volatile uint64_t hover_until =
+		0;             // the quick controls stay this long after the pointer left (ns), 0 while over
 	int qb_drag_tile = -1; // dragging the intensity slider
 	float ui_scale = 1.0f; // device pixels per point, so the quick controls keep a readable size
 	int text_pct = 0;      // text size of the whole dock, in %; 0 for automatic
@@ -593,6 +596,10 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		gs_projection_pop();
 	}
 
+	if (data->hover_until && os_gettime_ns() > data->hover_until) {
+		data->hover_tile = -1;
+		data->hover_until = 0;
+	}
 	if (!data->arranging && data->hover_tile > 0 && data->hover_tile < total) {
 		gs_projection_push();
 		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
@@ -1940,7 +1947,15 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 	{
 		const int x = (int)qtPos.x(), y = (int)qtPos.y();
 		const int prev = data->hover_tile;
-		data->hover_tile = mouseLeave ? -1 : tile_at(data, x, y);
+		// Leaving the tile (or a short Leave event from the native display window) keeps the quick
+		// controls a moment, so they do not flicker while the pointer moves.
+		const int over = mouseLeave ? -1 : tile_at(data, x, y);
+		if (over > 0) {
+			data->hover_tile = over;
+			data->hover_until = 0;
+		} else if (data->hover_tile > 0 && !data->hover_until) {
+			data->hover_until = os_gettime_ns() + 700000000ULL;
+		}
 		if (data->qb_drag_tile >= 0 && !mouseLeave) {
 			int by0 = 0, by1 = 0;
 			pthread_mutex_lock(&data->mutex);
