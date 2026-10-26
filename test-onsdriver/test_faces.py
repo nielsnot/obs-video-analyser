@@ -68,13 +68,13 @@ class FacesTest(obstest.OBSTest):
         for _ in range(60):
             try:
                 data = cl.send('GetSourceScreenshot', {'sourceName': name, 'imageFormat': 'png',
-                                                       'imageWidth': 960, 'imageHeight': 150}).image_data
+                                                       'imageWidth': 1200, 'imageHeight': 260}).image_data
             except Exception:  # pylint: disable=broad-except
                 time.sleep(0.1)
                 continue
             img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
-            # the thumbnail is the left 16:9 part of the row
-            found = sum(1 for x in range(0, 250) for y in range(0, 150)
+            # the picture is the left 16:9 part, before the face close-up
+            found = sum(1 for x in range(0, 440) for y in range(0, 260)
                         if all(abs(a - b) < 40 for a, b in zip(img.getpixel((x, y)), GREEN)))
             if found > 20:
                 break

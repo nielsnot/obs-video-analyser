@@ -1,11 +1,14 @@
 /*
- * Faces: finds and follows faces in up to four cameras and compares them.
+ * Faces: finds and follows faces in the picture and measures them.
  *
- * Each camera gets a hidden probe source that captures it, runs face detection and measures
- * the scene (luma median and percentiles, near black, near clipping) and the skin of the
- * largest face (luma, hue against the skin tone line, saturation). The scope shows a thumbnail
- * with the faces marked and a short written assessment per camera, and compares every camera
- * with the first one.
+ * A hidden probe source captures the scope's source, runs face detection and measures the
+ * scene (luma median and percentiles, near black, near clipping) and the skin of the largest
+ * face (luma, hue against the skin tone line, saturation). The scope shows the picture with the
+ * faces marked, the face up close and a short written assessment.
+ *
+ * ◉ Snapshot keeps the face and its measurements; while comparing, the kept face is shown next to
+ * the live one with the differences, so after switching to another camera you see at once
+ * whether it matches.
  */
 #include <obs-module.h>
 #include <util/platform.h>
@@ -22,9 +25,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define FC_CAMS 4
-#define FC_W 960
-#define FC_ROW 150
+#define FC_W 1200
+#define FC_H 260
 #define SKIN_LINE_DEG 123.0f // the skin tone (I) line on the vectorscope
 
 /* ---------- probe: one camera ---------- */
@@ -218,10 +220,17 @@ const struct obs_source_info colormonitor_face_probe = {
 struct faces_source
 {
 	obs_source_t *self;
-	obs_source_t *probes[FC_CAMS];
-	char *names[FC_CAMS];
+	obs_source_t *probe;
+	char *name;
 	int scale;
 	bool advice;
+
+	// snapshot: the face and its measurements at the moment of the snapshot
+	volatile bool want_snapshot;
+	volatile bool compare;
+	struct face_stats ref;
+	bool have_ref;
+	gs_texture_t *ref_tex;
 };
 
 static const char *faces_get_name(void *unused)
@@ -230,46 +239,49 @@ static const char *faces_get_name(void *unused)
 	return obs_module_text("Faces");
 }
 
-static const char *cam_key[FC_CAMS] = {"face_cam1", "face_cam2", "face_cam3", "face_cam4"};
+static void faces_snapshot_cb(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	((struct faces_source *)data)->want_snapshot = true;
+}
+
+static void faces_compare_cb(void *data, calldata_t *cd)
+{
+	((struct faces_source *)data)->compare = calldata_bool(cd, "on");
+}
 
 static void faces_update(void *data, obs_data_t *settings)
 {
 	struct faces_source *src = data;
 	src->scale = (int)obs_data_get_int(settings, "target_scale");
 	src->advice = obs_data_get_bool(settings, "face_advice");
-	for (int i = 0; i < FC_CAMS; i++) {
-		// the first camera follows the scope's own source setting (the dock selection by default)
-		const char *name = i == 0 ? obs_data_get_string(settings, "target_name")
-					  : obs_data_get_string(settings, cam_key[i]);
-		const bool none = i > 0 && (!name || !*name);
-		if (src->names[i] && name && !strcmp(src->names[i], name) && (src->probes[i] || none))
-			goto keep;
-		bfree(src->names[i]);
-		src->names[i] = bstrdup(name ? name : "");
-		obs_source_release(src->probes[i]);
-		src->probes[i] = NULL;
-		if (!none) {
-			obs_data_t *ps = obs_data_create();
-			obs_data_set_string(ps, "target_name", src->names[i]);
-			obs_data_set_int(ps, "target_scale", src->scale > 0 ? src->scale : 2);
-			src->probes[i] = obs_source_create_private(ID_PREFIX "face_probe", "face probe", ps);
-			obs_data_release(ps);
-		}
-		continue;
-	keep:
-		if (src->probes[i]) {
-			obs_data_t *ps = obs_data_create();
-			obs_data_set_int(ps, "target_scale", src->scale > 0 ? src->scale : 2);
-			obs_source_update(src->probes[i], ps);
-			obs_data_release(ps);
-		}
+	const char *name = obs_data_get_string(settings, "target_name");
+	if (!name)
+		name = "";
+	if (src->name && !strcmp(src->name, name) && src->probe) {
+		obs_data_t *ps = obs_data_create();
+		obs_data_set_int(ps, "target_scale", src->scale > 0 ? src->scale : 2);
+		obs_source_update(src->probe, ps);
+		obs_data_release(ps);
+		return;
 	}
+	bfree(src->name);
+	src->name = bstrdup(name);
+	obs_source_release(src->probe);
+	obs_data_t *ps = obs_data_create();
+	obs_data_set_string(ps, "target_name", src->name);
+	obs_data_set_int(ps, "target_scale", src->scale > 0 ? src->scale : 2);
+	src->probe = obs_source_create_private(ID_PREFIX "face_probe", "face probe", ps);
+	obs_data_release(ps);
 }
 
 static void *faces_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct faces_source *src = bzalloc(sizeof(struct faces_source));
 	src->self = source;
+	proc_handler_t *ph = obs_source_get_proc_handler(source);
+	proc_handler_add(ph, "void va_snapshot()", faces_snapshot_cb, src);
+	proc_handler_add(ph, "void va_set_compare(in bool on)", faces_compare_cb, src);
 	faces_update(src, settings);
 	return src;
 }
@@ -277,10 +289,11 @@ static void *faces_create(obs_data_t *settings, obs_source_t *source)
 static void faces_destroy(void *data)
 {
 	struct faces_source *src = data;
-	for (int i = 0; i < FC_CAMS; i++) {
-		obs_source_release(src->probes[i]);
-		bfree(src->names[i]);
-	}
+	obs_source_release(src->probe);
+	obs_enter_graphics();
+	gs_texture_destroy(src->ref_tex);
+	obs_leave_graphics();
+	bfree(src->name);
 	bfree(src);
 }
 
@@ -290,37 +303,14 @@ static void faces_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "face_advice", true);
 }
 
-static bool add_video_source(void *param, obs_source_t *s)
-{
-	obs_property_t *prop = param;
-	const uint32_t flags = obs_source_get_output_flags(s);
-	if ((flags & OBS_SOURCE_VIDEO) && !(flags & OBS_SOURCE_CAP_DISABLED)) {
-		const char *id = obs_source_get_id(s);
-		if (id && !strncmp(id, ID_PREFIX, strlen(ID_PREFIX)))
-			return true; // not our own scopes
-		const char *name = obs_source_get_name(s);
-		obs_property_list_add_string(prop, name, name);
-	}
-	return true;
-}
-
 static obs_properties_t *faces_get_properties(void *data)
 {
 	UNUSED_PARAMETER(data);
 	obs_properties_t *props = obs_properties_create();
-	obs_property_t *prop = obs_properties_add_list(props, "target_name", obs_module_text("Faces.Cam1"),
+	obs_property_t *prop = obs_properties_add_list(props, "target_name", obs_module_text("Source"),
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	property_list_add_sources(prop, NULL);
 	obs_properties_add_int(props, "target_scale", obs_module_text("Scale"), 1, 16, 1);
-	for (int i = 1; i < FC_CAMS; i++) {
-		char key[32];
-		snprintf(key, sizeof(key), "Faces.Cam%d", i + 1);
-		prop = obs_properties_add_list(props, cam_key[i], obs_module_text(key), OBS_COMBO_TYPE_LIST,
-					       OBS_COMBO_FORMAT_STRING);
-		obs_property_list_add_string(prop, obs_module_text("Faces.None"), "");
-		obs_enum_sources(add_video_source, prop);
-		obs_enum_scenes(add_video_source, prop);
-	}
 	obs_properties_add_bool(props, "face_advice", obs_module_text("Faces.Advice"));
 	return props;
 }
@@ -331,25 +321,17 @@ static uint32_t faces_get_width(void *data)
 	return FC_W;
 }
 
-static int n_rows(const struct faces_source *src)
-{
-	int n = 0;
-	for (int i = 0; i < FC_CAMS; i++)
-		n += src->probes[i] != NULL;
-	return n ? n : 1;
-}
-
 static uint32_t faces_get_height(void *data)
 {
-	return (uint32_t)(FC_ROW * n_rows(data));
+	UNUSED_PARAMETER(data);
+	return FC_H;
 }
 
 static void faces_tick(void *data, float seconds)
 {
 	struct faces_source *src = data;
-	for (int i = 0; i < FC_CAMS; i++)
-		if (src->probes[i])
-			probe_tick(obs_obj_get_data(src->probes[i]), seconds);
+	if (src->probe)
+		probe_tick(obs_obj_get_data(src->probe), seconds);
 }
 
 static void fill(float x0, float y0, float x1, float y1, uint32_t color)
@@ -437,8 +419,36 @@ static void face_range(int colorspace, float *lo, float *hi)
 	}
 }
 
-static void assessment(const struct face_stats *s, const struct face_stats *ref, int cam, bool advice, char *out,
-		       size_t size)
+/* The region around a face, a little larger than the box and square on the picture, in pixels. */
+static bool face_crop(const struct face_box *f, uint32_t cw, uint32_t ch, uint32_t *x, uint32_t *y, uint32_t *w,
+		      uint32_t *h)
+{
+	const float side = fmaxf(f->w * cw, f->h * ch) * 1.5f;
+	const float cx = (f->x + f->w * 0.5f) * cw, cy = (f->y + f->h * 0.5f) * ch;
+	float x0 = cx - side * 0.5f, y0 = cy - side * 0.5f;
+	x0 = fmaxf(0.0f, fminf(x0, cw - side));
+	y0 = fmaxf(0.0f, fminf(y0, ch - side));
+	*x = (uint32_t)fmaxf(x0, 0.0f);
+	*y = (uint32_t)fmaxf(y0, 0.0f);
+	*w = (uint32_t)fminf(side, (float)cw - *x);
+	*h = (uint32_t)fminf(side, (float)ch - *y);
+	return *w >= 4 && *h >= 4;
+}
+
+static void draw_tex_region(gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h, float dx, float dy,
+			    float dw, float dh)
+{
+	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), tex);
+	gs_matrix_push();
+	gs_matrix_translate3f(dx, dy, 0.0f);
+	gs_matrix_scale3f(dw / w, dh / h, 1.0f);
+	while (gs_effect_loop(def, "Draw"))
+		gs_draw_sprite_subregion(tex, 0, x, y, w, h);
+	gs_matrix_pop();
+}
+
+static void assessment(const struct face_stats *s, const struct face_stats *ref, bool advice, char *out, size_t size)
 {
 	size_t n = 0;
 #define ADD(...)                                                       \
@@ -459,6 +469,26 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 		ADD("Hue is %.0f\xc2\xb0 toward %s relative to the skin tone line. ", fabsf(dev),
 		    dev < 0.0f ? "red/magenta" : "yellow/green");
 
+	if (ref && ref->skin_valid) {
+		const float dl = s->skin_luma - ref->skin_luma;
+		const float dh = s->skin_hue - ref->skin_hue;
+		const float ds = s->skin_sat - ref->skin_sat;
+		// about 2.4 stops per doubling of the signal for SDR video
+		const float stops = s->skin_luma > 0.5f && ref->skin_luma > 0.5f
+					    ? 2.4f * log2f(ref->skin_luma / s->skin_luma)
+					    : 0.0f;
+		ADD("Against the snapshot: luma %+.1f%%", dl);
+		if (fabsf(stops) >= 0.1f && s->colorspace < CM_CS_2100_HLG)
+			ADD(" (about %+.1f stop to match)", stops);
+		ADD(", hue %+.0f\xc2\xb0, saturation %+.0f%%. ", dh, ds);
+		if (fabsf(dl) <= 3.0f && fabsf(dh) <= 4.0f && fabsf(ds) <= 5.0f)
+			ADD("It matches the snapshot. ");
+		else if (advice)
+			ADD("Match %s%s%s to the snapshot. ", fabsf(dl) > 3.0f ? "exposure" : "",
+			    fabsf(dl) > 3.0f && (fabsf(dh) > 4.0f || fabsf(ds) > 5.0f) ? " and " : "",
+			    fabsf(dh) > 4.0f || fabsf(ds) > 5.0f ? "color" : "");
+	}
+
 	if (advice) {
 		float lo, hi;
 		face_range(s->colorspace, &lo, &hi);
@@ -473,124 +503,107 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 			    "consider R/B paint or skin-detail hue; prosumer: consider WB temperature/tint or the "
 			    "picture-profile hue. Preserve natural complexion differences. ");
 	}
-
-	if (ref && ref != s && ref->skin_valid) {
-		const float dl = s->skin_luma - ref->skin_luma;
-		const float dh = s->skin_hue - ref->skin_hue;
-		const float ds = s->skin_sat - ref->skin_sat;
-		// about 2.4 stops per doubling of the signal for SDR video
-		const float stops = s->skin_luma > 0.5f && ref->skin_luma > 0.5f
-					    ? 2.4f * log2f(ref->skin_luma / s->skin_luma)
-					    : 0.0f;
-		ADD("Against camera 1: luma %+.1f%%", dl);
-		if (fabsf(stops) >= 0.1f && s->colorspace < CM_CS_2100_HLG)
-			ADD(" (about %+.1f stop to match)", stops);
-		ADD(", hue %+.0f\xc2\xb0, saturation %+.0f%%.", dh, ds);
-		if (advice && (fabsf(dl) > 3.0f || fabsf(dh) > 4.0f || fabsf(ds) > 5.0f))
-			ADD(" Match %s%s%s to camera 1.", fabsf(dl) > 3.0f ? "exposure" : "",
-			    fabsf(dl) > 3.0f && (fabsf(dh) > 4.0f || fabsf(ds) > 5.0f) ? " and " : "",
-			    fabsf(dh) > 4.0f || fabsf(ds) > 5.0f ? "color" : "");
-	}
-	UNUSED_PARAMETER(cam);
 #undef ADD
+}
+
+static void face_panel(const struct text_scale *ts, gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+		       float px, float py, float size, const char *label, uint32_t color)
+{
+	fill(px, py, px + size, py + size, 0xFF000000);
+	if (tex && w && h)
+		draw_tex_region(tex, x, y, w, h, px, py, size, size);
+	outline(px, py, px + size, py + size, color);
+	fill(px, py + size - 16.0f * ts->uy, px + size, py + size, 0xA0000000);
+	text_draw(ts, label, px + size * 0.5f, py + size - 2.0f * ts->uy, 10.0f, color, TEXT_ALIGN_CENTER,
+		  TEXT_VALIGN_BOTTOM);
 }
 
 static void faces_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
 	struct faces_source *src = data;
-	const float W = (float)FC_W, H = (float)faces_get_height(src);
+	const float W = (float)FC_W, H = (float)FC_H;
 	const struct text_scale ts = text_scale_from_viewport(W, H);
 	fill(0.0f, 0.0f, W, H, 0xFF101013);
 
-	struct face_stats stats[FC_CAMS];
-	bool have[FC_CAMS] = {false};
-	for (int i = 0; i < FC_CAMS; i++) {
-		if (!src->probes[i])
-			continue;
-		struct probe_source *p = obs_obj_get_data(src->probes[i]);
-		if (!p)
-			continue;
-		cm_render_target(&p->cm); // keeps the camera's capture running
+	struct probe_source *p = src->probe ? obs_obj_get_data(src->probe) : NULL;
+	struct face_stats st = {0};
+	if (p) {
+		cm_render_target(&p->cm); // keeps the capture running
 		pthread_mutex_lock(&p->mutex);
-		stats[i] = p->stats;
+		st = p->stats;
 		pthread_mutex_unlock(&p->mutex);
-		have[i] = true;
 	}
+	gs_texture_t *tex = p ? cm_bypass_get_texture(&p->cm) : NULL;
+	const uint32_t cw = p ? cm_bypass_get_width(&p->cm) : 0, ch = p ? cm_bypass_get_height(&p->cm) : 0;
+	uint32_t fx = 0, fy = 0, fw = 0, fh = 0;
+	const bool face = tex && cw && ch && st.n_faces > 0 && face_crop(st.faces, cw, ch, &fx, &fy, &fw, &fh);
 
-	const struct face_stats *ref = have[0] ? &stats[0] : NULL;
-	float row_y = 0.0f;
-	for (int i = 0; i < FC_CAMS; i++) {
-		if (!src->probes[i])
-			continue;
-		struct probe_source *p = obs_obj_get_data(src->probes[i]);
-		const float y0 = row_y + 6.0f * ts.uy, y1 = row_y + FC_ROW - 6.0f * ts.uy;
-		row_y += FC_ROW;
-		if (i > 0)
-			fill(8.0f * ts.ux, y0 - 6.0f * ts.uy, W - 8.0f * ts.ux, y0 - 5.0f * ts.uy, 0xFF303036);
-
-		// thumbnail with the faces marked
-		const float th = y1 - y0, tw = th * 16.0f / 9.0f;
-		const float tx = 8.0f * ts.ux;
-		fill(tx, y0, tx + tw, y1, 0xFF000000);
-		gs_texture_t *tex = p ? cm_bypass_get_texture(&p->cm) : NULL;
-		const uint32_t cw = p ? cm_bypass_get_width(&p->cm) : 0, ch = p ? cm_bypass_get_height(&p->cm) : 0;
-		if (tex && cw && ch) {
-			gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-			gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), tex);
-			gs_matrix_push();
-			gs_matrix_translate3f(tx, y0, 0.0f);
-			gs_matrix_scale3f(tw / cw, th / ch, 1.0f);
-			while (gs_effect_loop(def, "Draw"))
-				gs_draw_sprite_subregion(tex, 0, 0, 0, cw, ch);
-			gs_matrix_pop();
-		}
-		if (have[i]) {
-			for (int k = 0; k < stats[i].n_faces; k++) {
-				const struct face_box *f = stats[i].faces + k;
-				outline(tx + f->x * tw, y0 + f->y * th, tx + (f->x + f->w) * tw,
-					y0 + (f->y + f->h) * th, k == 0 ? 0xFF6FCF86 : 0xFFB8B8C0);
-			}
-		}
-
-		// text
-		const float x = tx + tw + 12.0f * ts.ux;
-		const float swatch = 40.0f * ts.ux;
-		const float text_w = W - x - swatch - 24.0f * ts.ux;
-		char buf[1024];
-		const char *name = src->names[i] && *src->names[i] ? src->names[i]
-								   : obs_module_text("Faces.DockSelection");
-		if (is_program_name(src->names[i]))
-			name = "Program";
-		else if (is_roi_source_name(src->names[i]))
-			name = obs_module_text("Faces.DockSelection");
-		if (!have[i] || !stats[i].valid) {
-			snprintf(buf, sizeof(buf), "Camera %d  %s  -  %s", i + 1, name, obs_module_text("QC.NoSignal"));
-			text_draw(&ts, buf, x, y0, 13.0f, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
-			continue;
-		}
-		const struct face_stats *s = &stats[i];
-		snprintf(buf, sizeof(buf), "Camera %d  %s  \xe2\x80\xa2  %d %s", i + 1, name, s->n_faces,
-			 s->n_faces == 1 ? obs_module_text("Faces.FaceFound") : obs_module_text("Faces.FacesFound"));
-		float y = y0;
-		text_draw(&ts, buf, x, y, 13.0f, 0xFFF0F0F2, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
-		y += 18.0f * ts.uy;
-		snprintf(buf, sizeof(buf),
-			 "Scene luma: median %.1f%%, P10-P90 %.1f-%.1f, P99 %.0f; near black %.0f%%, "
-			 "near clipping %.0f%%.",
-			 s->median, s->p10, s->p90, s->p99, s->near_black, s->near_clip);
-		y = wrapped(&ts, buf, x, y, text_w, 11.5f, 0xFFD8D8DC, y1);
-		assessment(s, i > 0 ? ref : NULL, i + 1, src->advice, buf, sizeof(buf));
-		wrapped(&ts, buf, x, y, text_w, 11.5f, 0xFFD8D8DC, y1);
-
-		// average skin color
-		if (s->skin_valid) {
-			const uint32_t c = 0xFF000000 | ((uint32_t)s->skin_rgb[0] << 16) |
-					   ((uint32_t)s->skin_rgb[1] << 8) | s->skin_rgb[2];
-			fill(W - swatch - 12.0f * ts.ux, y0 + 20.0f * ts.uy, W - 12.0f * ts.ux,
-			     y0 + 20.0f * ts.uy + swatch * ts.uy / ts.ux, c);
+	// snapshot: keep the face crop and the measurements
+	if (src->want_snapshot) {
+		src->want_snapshot = false;
+		if (face && st.skin_valid) {
+			gs_texture_destroy(src->ref_tex);
+			src->ref_tex = gs_texture_create(fw, fh, gs_texture_get_color_format(tex), 1, NULL, 0);
+			if (src->ref_tex)
+				gs_copy_texture_region(src->ref_tex, 0, 0, tex, fx, fy, fw, fh);
+			src->ref = st;
+			src->have_ref = src->ref_tex != NULL;
 		}
 	}
+	const bool show_ref = src->have_ref && src->compare;
+
+	// the picture with the faces marked
+	const float y0 = 8.0f * ts.uy, y1 = H - 8.0f * ts.uy;
+	const float th = y1 - y0, tw = th * 16.0f / 9.0f, tx = 8.0f * ts.ux;
+	fill(tx, y0, tx + tw, y1, 0xFF000000);
+	if (tex && cw && ch)
+		draw_tex_region(tex, 0, 0, cw, ch, tx, y0, tw, th);
+	for (int k = 0; k < st.n_faces; k++) {
+		const struct face_box *f = st.faces + k;
+		outline(tx + f->x * tw, y0 + f->y * th, tx + (f->x + f->w) * tw, y0 + (f->y + f->h) * th,
+			k == 0 ? 0xFF6FCF86 : 0xFFB8B8C0);
+	}
+
+	// the face up close, and the kept one next to it
+	const float size = th;
+	float x = tx + tw + 10.0f * ts.ux;
+	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, x, y0, size, obs_module_text("Faces.Live"), 0xFF6FCF86);
+	x += size + 6.0f * ts.ux;
+	if (show_ref) {
+		face_panel(&ts, src->ref_tex, 0, 0, gs_texture_get_width(src->ref_tex),
+			   gs_texture_get_height(src->ref_tex), x, y0, size, obs_module_text("Faces.Snapshot"),
+			   0xFFFF59D9);
+		x += size + 6.0f * ts.ux;
+	}
+
+	// text
+	x += 6.0f * ts.ux;
+	const float text_w = W - x - 10.0f * ts.ux;
+	char buf[1200];
+	const char *name = obs_module_text("Faces.DockSelection");
+	if (src->name && is_program_name(src->name))
+		name = "Program";
+	else if (src->name && *src->name && !is_roi_source_name(src->name))
+		name = src->name;
+	if (!p || !st.valid) {
+		snprintf(buf, sizeof(buf), "%s  -  %s", name, obs_module_text("QC.NoSignal"));
+		text_draw(&ts, buf, x, y0, 13.0f, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		return;
+	}
+	snprintf(buf, sizeof(buf), "%s  \xe2\x80\xa2  %d %s", name, st.n_faces,
+		 st.n_faces == 1 ? obs_module_text("Faces.FaceFound") : obs_module_text("Faces.FacesFound"));
+	float y = y0;
+	text_draw(&ts, buf, x, y, 13.0f, 0xFFF0F0F2, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	y += 18.0f * ts.uy;
+	snprintf(buf, sizeof(buf),
+		 "Scene luma: median %.1f%%, P10-P90 %.1f-%.1f, P99 %.0f; near black %.0f%%, near clipping %.0f%%.",
+		 st.median, st.p10, st.p90, st.p99, st.near_black, st.near_clip);
+	y = wrapped(&ts, buf, x, y, text_w, 11.5f, 0xFFD8D8DC, y1);
+	assessment(&st, show_ref ? &src->ref : NULL, src->advice, buf, sizeof(buf));
+	y = wrapped(&ts, buf, x, y + 4.0f * ts.uy, text_w, 11.5f, 0xFFD8D8DC, y1);
+	if (!src->have_ref)
+		wrapped(&ts, obs_module_text("Faces.SnapshotHint"), x, y + 4.0f * ts.uy, text_w, 10.5f, 0xFF8D8D96, y1);
 }
 
 const struct obs_source_info colormonitor_faces = {

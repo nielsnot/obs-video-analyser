@@ -171,10 +171,13 @@ Add three vectorscopes and set them to lows, mids and highs to see them side by 
 `☺ Faces` in the toolbar makes the selection follow every face found in the picture: the faces are outlined in
 cyan and every scope measures only them. The drawn shapes come back when you turn it off.
 
-The `Faces` scope compares up to four cameras. Camera 1 follows the scope's source (the dock selection by default);
-choose cameras 2 to 4 in its options. Per camera it shows a thumbnail with the faces, the scene levels and,
-for the largest face, its luma, hue against the skin tone line and saturation, with written advice and the
-difference to camera 1. Detection runs on the CPU a few times per second on a picture 320 pixels wide.
+The `Faces` scope follows its source (the dock selection by default; switch the camera in OBS). It shows the picture
+with the faces marked, the largest face up close, the scene levels and, for that face, its luma, hue against the skin
+tone line and saturation, with written advice. Detection runs on the CPU a few times per second on a picture 320
+pixels wide.
+
+`◉ Snapshot` also keeps the face. Switch to another camera or angle and, with `Compare` on, the kept face appears
+next to the live one with the differences (luma and about how many stops, hue, saturation) and whether it matches.
 
 ## Hue and saturation histograms
 

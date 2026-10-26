@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+- **Faces:** one source instead of up to four cameras; switch the camera in OBS. The largest face is shown up close.
+- **Face snapshot:** `◉ Snapshot` also keeps the face and its measurements. With `Compare` on, the kept face is shown
+  next to the live one with the difference in luma (and about how many stops), hue and saturation, and whether it
+  matches, so you can check a face from another camera or angle.
+
 ## 0.7.0
 
 - **Faces:** a new scope that finds and follows faces in up to four cameras (the first is the reference). Per camera:
