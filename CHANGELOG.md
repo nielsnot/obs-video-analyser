@@ -1,7 +1,12 @@
 # Changelog
 
-## 0.8.0
+## 0.7.0
 
+- **Faces:** a new scope that finds and follows faces in up to four cameras (the first is the reference). Per camera:
+  a thumbnail with the faces marked, scene luma (median, P10-P90, P99, near black, near clipping), and for the
+  largest face its luma, hue against the skin tone line and saturation, with written advice and the difference to
+  camera 1. Face detection by libfacedetection (BSD), on the CPU, no extra installs.
+- **☺ Faces** in the toolbar: the dock selection follows every face found, so all scopes measure the faces.
 - **Quick controls:** hover a scope for a bar with intensity, grid, color, gain (1x, 2x, 5x), shape and full size.
 - **Waveform:** levels at the limits drawn orange (adjustable), an optional histogram along the right edge and
   pixel positions along the top.
@@ -12,14 +17,6 @@
 - macOS: the analysis no longer keeps a graphics buffer mapped while the scopes compute, which made the OpenGL
   driver report "glUnmapBuffer failed" now and then.
 - **Export screenshot:** `⤓ Export` (or the dock menu) saves the whole dock as it is now as a PNG.
-
-## 0.7.0
-
-- **Faces:** a new scope that finds and follows faces in up to four cameras (the first is the reference). Per camera:
-  a thumbnail with the faces marked, scene luma (median, P10-P90, P99, near black, near clipping), and for the
-  largest face its luma, hue against the skin tone line and saturation, with written advice and the difference to
-  camera 1. Face detection by libfacedetection (BSD), on the CPU, no extra installs.
-- **☺ Faces** in the toolbar: the dock selection follows every face found, so all scopes measure the faces.
 
 ## 0.6.0
 
