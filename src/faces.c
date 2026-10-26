@@ -470,6 +470,8 @@ static void draw_tex_region(gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t 
 	gs_matrix_pop();
 }
 
+/* Facts only: the measured values, and the differences to the snapshot. A remark is added only when a value
+ * is far outside what is normal for a face (with Advice on); taste, such as a warm or cool look, is left alone. */
 static void assessment(const struct face_stats *s, const struct face_stats *ref, bool advice, char *out, size_t size)
 {
 	size_t n = 0;
@@ -483,13 +485,9 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 		ADD("%s", obs_module_text("Faces.NoFace"));
 		return;
 	}
-	ADD("Face: luma median %.1f%%, hue %.0f\xc2\xb0, saturation %.0f%%. ", s->skin_luma, s->skin_hue, s->skin_sat);
 	const float dev = s->skin_hue - SKIN_LINE_DEG;
-	if (fabsf(dev) <= 4.0f)
-		ADD("Hue is on the skin tone line. ");
-	else
-		ADD("Hue is %.0f\xc2\xb0 toward %s relative to the skin tone line. ", fabsf(dev),
-		    dev < 0.0f ? "red/magenta" : "yellow/green");
+	ADD("Face: luma %.1f%%, hue %.0f\xc2\xb0 (%+.0f\xc2\xb0 from the skin tone line), saturation %.0f%%. ",
+	    s->skin_luma, s->skin_hue, dev, s->skin_sat);
 
 	if (ref && ref->skin_valid) {
 		const float dl = s->skin_luma - ref->skin_luma;
@@ -499,31 +497,30 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 		const float stops = s->skin_luma > 0.5f && ref->skin_luma > 0.5f
 					    ? 2.4f * log2f(ref->skin_luma / s->skin_luma)
 					    : 0.0f;
-		ADD("Against the snapshot: luma %+.1f%%", dl);
+		ADD("Snapshot difference: luma %+.1f%%", dl);
 		if (fabsf(stops) >= 0.1f && s->colorspace < CM_CS_2100_HLG)
-			ADD(" (about %+.1f stop to match)", stops);
+			ADD(" (about %+.1f stop)", -stops);
 		ADD(", hue %+.0f\xc2\xb0, saturation %+.0f%%. ", dh, ds);
 		if (fabsf(dl) <= 3.0f && fabsf(dh) <= 4.0f && fabsf(ds) <= 5.0f)
-			ADD("It matches the snapshot. ");
-		else if (advice)
-			ADD("Match %s%s%s to the snapshot. ", fabsf(dl) > 3.0f ? "exposure" : "",
-			    fabsf(dl) > 3.0f && (fabsf(dh) > 4.0f || fabsf(ds) > 5.0f) ? " and " : "",
-			    fabsf(dh) > 4.0f || fabsf(ds) > 5.0f ? "color" : "");
+			ADD("Within tolerance of the snapshot. ");
+		else if (advice && (fabsf(dl) > 10.0f || fabsf(dh) > 12.0f || fabsf(ds) > 15.0f))
+			ADD("Clearly different from the snapshot. ");
 	}
 
 	if (advice) {
+		// only what is far out of proportion
 		float lo, hi;
 		face_range(s->colorspace, &lo, &hi);
-		if (s->skin_luma < lo)
-			ADD("The face is darker than usual (%.0f-%.0f%%); open the iris or add light if the shot allows. ",
-			    lo, hi);
-		else if (s->skin_luma > hi)
-			ADD("The face is brighter than usual (%.0f-%.0f%%); watch the highlights. ", lo, hi);
-		if (fabsf(dev) > 6.0f)
-			ADD("This may reflect lighting, makeup or natural undertone. Compare against a trusted reference "
-			    "and verify neutral lighting and white balance first. If a cast is confirmed, broadcast: "
-			    "consider R/B paint or skin-detail hue; prosumer: consider WB temperature/tint or the "
-			    "picture-profile hue. Preserve natural complexion differences. ");
+		if (s->skin_luma < lo - 15.0f)
+			ADD("Very dark for a face (usual %.0f-%.0f%%). ", lo, hi);
+		else if (s->skin_luma > hi + 12.0f)
+			ADD("Very bright for a face (usual %.0f-%.0f%%). ", lo, hi);
+		if (fabsf(dev) > 20.0f)
+			ADD("Hue is far from the skin tone line; check white balance. ");
+		if (s->skin_sat > 65.0f)
+			ADD("Very saturated for a face. ");
+		else if (s->skin_sat < 4.0f)
+			ADD("Almost no color in the face. ");
 	}
 #undef ADD
 }

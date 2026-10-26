@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.8
+
+- **Faces** states facts only: luma, hue and its distance to the skin tone line, saturation, and the differences to
+  the snapshot. With Advice on it adds a remark only when a value is far out of proportion (very dark or bright,
+  hue more than 20° off the skin tone line, very saturated or grey), not about a warm or cool look.
+
 ## 0.7.7
 
 - **☺ Faces follow:** the analyzed pixels outside the faces are now left out on the CPU as well, so the scopes
