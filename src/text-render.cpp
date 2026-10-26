@@ -153,7 +153,7 @@ static float ui_scale = 1.0f;
 
 extern "C" void text_set_ui_scale(float scale)
 {
-	ui_scale = scale >= 1.0f && scale <= 4.0f ? scale : 1.0f;
+	ui_scale = scale >= 0.5f && scale <= 8.0f ? scale : 1.0f;
 }
 
 extern "C" struct text_scale text_scale_from_viewport(float source_width, float source_height)
