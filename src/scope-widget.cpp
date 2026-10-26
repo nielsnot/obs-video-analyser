@@ -35,6 +35,8 @@
 #include <QKeyEvent>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QImage>
+#include <QStandardPaths>
 #include <QWidgetAction>
 #include <QColor>
 #include <memory>
@@ -1100,6 +1102,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	auto *btnSnap = make_tool_button(toolbar, "dock.toolbar.snapshot", "dock.toolbar.snapshot.tip", false);
 	btnCompare = make_tool_button(toolbar, "dock.toolbar.compare", "dock.toolbar.compare.tip", true);
 	btnArrange = make_tool_button(toolbar, "dock.toolbar.arrange", "dock.toolbar.arrange.tip", true);
+	auto *btnExport = make_tool_button(toolbar, "dock.toolbar.export", "dock.toolbar.export.tip", false);
 	btnFaces = make_tool_button(toolbar, "dock.toolbar.faces", "dock.toolbar.faces.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
@@ -1136,6 +1139,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addWidget(btnFaces);
 	layout->addSpacing(8);
 	layout->addWidget(btnArrange);
+	layout->addWidget(btnExport);
 	layout->addStretch(1);
 
 	// The shape buttons behave like radio buttons that can also be switched off.
@@ -1148,6 +1152,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnSnap, &QToolButton::clicked, this, &ScopeWidget::takeSnapshot);
 	connect(btnCompare, &QToolButton::toggled, this, &ScopeWidget::setCompare);
 	connect(btnArrange, &QToolButton::toggled, this, &ScopeWidget::setArranging);
+	connect(btnExport, &QToolButton::clicked, this, &ScopeWidget::exportScreenshot);
 	connect(btnFaces, &QToolButton::toggled, this, [this](bool on) {
 		if (!data->roi)
 			return;
@@ -1232,6 +1237,70 @@ void ScopeWidget::takeSnapshot()
 		snap(e->src);
 	if (btnCompare && !btnCompare->isChecked())
 		btnCompare->setChecked(true); // show what was just taken
+}
+
+/* Renders the whole dock as it is now (without the hover controls) into a PNG file. */
+void ScopeWidget::exportScreenshot()
+{
+	const int cx = data->last_cx, cy = data->last_cy;
+	if (cx <= 0 || cy <= 0)
+		return;
+
+	QImage image(cx, cy, QImage::Format_RGBA8888);
+	image.fill(Qt::black);
+	bool ok = false;
+
+	const int hover = data->hover_tile;
+	const bool arranging = data->arranging;
+	data->hover_tile = -1;
+	data->arranging = false;
+
+	obs_enter_graphics();
+	gs_texrender_t *tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	if (tr && gs_texrender_begin(tr, (uint32_t)cx, (uint32_t)cy)) {
+		struct vec4 black;
+		vec4_set(&black, 0.0f, 0.0f, 0.0f, 1.0f);
+		gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
+		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+		draw(data, (uint32_t)cx, (uint32_t)cy);
+		gs_texrender_end(tr);
+
+		gs_stagesurf_t *stage = gs_stagesurface_create((uint32_t)cx, (uint32_t)cy, GS_RGBA);
+		if (stage) {
+			gs_stage_texture(stage, gs_texrender_get_texture(tr));
+			uint8_t *ptr;
+			uint32_t linesize;
+			if (gs_stagesurface_map(stage, &ptr, &linesize)) {
+				for (int y = 0; y < cy; y++) {
+					uint8_t *dst = image.scanLine(y);
+					memcpy(dst, ptr + (size_t)linesize * y, (size_t)cx * 4);
+					for (int x = 0; x < cx; x++)
+						dst[x * 4 + 3] = 255; // opaque
+				}
+				gs_stagesurface_unmap(stage);
+				ok = true;
+			}
+			gs_stagesurface_destroy(stage);
+		}
+	}
+	gs_texrender_destroy(tr);
+	obs_leave_graphics();
+
+	data->hover_tile = hover;
+	data->arranging = arranging;
+	if (!ok)
+		return;
+
+	const QString name = QStringLiteral("Video Analyser %1.png")
+				     .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH-mm-ss")));
+	const QString dir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+	const QString file =
+		QFileDialog::getSaveFileName(this, QString::fromUtf8(obs_module_text("dock.menu.export")).remove('&'),
+					     dir + QStringLiteral("/") + name, QStringLiteral("PNG (*.png)"));
+	if (file.isEmpty())
+		return;
+	if (!image.save(file, "PNG"))
+		blog(LOG_WARNING, "Could not save the screenshot to '%s'", file.toUtf8().constData());
 }
 
 /* A click on one of the quick controls of a scope tile. */
@@ -1869,6 +1938,9 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 				setArranging(false);
 		});
 	}
+
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.export")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::exportScreenshot, Qt::QueuedConnection);
 
 	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.toolbar")));
 	act->setCheckable(true);

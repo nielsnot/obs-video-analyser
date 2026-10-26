@@ -32,6 +32,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
 | 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
 | | `☺ Faces` | The selection follows every face found, so all scopes measure the faces. |
+| | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
 | | `⊞ Arrange` | Drag scopes anywhere in the dock and resize them at their bottom right corner (free layout, saved per view). |
 | 5 | **ROI view** | The picture being analyzed. Shapes are outlined in green, faces in cyan, everything outside them is darkened. Pins show RGB, luma and HSL values. The mouse wheel zooms toward face height (or the pointer, or the middle). |
 | 6 – 8 | **Scopes** | In a grid that fits the dock, in a row or column, or placed freely. Each shows a name label, optionally a colored frame to group the scopes of one camera. Hover one for quick controls: intensity, grid, color, gain, shape and full size. |

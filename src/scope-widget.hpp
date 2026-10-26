@@ -53,6 +53,7 @@ private:
 	void openTabMenu(const QPoint &pos);
 	void openOptions(int tile, const QPoint &globalPos);
 	void setArranging(bool on);
+	void exportScreenshot();
 	void quickControl(int tile, const struct qb_item &it, int x);
 	void addMarkerControls(class QWidget *panel, class QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
 			       const std::function<void()> &reopen);
