@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.9
+
+- **Faces: reference look.** "Set reference" (quick controls or options) keeps the face as it is now as the look you
+  want. Every shot after that is compared with it, with the differences in luma, hue and saturation, until you clear
+  it; the reference is saved with the scene collection (after a restart its skin color stands in for the picture).
+  ◉ Snapshot with Compare still works for a quick check and takes precedence while Compare is on.
+
 ## 0.7.8
 
 - **Faces** states facts only: luma, hue and its distance to the skin tone line, saturation, and the differences to

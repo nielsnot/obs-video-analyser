@@ -800,9 +800,11 @@ enum qb_kind_e {
 	QB_GAIN,
 	QB_ASPECT,
 	QB_MAX,
-	QB_MARKERS,  // marker edit mode on or off
-	QB_MK_COLOR, // next color for the selected marker
-	QB_MK_DEL,   // delete the selected marker
+	QB_MARKERS,    // marker edit mode on or off
+	QB_MK_COLOR,   // next color for the selected marker
+	QB_MK_DEL,     // delete the selected marker
+	QB_FACE_BASE,  // faces: this face is the reference look
+	QB_FACE_CLEAR, // faces: no reference look
 };
 
 struct qb_item
@@ -865,6 +867,10 @@ static std::string qb_label(const scope_widget_s *data, const scope_entry *e, in
 		return "Recolor";
 	case QB_MK_DEL:
 		return "Delete";
+	case QB_FACE_BASE:
+		return "Set reference";
+	case QB_FACE_CLEAR:
+		return "Clear reference";
 	default:
 		return "Int";
 	}
@@ -928,6 +934,10 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 			add(QB_MK_COLOR, 40);
 			add(QB_MK_DEL, 40);
 		}
+	}
+	if (e->type >= 0 && e->type < N_TYPES && !strcmp(scope_types[e->type].key, "faces")) {
+		add(QB_FACE_BASE, 40);
+		add(QB_FACE_CLEAR, 40);
 	}
 	add(QB_ASPECT, 40);
 	add(QB_MAX, 40);
@@ -1629,6 +1639,14 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 	case QB_MAX:
 		toggleSolo(data->solo >= 0 ? -1 : tile);
 		return;
+	case QB_FACE_BASE:
+	case QB_FACE_CLEAR: {
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "cmd", it.kind == QB_FACE_BASE ? "set_base" : "clear_base");
+		proc_handler_call(obs_source_get_proc_handler(src), "va_faces", &cd);
+		calldata_free(&cd);
+		return;
+	}
 	case QB_MARKERS:
 	case QB_MK_COLOR:
 	case QB_MK_DEL: {

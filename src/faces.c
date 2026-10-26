@@ -239,6 +239,13 @@ struct faces_source
 	bool have_ref;
 	gs_texture_t *ref_tex;
 
+	// reference look ("this is how it should look"): kept with the settings, compared with all the time
+	volatile bool want_base, want_clear_base;
+	volatile bool store_base; // write the reference into the settings on the next tick
+	struct face_stats base;
+	bool have_base;
+	gs_texture_t *base_tex; // the face as it was; not kept over a restart
+
 	// which face: 0 follows the largest, otherwise the tracker id clicked or stepped to
 	int sel_id;
 	int text_pct;
@@ -266,9 +273,50 @@ static void faces_compare_cb(void *data, calldata_t *cd)
 	((struct faces_source *)data)->compare = calldata_bool(cd, "on");
 }
 
+static void faces_cmd_cb(void *data, calldata_t *cd)
+{
+	struct faces_source *src = data;
+	const char *cmd = calldata_string(cd, "cmd");
+	if (cmd && !strcmp(cmd, "set_base"))
+		src->want_base = true;
+	else if (cmd && !strcmp(cmd, "clear_base"))
+		src->want_clear_base = true;
+}
+
+static bool faces_set_base_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	((struct faces_source *)data)->want_base = true;
+	return false;
+}
+
+static bool faces_clear_base_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	((struct faces_source *)data)->want_clear_base = true;
+	return false;
+}
+
 static void faces_update(void *data, obs_data_t *settings)
 {
 	struct faces_source *src = data;
+	// the reference look, as stored
+	if (obs_data_get_bool(settings, "base_valid")) {
+		src->base.skin_valid = true;
+		src->base.colorspace = (int)obs_data_get_int(settings, "base_cs");
+		src->base.skin_luma = (float)obs_data_get_double(settings, "base_luma");
+		src->base.skin_hue = (float)obs_data_get_double(settings, "base_hue");
+		src->base.skin_sat = (float)obs_data_get_double(settings, "base_sat");
+		const long long rgb = obs_data_get_int(settings, "base_rgb");
+		src->base.skin_rgb[0] = (uint8_t)(rgb >> 16);
+		src->base.skin_rgb[1] = (uint8_t)(rgb >> 8);
+		src->base.skin_rgb[2] = (uint8_t)rgb;
+		src->have_base = true;
+	} else {
+		src->have_base = false;
+	}
 	src->scale = (int)obs_data_get_int(settings, "target_scale");
 	src->advice = obs_data_get_bool(settings, "face_advice");
 	src->text_pct = (int)obs_data_get_int(settings, "face_text");
@@ -301,6 +349,7 @@ static void *faces_create(obs_data_t *settings, obs_source_t *source)
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	proc_handler_add(ph, "void va_snapshot()", faces_snapshot_cb, src);
 	proc_handler_add(ph, "void va_set_compare(in bool on)", faces_compare_cb, src);
+	proc_handler_add(ph, "void va_faces(in string cmd)", faces_cmd_cb, src);
 	faces_update(src, settings);
 	return src;
 }
@@ -311,6 +360,7 @@ static void faces_destroy(void *data)
 	obs_source_release(src->probe);
 	obs_enter_graphics();
 	gs_texture_destroy(src->ref_tex);
+	gs_texture_destroy(src->base_tex);
 	obs_leave_graphics();
 	bfree(src->name);
 	bfree(src);
@@ -325,7 +375,6 @@ static void faces_get_defaults(obs_data_t *settings)
 
 static obs_properties_t *faces_get_properties(void *data)
 {
-	UNUSED_PARAMETER(data);
 	obs_properties_t *props = obs_properties_create();
 	obs_property_t *prop = obs_properties_add_list(props, "target_name", obs_module_text("Source"),
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
@@ -334,6 +383,9 @@ static obs_properties_t *faces_get_properties(void *data)
 	obs_properties_add_bool(props, "face_advice", obs_module_text("Faces.Advice"));
 	prop = obs_properties_add_int_slider(props, "face_text", obs_module_text("Faces.TextSize"), 80, 250, 10);
 	obs_property_int_set_suffix(prop, "%");
+	obs_properties_add_button2(props, "base_set", obs_module_text("Faces.SetBase"), faces_set_base_clicked, data);
+	obs_properties_add_button2(props, "base_clear", obs_module_text("Faces.ClearBase"), faces_clear_base_clicked,
+				   data);
 	return props;
 }
 
@@ -352,6 +404,23 @@ static uint32_t faces_get_height(void *data)
 static void faces_tick(void *data, float seconds)
 {
 	struct faces_source *src = data;
+	if (src->store_base) {
+		// keep the reference look with the settings (not from the graphics thread)
+		src->store_base = false;
+		obs_data_t *d = obs_data_create();
+		obs_data_set_bool(d, "base_valid", src->have_base);
+		if (src->have_base) {
+			obs_data_set_int(d, "base_cs", src->base.colorspace);
+			obs_data_set_double(d, "base_luma", src->base.skin_luma);
+			obs_data_set_double(d, "base_hue", src->base.skin_hue);
+			obs_data_set_double(d, "base_sat", src->base.skin_sat);
+			obs_data_set_int(d, "base_rgb",
+					 (long long)src->base.skin_rgb[0] << 16 | src->base.skin_rgb[1] << 8 |
+						 src->base.skin_rgb[2]);
+		}
+		obs_source_update(src->self, d);
+		obs_data_release(d);
+	}
 	if (src->probe)
 		probe_tick(obs_obj_get_data(src->probe), seconds);
 }
@@ -472,7 +541,8 @@ static void draw_tex_region(gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t 
 
 /* Facts only: the measured values, and the differences to the snapshot. A remark is added only when a value
  * is far outside what is normal for a face (with Advice on); taste, such as a warm or cool look, is left alone. */
-static void assessment(const struct face_stats *s, const struct face_stats *ref, bool advice, char *out, size_t size)
+static void assessment(const struct face_stats *s, const struct face_stats *ref, const char *ref_name, bool advice,
+		       char *out, size_t size)
 {
 	size_t n = 0;
 #define ADD(...)                                                       \
@@ -497,14 +567,14 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 		const float stops = s->skin_luma > 0.5f && ref->skin_luma > 0.5f
 					    ? 2.4f * log2f(ref->skin_luma / s->skin_luma)
 					    : 0.0f;
-		ADD("Snapshot difference: luma %+.1f%%", dl);
+		ADD("%s difference: luma %+.1f%%", ref_name, dl);
 		if (fabsf(stops) >= 0.1f && s->colorspace < CM_CS_2100_HLG)
 			ADD(" (about %+.1f stop)", -stops);
 		ADD(", hue %+.0f\xc2\xb0, saturation %+.0f%%. ", dh, ds);
 		if (fabsf(dl) <= 3.0f && fabsf(dh) <= 4.0f && fabsf(ds) <= 5.0f)
-			ADD("Within tolerance of the snapshot. ");
+			ADD("Within tolerance of the %s. ", ref_name[0] == 'S' ? "snapshot" : "reference");
 		else if (advice && (fabsf(dl) > 10.0f || fabsf(dh) > 12.0f || fabsf(ds) > 15.0f))
-			ADD("Clearly different from the snapshot. ");
+			ADD("Clearly different from the %s. ", ref_name[0] == 'S' ? "snapshot" : "reference");
 	}
 
 	if (advice) {
@@ -526,9 +596,9 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 }
 
 static void face_panel(const struct text_scale *ts, gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-		       float px, float py, float size, const char *label, uint32_t color, float tk)
+		       float px, float py, float size, const char *label, uint32_t color, float tk, uint32_t bg)
 {
-	fill(px, py, px + size, py + size, 0xFF000000);
+	fill(px, py, px + size, py + size, bg);
 	if (tex && w && h)
 		draw_tex_region(tex, x, y, w, h, px, py, size, size);
 	outline(px, py, px + size, py + size, color);
@@ -586,7 +656,30 @@ static void faces_render(void *data, gs_effect_t *effect)
 			src->have_ref = src->ref_tex != NULL;
 		}
 	}
-	const bool show_ref = src->have_ref && src->compare;
+	// reference look: set from the face now, or cleared
+	if (src->want_base) {
+		src->want_base = false;
+		if (face && st.skin_valid) {
+			gs_texture_destroy(src->base_tex);
+			src->base_tex = gs_texture_create(fw, fh, gs_texture_get_color_format(tex), 1, NULL, 0);
+			if (src->base_tex)
+				gs_copy_texture_region(src->base_tex, 0, 0, tex, fx, fy, fw, fh);
+			src->base = st;
+			src->have_base = true;
+			src->store_base = true;
+		}
+	}
+	if (src->want_clear_base) {
+		src->want_clear_base = false;
+		gs_texture_destroy(src->base_tex);
+		src->base_tex = NULL;
+		src->have_base = false;
+		src->store_base = true;
+	}
+	// compare with the snapshot while Compare is on, otherwise with the reference look
+	const bool show_snap = src->have_ref && src->compare;
+	const bool show_ref = show_snap || src->have_base;
+	const struct face_stats *cmp = show_snap ? &src->ref : &src->base;
 	const float tk = src->text_pct / 100.0f;
 
 	// left: the picture with the faces marked, the chosen face up close and the kept one below it
@@ -615,12 +708,21 @@ static void faces_render(void *data, gs_effect_t *effect)
 		snprintf(label, sizeof(label), "%s %d/%d", obs_module_text("Faces.Live"), sel + 1, st.n_faces);
 	else
 		snprintf(label, sizeof(label), "%s", obs_module_text("Faces.Live"));
-	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, tx, py, size, label, 0xFF6FCF86, tk);
+	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, tx, py, size, label, 0xFF6FCF86, tk, 0xFF000000);
 	src->live_x0 = tx, src->live_y0 = py, src->live_size = size;
-	if (show_ref)
+	if (show_snap) {
 		face_panel(&ts, src->ref_tex, 0, 0, gs_texture_get_width(src->ref_tex),
 			   gs_texture_get_height(src->ref_tex), tx + size + m, py, size,
-			   obs_module_text("Faces.Snapshot"), 0xFFFF59D9, tk);
+			   obs_module_text("Faces.Snapshot"), 0xFFFF59D9, tk, 0xFF000000);
+	} else if (show_ref) {
+		const float bx = tx + size + m;
+		// after a restart only the measurements are kept: the panel shows the skin color then
+		const uint8_t *c = src->base.skin_rgb;
+		const uint32_t skin = 0xFF000000 | (uint32_t)c[2] << 16 | (uint32_t)c[1] << 8 | c[0];
+		face_panel(&ts, src->base_tex, 0, 0, src->base_tex ? gs_texture_get_width(src->base_tex) : 0,
+			   src->base_tex ? gs_texture_get_height(src->base_tex) : 0, bx, py, size,
+			   obs_module_text("Faces.Base"), 0xFFFFC040, tk, src->base_tex ? 0xFF000000 : skin);
+	}
 
 	// right: the text
 	const float x = tx + tw + 2.0f * m;
@@ -645,9 +747,9 @@ static void faces_render(void *data, gs_effect_t *effect)
 		 "Scene luma: median %.1f%%, P10-P90 %.1f-%.1f, P99 %.0f; near black %.0f%%, near clipping %.0f%%.",
 		 st.median, st.p10, st.p90, st.p99, st.near_black, st.near_clip);
 	y = wrapped(&ts, buf, x, y, text_w, 12.0f * tk, 0xFFD8D8DC, y1);
-	assessment(&st, show_ref ? &src->ref : NULL, src->advice, buf, sizeof(buf));
+	assessment(&st, show_ref ? cmp : NULL, show_snap ? "Snapshot" : "Reference", src->advice, buf, sizeof(buf));
 	y = wrapped(&ts, buf, x, y + 4.0f * ts.uy, text_w, 12.0f * tk, 0xFFD8D8DC, y1);
-	if (!src->have_ref)
+	if (!src->have_ref && !src->have_base)
 		y = wrapped(&ts, obs_module_text("Faces.SnapshotHint"), x, y + 4.0f * ts.uy, text_w, 11.0f * tk,
 			    0xFF8D8D96, y1);
 	if (st.n_faces > 1)

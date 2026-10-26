@@ -188,6 +188,10 @@ With more than one face, click a face in the picture to measure that one (click 
 largest again), or click the close-up or turn the mouse wheel to step through them. `Text size` in the options makes
 the text larger.
 
+**Reference look:** press `Set reference` in the quick controls (or in the options) when a face looks the way you
+want. From then on every shot is compared with it, with the differences in luma, hue and saturation, until you press
+`Clear reference`. The reference is saved with the scene collection.
+
 `◉ Snapshot` also keeps the face. Switch to another camera or angle and, with `Compare` on, the kept face appears
 next to the live one with the differences (luma and about how many stops, hue, saturation) and whether it matches.
 
