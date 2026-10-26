@@ -13,7 +13,9 @@ Input the name and clock OK.
 ## Zooming the ROI view
 
 The ROI view is where you pick the region of interest (ROI): the part of the picture the scopes analyze.
-Scroll on it to zoom in, up to 8x, around the pointer. Drag with the middle mouse button, or with the left
+Scroll on it to zoom in, up to 8x. By default it zooms toward face height: the middle of the width, a little above
+the middle of the height, where faces sit in a close-up. `Zoom toward` in the ROI options can make it zoom around
+the pointer or the middle instead. Drag with the middle mouse button, or with the left
 button while no tool is on, to move around. Scroll back to 1x to see the whole picture again.
 Shapes and pins can be drawn while zoomed in; they land on the right spot in the picture.
 
@@ -67,7 +69,17 @@ double-click a tab to rename it. The ROI and its shapes are shared by all views.
 
 By default the scopes are arranged in a grid that is chosen automatically
 to give each scope as much room as possible for the current dock size.
-`Layout` in the right-click menu switches between `Grid (automatic)`, `Vertical` and `Horizontal`.
+`Layout` in the right-click menu switches between `Grid (automatic)`, `Vertical`, `Horizontal` and `Free`.
+
+**Free layout.** Turn on `⊞ Arrange` in the toolbar (this also switches to `Free`). Every scope gets a green
+outline: drag it to move it, drag its bottom right corner to resize it. Positions snap to 1 % of the dock, and
+scopes may overlap. Turn `⊞ Arrange` off to use the scopes again. The places are saved with the view.
+
+**Shape.** In a scope's options, `Shape` keeps what suits the scope (`Auto`), fills its tile (`Fill`), or holds
+16:9, 4:3 or 1:1. `Tile color` draws a colored frame, useful to group the scopes of one camera.
+
+**Quick controls.** Hover a scope for a bar at its bottom: intensity (drag), grid on/off, color, gain
+(1x, 2x, 5x), shape and full size.
 
 Double-click a scope to maximize it in the dock; double-click again to show all scopes.
 `Maximize` and `Show all scopes` are also in the right-click menu,
@@ -151,8 +163,18 @@ the Rec. 709 triangle; the diagram shows how much of that gamut the picture uses
 
 ## Lows / Mids / Highs
 
-A vectorscope's `Luma range` limits it to the dark, middle or bright third of the picture.
-`+ Scope` → `Lows / Mids / Highs vectorscopes` adds all three with a colored hue ring.
+A vectorscope's `Part of the picture` option limits it to the dark, middle or bright third of the picture.
+Add three vectorscopes and set them to lows, mids and highs to see them side by side.
+
+## Following faces
+
+`☺ Faces` in the toolbar makes the selection follow every face found in the picture: the faces are outlined in
+cyan and every scope measures only them. The drawn shapes come back when you turn it off.
+
+The `Faces` scope compares up to four cameras. Camera 1 follows the scope's source (the dock selection by default);
+choose cameras 2 to 4 in its options. Per camera it shows a thumbnail with the faces, the scene levels and,
+for the largest face, its luma, hue against the skin tone line and saturation, with written advice and the
+difference to camera 1. Detection runs on the CPU a few times per second on a picture 320 pixels wide.
 
 ## Hue and saturation histograms
 
