@@ -183,7 +183,11 @@ jobs:
             -D PKG_SUFFIX=$PKG_SUFFIX \
             -D OBS_BUNDLE_CODESIGN_IDENTITY='${{ secrets.MACOS_SIGNING_APPLICATION_IDENTITY }}' \
             ${{ steps.obsdeps.outputs.PLUGIN_CMAKE_OPTIONS }}
-          cmake --build build --config RelWithDebInfo
+          set -o pipefail
+          cmake --build build --config RelWithDebInfo 2>&1 | tee build.log || {
+            grep -E 'error' build.log | head -30 | sed 's/^/::error::/'
+            exit 1
+          }
 
       - name: Prepare package
         run: |
@@ -318,7 +322,11 @@ jobs:
             '-DCMAKE_SYSTEM_VERSION=10.0.18363.657'
           )
           cmake -S . -B build ${{ steps.obsdeps.outputs.PLUGIN_CMAKE_OPTIONS_PS }} @CmakeArgs
-          cmake --build build --config RelWithDebInfo -j 4
+          cmake --build build --config RelWithDebInfo -j 4 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) {
+            Select-String -Path build.log -Pattern ' error ' | Select-Object -First 30 | ForEach-Object { Write-Output "::error::$($_.Line)" }
+            exit 1
+          }
           cmake --install build --config RelWithDebInfo --prefix "$(Resolve-Path -Path .)/release"
       - name: Package plugin
         run: ci/windows/package-windows.cmd ${{ matrix.obs }}

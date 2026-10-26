@@ -1,3 +1,6 @@
+#ifdef _WIN32
+#define NOMINMAX // windows.h, pulled in by the OBS headers, defines min and max as macros otherwise
+#endif
 #include <obs-module.h>
 #include <util/platform.h>
 #include <util/threading.h>

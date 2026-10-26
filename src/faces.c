@@ -18,6 +18,10 @@
 #include "text-render.h"
 #include "face.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define FC_CAMS 4
 #define FC_W 960
 #define FC_ROW 150
