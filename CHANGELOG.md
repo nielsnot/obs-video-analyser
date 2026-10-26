@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.6
+
+- **QC: dead or stuck pixels.** Finds single pixels that stay black (or white) while their neighbors are clearly
+  brighter (or darker), for about two seconds of analyzed frames, and logs how many and where. Set the QC's Scale to
+  1 to find single camera pixels; at Scale 2 only larger defects show.
+
 ## 0.7.5
 
 - Larger text: the dock's Text size is 150 % by default (up to 250 %), and the QC overview uses a larger base size.

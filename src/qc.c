@@ -6,6 +6,7 @@
  * - share of clipped whites and crushed blacks
  * - for HLG: MaxCLL / MaxFALL in nits and the share of colors outside Rec. 709
  * - black borders (letterbox / pillarbox), black picture and frozen picture
+ * - dead or stuck pixels: single pixels that stay black (or white) while their neighbors do not
  * Checks that stay in violation for longer than a minimum time are written to a log,
  * shown in the tile and optionally appended to a CSV file.
  */
@@ -48,13 +49,21 @@ enum qc_check_e {
 	QC_BORDER,
 	QC_BLACK,
 	QC_FREEZE,
+	QC_DEADPIX,
 	QC_N_CHECKS,
 };
 
-static const char *check_keys[QC_N_CHECKS] = {"qc_check_clip",   "qc_check_crush", "qc_check_rgb",   "qc_check_gamut",
-					      "qc_check_border", "qc_check_black", "qc_check_freeze"};
-static const char *check_names[QC_N_CHECKS] = {"QC.Check.Clip",   "QC.Check.Crush", "QC.Check.RGB",   "QC.Check.Gamut",
-					       "QC.Check.Border", "QC.Check.Black", "QC.Check.Freeze"};
+static const char *check_keys[QC_N_CHECKS] = {"qc_check_clip",   "qc_check_crush",  "qc_check_rgb",
+					      "qc_check_gamut",  "qc_check_border", "qc_check_black",
+					      "qc_check_freeze", "qc_check_deadpix"};
+static const char *check_names[QC_N_CHECKS] = {"QC.Check.Clip",   "QC.Check.Crush",  "QC.Check.RGB",
+					       "QC.Check.Gamut",  "QC.Check.Border", "QC.Check.Black",
+					       "QC.Check.Freeze", "QC.Check.DeadPix"};
+
+/* Dead and stuck pixels: a pixel counts when it is near black (or near white) while the mean of its
+ * four neighbors is clearly brighter (or darker), for this many analyzed frames in a row. */
+#define DEADPIX_FRAMES 50
+#define DEADPIX_CONTRAST 48
 
 struct qc_frame
 {
@@ -94,6 +103,10 @@ struct qc_source
 	int log_slot[QC_N_CHECKS];
 	uint64_t last_hash;
 	uint64_t hash_since;
+
+	// dead / stuck pixels (pipeline thread): frames in a row each pixel looked dead or stuck
+	uint8_t *deadpix;
+	uint32_t deadpix_w, deadpix_h;
 
 	float lin_hlg[256]; // HLG code value to scene light
 	float nits_pq[256]; // PQ code value to nits
@@ -145,6 +158,7 @@ static void qc_destroy(void *data)
 	struct qc_source *src = data;
 	cm_destroy(&src->cm);
 	pthread_mutex_destroy(&src->mutex);
+	bfree(src->deadpix);
 	bfree(src->log_file);
 	bfree(src);
 }
@@ -189,6 +203,7 @@ static void qc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "qc_check_border", true);
 	obs_data_set_default_bool(settings, "qc_check_black", true);
 	obs_data_set_default_bool(settings, "qc_check_freeze", false);
+	obs_data_set_default_bool(settings, "qc_check_deadpix", true);
 	obs_data_set_default_double(settings, "qc_luma_hi", 99.5);
 	obs_data_set_default_double(settings, "qc_luma_lo", 0.5);
 	obs_data_set_default_double(settings, "qc_tolerance", 1.0);
@@ -480,11 +495,63 @@ static void update_check(struct qc_source *src, int check, bool violation, const
 	}
 }
 
+/* Counts the pixels that have looked dead (black) or stuck (white) against their neighbors for
+ * DEADPIX_FRAMES frames in a row; *fx, *fy get the first one. Pipeline thread. */
+static int find_dead_pixels(struct qc_source *src, const struct cm_surface_data *sd, int *fx, int *fy)
+{
+	const uint32_t w = sd->width, h = sd->height;
+	if (w < 3 || h < 3)
+		return 0;
+	if (!src->deadpix || src->deadpix_w != w || src->deadpix_h != h) {
+		bfree(src->deadpix);
+		src->deadpix = bzalloc((size_t)w * h);
+		src->deadpix_w = w;
+		src->deadpix_h = h;
+	}
+	const size_t ls = sd->linesize;
+	int n = 0;
+	*fx = *fy = -1;
+	for (uint32_t y = 1; y + 1 < h; y++) {
+		const uint8_t *row = sd->yuv_data + ls * y;
+		uint8_t *cnt = src->deadpix + (size_t)w * y;
+		for (uint32_t x = 1; x + 1 < w; x++) {
+			const uint8_t *p = row + x * 4;
+			if (!p[3]) {
+				cnt[x] = 0;
+				continue;
+			}
+			const int l = p[1];
+			const int m = (row[(x - 1) * 4 + 1] + row[(x + 1) * 4 + 1] + (row - ls)[x * 4 + 1] +
+				       (row + ls)[x * 4 + 1]) /
+				      4;
+			const bool dead = l < 24 && m - l > DEADPIX_CONTRAST;
+			const bool stuck = l > 232 && l - m > DEADPIX_CONTRAST;
+			if (dead || stuck) {
+				if (cnt[x] < 255)
+					cnt[x]++;
+			} else {
+				cnt[x] = 0;
+			}
+			if (cnt[x] >= DEADPIX_FRAMES) {
+				if (!n) {
+					*fx = (int)x;
+					*fy = (int)y;
+				}
+				n++;
+			}
+		}
+	}
+	return n;
+}
+
 static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 {
 	struct qc_source *src = data;
 	if (!sd->rgb_data || !sd->yuv_data || !sd->width || !sd->height)
 		return;
+
+	int dead_x = -1, dead_y = -1;
+	const int n_dead = src->enabled[QC_DEADPIX] ? find_dead_pixels(src, sd, &dead_x, &dead_y) : 0;
 
 	struct qc_frame f;
 	measure(src, sd, &f);
@@ -537,6 +604,12 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 	const double frozen = (now - src->hash_since) / 1e9;
 	snprintf(d, sizeof(d), "%.0f s unchanged", frozen);
 	update_check(src, QC_FREEZE, f.valid && frozen >= src->freeze_seconds, d, now);
+
+	if (n_dead > 0)
+		snprintf(d, sizeof(d), "%d px, first at %d,%d", n_dead, dead_x * scale, dead_y * scale);
+	else
+		snprintf(d, sizeof(d), "none");
+	update_check(src, QC_DEADPIX, f.valid && n_dead > 0, d, now);
 
 	// timeline: one bucket per window / QC_HIST
 	const uint64_t len = (uint64_t)(src->window / QC_HIST * 1e9);
