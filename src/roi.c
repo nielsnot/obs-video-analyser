@@ -384,6 +384,15 @@ static void update_mask_texture(struct roi_source *src)
 		src->n_faces = 0;
 		src->shapes_dirty = true;
 	}
+	if (src->face_follow) {
+		static uint64_t last_log;
+		const uint64_t now = os_gettime_ns();
+		if (now - last_log > 3000000000ULL) {
+			last_log = now;
+			blog(LOG_INFO, "[" PLUGIN_NAME "] following faces: %d found, detector %s, mask %ux%u", src->n_faces,
+			     src->fd ? "on" : "off", w, h);
+		}
+	}
 
 	if (!src->shapes_dirty && !resized)
 		return;

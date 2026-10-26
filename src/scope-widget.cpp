@@ -169,7 +169,8 @@ struct scope_entry
 
 	int aspect = ASPECT_AUTO;
 	free_rect_s free;
-	uint32_t border = 0; // tile border color (0xAARRGGBB), 0 for none; groups the scopes of one camera
+	uint32_t border = 0;      // tile border color (0xAARRGGBB), 0 for none; groups the scopes of one camera
+	bool marker_edit = false; // markers can be moved with the mouse (waveform, vectorscope)
 };
 
 /* Tiles are numbered 0 for the ROI and 1..n for the added scopes. */
@@ -713,6 +714,9 @@ enum qb_kind_e {
 	QB_GAIN,
 	QB_ASPECT,
 	QB_MAX,
+	QB_MARKERS,  // marker edit mode on or off
+	QB_MK_COLOR, // next color for the selected marker
+	QB_MK_DEL,   // delete the selected marker
 };
 
 struct qb_item
@@ -768,6 +772,12 @@ static std::string qb_label(const scope_widget_s *data, const scope_entry *e, in
 		return aspect_label(e->aspect);
 	case QB_MAX:
 		return data->solo >= 0 ? "Back" : "Full";
+	case QB_MARKERS:
+		return e->marker_edit ? "Done" : "Markers";
+	case QB_MK_COLOR:
+		return "Recolor";
+	case QB_MK_DEL:
+		return "Delete";
 	default:
 		return "Int";
 	}
@@ -812,6 +822,13 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 		add(QB_COLORS, 40);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
 		add(QB_GAIN, 56);
+	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM) {
+		add(QB_MARKERS, 40);
+		if (e->marker_edit) {
+			add(QB_MK_COLOR, 40);
+			add(QB_MK_DEL, 40);
+		}
+	}
 	add(QB_ASPECT, 40);
 	add(QB_MAX, 40);
 	return items;
@@ -878,6 +895,9 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 			break;
 		case QB_ASPECT:
 			on = e->aspect != ASPECT_AUTO;
+			break;
+		case QB_MARKERS:
+			on = e->marker_edit;
 			break;
 		}
 		label = qb_label(data, e, it.kind);
@@ -1140,11 +1160,40 @@ static QToolButton *make_tool_button(QWidget *parent, const char *text_key, cons
 	return b;
 }
 
+static const char *toolbar_style = R"(
+QWidget#VAToolbar { background: #18181b; border-bottom: 1px solid #2c2c31; }
+QWidget#VAToolbar QToolButton {
+	color: #d8d8dc; background: transparent; border: 1px solid transparent; border-radius: 5px;
+	padding: 3px 8px;
+}
+QWidget#VAToolbar QToolButton:hover { background: #2a2a2f; border-color: #3c3c43; }
+QWidget#VAToolbar QToolButton:checked { background: #3d5c45; border-color: #4f7a5a; color: #ffffff; }
+QWidget#VAToolbar QToolButton::menu-indicator { image: none; width: 0px; }
+QWidget#VAToolbar QTabBar::tab {
+	color: #9a9aa2; background: transparent; border: none; border-bottom: 2px solid transparent;
+	padding: 4px 10px; margin: 0px 1px;
+}
+QWidget#VAToolbar QTabBar::tab:hover { color: #e8e8ec; }
+QWidget#VAToolbar QTabBar::tab:selected { color: #ffffff; border-bottom-color: #6fcf86; }
+QWidget#VAToolbar QFrame#Sep { background: #34343a; min-width: 1px; max-width: 1px; border: none; margin: 4px 4px; }
+)";
+
+static QFrame *toolbar_separator(QWidget *parent)
+{
+	auto *f = new QFrame(parent);
+	f->setObjectName("Sep");
+	f->setFrameShape(QFrame::NoFrame);
+	return f;
+}
+
 QWidget *ScopeWidget::createToolbar(QWidget *parent)
 {
 	toolbar = new QWidget(parent);
+	toolbar->setObjectName("VAToolbar");
+	toolbar->setAttribute(Qt::WA_StyledBackground, true);
+	toolbar->setStyleSheet(toolbar_style);
 	auto *layout = new QHBoxLayout(toolbar);
-	layout->setContentsMargins(2, 1, 2, 1);
+	layout->setContentsMargins(4, 2, 4, 2);
 	layout->setSpacing(2);
 
 	auto *btnAdd = make_tool_button(toolbar, "dock.toolbar.add", "dock.toolbar.add.tip", false);
@@ -1183,19 +1232,19 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 
 	layout->addWidget(tabs);
 	layout->addWidget(btnView);
-	layout->addSpacing(8);
+	layout->addWidget(toolbar_separator(toolbar));
 	layout->addWidget(btnAdd);
-	layout->addSpacing(8);
+	layout->addWidget(toolbar_separator(toolbar));
 	layout->addWidget(btnRect);
 	layout->addWidget(btnEllipse);
 	layout->addWidget(btnPin);
 	layout->addWidget(btnUndo);
 	layout->addWidget(btnReset);
-	layout->addSpacing(8);
+	layout->addWidget(toolbar_separator(toolbar));
 	layout->addWidget(btnSnap);
 	layout->addWidget(btnCompare);
 	layout->addWidget(btnFaces);
-	layout->addSpacing(8);
+	layout->addWidget(toolbar_separator(toolbar));
 	layout->addWidget(btnArrange);
 	layout->addWidget(btnExport);
 	layout->addWidget(btnFull);
@@ -1445,6 +1494,22 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 	case QB_MAX:
 		toggleSolo(data->solo >= 0 ? -1 : tile);
 		return;
+	case QB_MARKERS:
+	case QB_MK_COLOR:
+	case QB_MK_DEL: {
+		const char *cmd = "color";
+		if (it.kind == QB_MARKERS) {
+			e->marker_edit = !e->marker_edit;
+			cmd = e->marker_edit ? "edit_on" : "edit_off";
+		} else if (it.kind == QB_MK_DEL) {
+			cmd = "delete";
+		}
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "cmd", cmd);
+		proc_handler_call(obs_source_get_proc_handler(src), "va_markers", &cd);
+		calldata_free(&cd);
+		return;
+	}
 	}
 	obs_source_update(src, d);
 }

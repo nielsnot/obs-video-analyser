@@ -87,6 +87,10 @@ struct vss_source
 	int gain; // zoom set from the options or quick controls
 
 	struct cm_markers markers;
+	int drag_marker;           // index of the marker being dragged with the mouse, or -1
+	float last_ux;             // source units per screen pixel at the last render, for hit testing
+	volatile bool marker_edit; // markers can be moved with the mouse (Markers in the quick controls)
+	volatile int marker_sel;   // the marker last clicked or added, for Color and Delete
 };
 
 static void vss_update(void *, obs_data_t *);
@@ -97,6 +101,8 @@ static const char *vss_get_name(void *unused)
 	UNUSED_PARAMETER(unused);
 	return obs_module_text("Vectorscope");
 }
+
+static void vss_markers_proc(void *data, calldata_t *cd);
 
 static void vss_snapshot_cb(void *data, calldata_t *cd)
 {
@@ -116,6 +122,9 @@ static void *vss_create(obs_data_t *settings, obs_source_t *source)
 
 	src->cm.flags = CM_FLAG_CONVERT_YUV;
 	src->zoom = 1.0f;
+	src->drag_marker = -1;
+	src->marker_sel = -1;
+	src->last_ux = 1.0f;
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, vss_surface_cb, src);
 
@@ -140,6 +149,7 @@ static void *vss_create(obs_data_t *settings, obs_source_t *source)
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	proc_handler_add(ph, "void va_snapshot()", vss_snapshot_cb, src);
 	proc_handler_add(ph, "void va_set_compare(in bool on)", vss_compare_cb, src);
+	proc_handler_add(ph, "void va_markers(in string cmd)", vss_markers_proc, src);
 
 	return src;
 }
@@ -573,10 +583,10 @@ static void vss_render_markers(struct vss_source *src)
 {
 	struct cm_marker items[CM_MARKERS_MAX];
 	const int n = cm_markers_copy(&src->markers, items);
+	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+	src->last_ux = ts.ux;
 	if (!n)
 		return;
-
-	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
 	const float c = 127.5f;
 	const float px = 10.0f;
 
@@ -610,6 +620,12 @@ static void vss_render_markers(struct vss_source *src)
 					   : sinf(a) < -0.3f ? TEXT_VALIGN_TOP
 							     : TEXT_VALIGN_MIDDLE;
 			text_draw(&ts, k->name, lx, ly, px, k->color | 0xFF000000, align, valign);
+		}
+		if (src->marker_edit) {
+			// a handle to grab: at the point, or at the end of a line
+			const bool sel = i == src->marker_sel;
+			cm_marker_draw_point(x, y, sel ? 0xFFFFFFFF : 0xC0FFFFFF, CM_MARKER_SHAPE_SQUARE,
+					     sel ? 14.0f : 10.0f, ts.ux, ts.uy);
 		}
 	}
 }
@@ -761,6 +777,111 @@ static void vss_render(void *data, gs_effect_t *effect)
 	PROFILE_END(prof_render_name);
 }
 
+/* ---------- moving markers with the mouse ---------- */
+
+static void pos_to_hue_sat(int x, int y, float *hue, float *sat)
+{
+	const float dx = (float)x - 127.5f, dy = 127.5f - (float)y;
+	float a = atan2f(dy, dx) * 180.0f / (float)M_PI;
+	if (a < 0.0f)
+		a += 360.0f;
+	*hue = a;
+	*sat = fminf(hypotf(dx, dy) / 127.0f, 1.2f);
+}
+
+/* The marker under (x, y) in source units, or -1. */
+static int marker_at(struct vss_source *src, int x, int y)
+{
+	struct cm_marker items[CM_MARKERS_MAX];
+	const int n = cm_markers_copy(&src->markers, items);
+	const float reach = 12.0f * src->last_ux; // 12 screen pixels
+	int best = -1;
+	float best_d = reach;
+	for (int i = 0; i < n; i++) {
+		const struct cm_marker *k = items + i;
+		const float a = k->hue * (float)M_PI / 180.0f;
+		float d;
+		if (k->kind == CM_MARKER_POINT) {
+			const float mx = 127.5f + k->sat * 127.0f * cosf(a), my = 127.5f - k->sat * 127.0f * sinf(a);
+			d = hypotf((float)x - mx, (float)y - my);
+		} else if (k->kind == CM_MARKER_LINE) {
+			// distance to the line from the center to the outer ring
+			const float ex = cosf(a), ey = -sinf(a);
+			const float px = (float)x - 127.5f, py = (float)y - 127.5f;
+			const float t = fmaxf(0.0f, fminf(px * ex + py * ey, 127.0f));
+			d = hypotf(px - t * ex, py - t * ey);
+		} else {
+			continue;
+		}
+		if (d < best_d) {
+			best_d = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
+/* In marker edit mode: drag a marker to move it, click empty space to add a point there. */
+static void vss_mouse_click(void *data, const struct obs_mouse_event *event, int32_t type, bool mouse_up,
+			    uint32_t click_count)
+{
+	struct vss_source *src = data;
+	if (!src->marker_edit || type != MOUSE_LEFT || click_count > 1)
+		return;
+	float hue, sat;
+	pos_to_hue_sat(event->x, event->y, &hue, &sat);
+	if (!mouse_up) {
+		src->drag_marker = marker_at(src, event->x, event->y);
+		if (src->drag_marker >= 0)
+			src->marker_sel = src->drag_marker;
+		else
+			src->marker_sel = cm_markers_store(src->cm.self, -1, CM_MARKER_POINT, hue, sat, true);
+		return;
+	}
+	if (src->drag_marker >= 0) {
+		cm_markers_store(src->cm.self, src->drag_marker, CM_MARKER_POINT, hue, sat, false);
+		src->drag_marker = -1;
+	}
+}
+
+/* Commands from the dock's quick controls: edit_on, edit_off, color, delete. */
+static void vss_markers_proc(void *data, calldata_t *cd)
+{
+	struct vss_source *src = data;
+	const char *cmd = calldata_string(cd, "cmd");
+	if (!cmd)
+		return;
+	if (!strcmp(cmd, "edit_on")) {
+		src->marker_edit = true;
+	} else if (!strcmp(cmd, "edit_off")) {
+		src->marker_edit = false;
+		src->drag_marker = -1;
+	} else if (!strcmp(cmd, "color")) {
+		cm_markers_cycle_color(src->cm.self, src->marker_sel >= 0 ? src->marker_sel : src->markers.n - 1);
+	} else if (!strcmp(cmd, "delete")) {
+		cm_markers_delete(src->cm.self, src->marker_sel >= 0 ? src->marker_sel : src->markers.n - 1);
+		src->marker_sel = -1;
+	}
+}
+
+static void vss_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
+{
+	struct vss_source *src = data;
+	const int i = src->drag_marker;
+	if (i < 0 || mouse_leave || !(event->modifiers & INTERACT_MOUSE_LEFT))
+		return;
+	// move the marker on screen right away; the settings follow when the button is released
+	float hue, sat;
+	pos_to_hue_sat(event->x, event->y, &hue, &sat);
+	pthread_mutex_lock(&src->markers.mutex);
+	if (i < src->markers.n) {
+		src->markers.items[i].hue = hue;
+		if (src->markers.items[i].kind == CM_MARKER_POINT)
+			src->markers.items[i].sat = sat;
+	}
+	pthread_mutex_unlock(&src->markers.mutex);
+}
+
 static void vss_mouse_wheel(void *data, const struct obs_mouse_event *event, int x_delta, int y_delta)
 {
 	UNUSED_PARAMETER(event);
@@ -788,6 +909,8 @@ const struct obs_source_info colormonitor_vectorscope_v1 = {
 	.video_render = vss_render,
 	.video_tick = cm_tick,
 	.mouse_wheel = vss_mouse_wheel,
+	.mouse_click = vss_mouse_click,
+	.mouse_move = vss_mouse_move,
 };
 
 const struct obs_source_info colormonitor_vectorscope = {
@@ -807,4 +930,6 @@ const struct obs_source_info colormonitor_vectorscope = {
 	.video_render = vss_render,
 	.video_tick = cm_tick,
 	.mouse_wheel = vss_mouse_wheel,
+	.mouse_click = vss_mouse_click,
+	.mouse_move = vss_mouse_move,
 };

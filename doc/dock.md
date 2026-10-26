@@ -132,6 +132,14 @@ the lower diamond R − G across and R + G downwards. Black sits where the diamo
 the tips. Anything drawn outside the dashed outlines is outside the legal RGB gamut.
 Options: intensity, trace color (green or white), graticule and labels.
 
+## Moving markers with the mouse
+
+Markers on the waveform and vectorscope stay where they are until you ask to move them. Hover the scope and press
+**Markers** in the quick controls at the bottom: every marker gets a small square handle. Drag a handle to move the
+marker (a level on the waveform, a hue and saturation on the vectorscope; a line marker turns with its hue), or click
+an empty spot to add a marker there. **Recolor** gives the marker last clicked the next color, **Delete** removes it.
+Press **Done** to lock them again. Names, styles and exact values are still in the scope's options.
+
 ## Vectorscope ring scale
 
 `Ring scale with degree ticks` adds rings at 25, 50, 75 and 100 % chroma with a tick every 2 degrees

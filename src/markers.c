@@ -204,3 +204,97 @@ void cm_marker_draw_point(float x, float y, uint32_t color, int shape, float siz
 		batch_end(&b);
 	}
 }
+
+/* ---------- editing from the scope (marker edit mode) ---------- */
+
+static void markers_apply(obs_source_t *src, obs_data_t *settings, obs_data_array_t *array)
+{
+	UNUSED_PARAMETER(settings);
+	obs_data_t *delta = obs_data_create();
+	obs_data_set_array(delta, "markers", array);
+	obs_source_update(src, delta);
+	obs_data_release(delta);
+}
+
+int cm_markers_store(obs_source_t *src, int index, int kind, float a, float b, bool add)
+{
+	obs_data_t *settings = obs_source_get_settings(src);
+	obs_data_array_t *array = obs_data_get_array(settings, "markers");
+	if (!array)
+		array = obs_data_array_create();
+	int ret = index;
+	const size_t count = obs_data_array_count(array);
+	if (add) {
+		ret = -1;
+		if (count < CM_MARKERS_MAX) {
+			obs_data_t *d = obs_data_create();
+			char name[32];
+			if (kind == CM_MARKER_LEVEL)
+				snprintf(name, sizeof(name), "%.0f%%", a * 100.0f);
+			else
+				snprintf(name, sizeof(name), "Marker %d", (int)count + 1);
+			obs_data_set_string(d, "name", name);
+			obs_data_set_int(d, "kind", kind);
+			if (kind == CM_MARKER_LEVEL) {
+				obs_data_set_double(d, "level", a * 100.0);
+			} else {
+				obs_data_set_double(d, "hue", a);
+				obs_data_set_double(d, "sat", b * 100.0);
+			}
+			obs_data_array_push_back(array, d);
+			obs_data_release(d);
+			ret = (int)count;
+			markers_apply(src, settings, array);
+		}
+	} else if (index >= 0 && (size_t)index < count) {
+		obs_data_t *d = obs_data_array_item(array, index);
+		if (obs_data_get_int(d, "kind") == CM_MARKER_LEVEL) {
+			obs_data_set_double(d, "level", a * 100.0);
+		} else {
+			obs_data_set_double(d, "hue", a);
+			if (obs_data_get_int(d, "kind") == CM_MARKER_POINT)
+				obs_data_set_double(d, "sat", b * 100.0);
+		}
+		obs_data_release(d);
+		markers_apply(src, settings, array);
+	}
+	obs_data_array_release(array);
+	obs_data_release(settings);
+	return ret;
+}
+
+void cm_markers_cycle_color(obs_source_t *src, int index)
+{
+	static const uint32_t palette[] = {0xFFFFD040, 0xFFFF4040, 0xFF40E060, 0xFF40C8FF,
+					   0xFFFF50E0, 0xFFFFFFFF, 0xFFFF9020};
+	const int n_pal = (int)(sizeof(palette) / sizeof(palette[0]));
+	obs_data_t *settings = obs_source_get_settings(src);
+	obs_data_array_t *array = obs_data_get_array(settings, "markers");
+	if (array && index >= 0 && (size_t)index < obs_data_array_count(array)) {
+		obs_data_t *d = obs_data_array_item(array, index);
+		const uint32_t cur = obs_data_has_user_value(d, "color") ? (uint32_t)obs_data_get_int(d, "color")
+									 : palette[0];
+		int next = 0;
+		for (int i = 0; i < n_pal; i++) {
+			if (palette[i] == cur)
+				next = (i + 1) % n_pal;
+		}
+		obs_data_set_int(d, "color", palette[next]);
+		obs_data_release(d);
+		markers_apply(src, settings, array);
+	}
+	obs_data_array_release(array);
+	obs_data_release(settings);
+}
+
+void cm_markers_delete(obs_source_t *src, int index)
+{
+	obs_data_t *settings = obs_source_get_settings(src);
+	obs_data_array_t *array = obs_data_get_array(settings, "markers");
+	if (array && index >= 0 && (size_t)index < obs_data_array_count(array)) {
+		obs_data_array_erase(array, index);
+		markers_apply(src, settings, array);
+	}
+	obs_data_array_release(array);
+	obs_data_release(settings);
+}

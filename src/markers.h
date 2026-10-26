@@ -65,6 +65,13 @@ void cm_marker_draw_line(float x0, float y0, float x1, float y1, uint32_t color,
 /* Draws a point marker centered at (x, y). */
 void cm_marker_draw_point(float x, float y, uint32_t color, int shape, float size_px, float ux, float uy);
 
+/* Editing in the scope (marker edit mode). They write the "markers" setting, which reloads the markers.
+ * Positions: for a level marker a is the level (0..1); for points and lines a is the hue in degrees and
+ * b the saturation (1 = the outer ring). Returns the index of the marker stored (a new one when add). */
+int cm_markers_store(obs_source_t *src, int index, int kind, float a, float b, bool add);
+void cm_markers_cycle_color(obs_source_t *src, int index);
+void cm_markers_delete(obs_source_t *src, int index);
+
 #ifdef __cplusplus
 }
 #endif

@@ -20,6 +20,10 @@
   the colored vectorscope; also with the Color quick control.
 - **☺ Faces follow:** the scopes now measure the faces also when shapes are drawn (the drawn shapes no longer
   crop the analysis while following faces). Faces and ☺ Faces are marked experimental.
+- **Markers with the mouse:** hover a waveform or vectorscope and press **Markers** in the quick controls. While it
+  is on, drag a marker to move it (a handle shows on each), click an empty spot to add one there, and use
+  **Recolor** or **Delete** for the marker last clicked. Press **Done** and the markers stay put again.
+- **Toolbar:** a calmer look with the buttons in groups, a green state for buttons that are on and underlined tabs.
 - **False color** shows its key below the picture by default.
 - Drop-down lists in the scope options open as wide as their longest item, so "Rec. 2100 HLG (HDR)" is no longer
   cut off.

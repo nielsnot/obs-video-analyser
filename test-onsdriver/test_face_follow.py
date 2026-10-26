@@ -58,10 +58,18 @@ class FaceFollowTest(obstest.OBSTest):
             'sceneName': 'Scene', 'inputName': 'Face', 'inputKind': 'image_source',
             'inputSettings': {'file': FACE_PNG},
         })
+        # the faces in the left half of the picture, a plain grey right half
+        grey = cl.send('CreateInput', {
+            'sceneName': 'Scene', 'inputName': 'Grey', 'inputKind': 'color_source_v3',
+            'inputSettings': {'color': 0xFF808080, 'width': video.base_width, 'height': video.base_height},
+        })
+        cl.send('SetSceneItemIndex', {'sceneName': 'Scene', 'sceneItemId': grey.scene_item_id,
+                                      'sceneItemIndex': 0})
         cl.send('SetSceneItemTransform', {
             'sceneName': 'Scene', 'sceneItemId': res.scene_item_id,
-            'sceneItemTransform': {'boundsType': 'OBS_BOUNDS_STRETCH', 'boundsWidth': video.base_width,
-                                   'boundsHeight': video.base_height, 'positionX': 0, 'positionY': 0},
+            'sceneItemTransform': {'boundsType': 'OBS_BOUNDS_STRETCH', 'boundsWidth': video.base_width // 2,
+                                   'boundsHeight': video.base_height // 2, 'positionX': 0,
+                                   'positionY': video.base_height // 4},
         })
         name = [i['inputName'] for i in cl.send('GetInputList').inputs
                 if i['inputKind'].startswith(PREFIX + 'waveform_source')][0]
@@ -78,16 +86,16 @@ class FaceFollowTest(obstest.OBSTest):
             lit = [any(sum(img.getpixel((x, y))) > 90 for y in range(0, img.height, 2))
                    for x in range(0, img.width, 4)]
             share = sum(lit) / len(lit)
-            # the faces cover about half the width; the whole picture or the drawn shape would not
-            if 0.15 < share < 0.75:
+            # the faces are in the left half; the whole picture would light every column
+            if 0.05 < share < 0.55:
                 break
             time.sleep(0.1)
         if img:
             os.makedirs('screenshots', exist_ok=True)
             img.save('screenshots/face-follow.png')
         notice(f'face follow: {share:.0%} of the waveform columns have a trace')
-        self.assertGreater(share, 0.15, 'the faces are not measured')
-        self.assertLess(share, 0.75, 'the scopes measure more than the faces')
+        self.assertGreater(share, 0.05, 'the faces are not measured')
+        self.assertLess(share, 0.55, 'the scopes measure more than the faces')
 
 
 if __name__ == '__main__':

@@ -75,7 +75,11 @@ struct wvs_source
 	float zoom, zoom_off;
 
 	struct cm_markers markers;
-	int gain; // zoom into the blacks, set from the options or quick controls
+	int drag_marker;           // index of the marker being dragged with the mouse, or -1
+	float last_uy;             // source units per screen pixel at the last render, for hit testing
+	volatile bool marker_edit; // markers can be moved with the mouse (Markers in the quick controls)
+	volatile int marker_sel;   // the marker last clicked or added, for Color and Delete
+	int gain;                  // zoom into the blacks, set from the options or quick controls
 
 	// extras: levels at the limits in orange, a histogram along the right edge, pixel positions
 	bool out_highlight;
@@ -104,6 +108,8 @@ static const char *wvs_get_name(void *unused)
 	return obs_module_text("Waveform");
 }
 
+static void wvs_markers_proc(void *data, calldata_t *cd);
+
 static void wvs_snapshot_cb(void *data, calldata_t *cd)
 {
 	UNUSED_PARAMETER(cd);
@@ -123,10 +129,14 @@ static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 	cm_request(&src->cm, wvs_surface_cb, src);
 	src->zoom = 1.0f;
 	cm_markers_init(&src->markers);
+	src->drag_marker = -1;
+	src->marker_sel = -1;
+	src->last_uy = 1.0f;
 
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	proc_handler_add(ph, "void va_snapshot()", wvs_snapshot_cb, src);
 	proc_handler_add(ph, "void va_set_compare(in bool on)", wvs_compare_cb, src);
+	proc_handler_add(ph, "void va_markers(in string cmd)", wvs_markers_proc, src);
 
 	obs_enter_graphics();
 	src->effect = create_effect_from_module_file("waveform.effect");
@@ -628,6 +638,7 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 		return;
 
 	const struct text_scale ts = text_scale_from_viewport(width, height);
+	src->last_uy = ts.uy;
 	const bool stack = src->display == DISP_STACK;
 	const int n_stack = stack ? (int)n_components(src) : 1;
 	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
@@ -903,6 +914,12 @@ static void wvs_render_markers(struct wvs_source *src, float width, float height
 			if (y < base || y > base + WV_SIZE)
 				continue;
 			cm_marker_draw_line(0.0f, y, width, y, k->color, k->style, k->width, ts.ux, ts.uy);
+			if (src->marker_edit) {
+				// a handle to grab at the left end
+				const bool sel = i == src->marker_sel;
+				cm_marker_draw_point(10.0f * ts.ux, y, sel ? 0xFFFFFFFF : 0xC0FFFFFF,
+						     CM_MARKER_SHAPE_SQUARE, sel ? 14.0f : 10.0f, ts.ux, ts.uy);
+			}
 			if (k->show_label && k->name[0]) {
 				const bool below = y - (px + 2.0f) * ts.uy < base;
 				draw_label(&ts, k->name, width - 6.0f * ts.ux,
@@ -972,6 +989,95 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	PROFILE_END(prof_render_name);
 }
 
+/* ---------- moving level markers with the mouse ---------- */
+
+/* The level (0..1) at y in source units, in whichever stacked trace y falls. */
+static float level_at(const struct wvs_source *src, int y)
+{
+	const bool zoomed = zoom_active(src);
+	const float zoom = zoomed ? src->zoom : 1.0f, off = zoomed ? src->zoom_off : 0.0f;
+	const float local = fmodf((float)y, (float)WV_SIZE);
+	const float level = 1.0f - (local / zoom + off) / (float)WV_SIZE;
+	return fmaxf(-0.1f, fminf(level, 1.1f));
+}
+
+static int level_marker_at(struct wvs_source *src, int y)
+{
+	struct cm_marker items[CM_MARKERS_MAX];
+	const int n = cm_markers_copy(&src->markers, items);
+	const bool zoomed = zoom_active(src);
+	const float zoom = zoomed ? src->zoom : 1.0f, off = zoomed ? src->zoom_off : 0.0f;
+	const float base = floorf((float)y / WV_SIZE) * WV_SIZE;
+	int best = -1;
+	float best_d = 8.0f * src->last_uy; // 8 screen pixels
+	for (int i = 0; i < n; i++) {
+		if (items[i].kind != CM_MARKER_LEVEL)
+			continue;
+		const float my = base + (WV_SIZE * (1.0f - items[i].level) - off) * zoom;
+		const float d = fabsf((float)y - my);
+		if (d < best_d) {
+			best_d = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
+/* In marker edit mode: drag a level marker up or down, click elsewhere to add one at that level. */
+static void wvs_mouse_click(void *data, const struct obs_mouse_event *event, int32_t type, bool mouse_up,
+			    uint32_t click_count)
+{
+	struct wvs_source *src = data;
+	if (!src->marker_edit || type != MOUSE_LEFT || click_count > 1)
+		return;
+	if (!mouse_up) {
+		src->drag_marker = level_marker_at(src, event->y);
+		if (src->drag_marker >= 0)
+			src->marker_sel = src->drag_marker;
+		else
+			src->marker_sel = cm_markers_store(src->cm.self, -1, CM_MARKER_LEVEL, level_at(src, event->y),
+							   0.0f, true);
+		return;
+	}
+	if (src->drag_marker >= 0) {
+		cm_markers_store(src->cm.self, src->drag_marker, CM_MARKER_LEVEL, level_at(src, event->y), 0.0f, false);
+		src->drag_marker = -1;
+	}
+}
+
+/* Commands from the dock's quick controls: edit_on, edit_off, color, delete. */
+static void wvs_markers_proc(void *data, calldata_t *cd)
+{
+	struct wvs_source *src = data;
+	const char *cmd = calldata_string(cd, "cmd");
+	if (!cmd)
+		return;
+	if (!strcmp(cmd, "edit_on")) {
+		src->marker_edit = true;
+	} else if (!strcmp(cmd, "edit_off")) {
+		src->marker_edit = false;
+		src->drag_marker = -1;
+	} else if (!strcmp(cmd, "color")) {
+		cm_markers_cycle_color(src->cm.self, src->marker_sel >= 0 ? src->marker_sel : src->markers.n - 1);
+	} else if (!strcmp(cmd, "delete")) {
+		cm_markers_delete(src->cm.self, src->marker_sel >= 0 ? src->marker_sel : src->markers.n - 1);
+		src->marker_sel = -1;
+	}
+}
+
+static void wvs_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
+{
+	struct wvs_source *src = data;
+	const int i = src->drag_marker;
+	if (i < 0 || mouse_leave || !(event->modifiers & INTERACT_MOUSE_LEFT))
+		return;
+	const float level = level_at(src, event->y);
+	pthread_mutex_lock(&src->markers.mutex);
+	if (i < src->markers.n)
+		src->markers.items[i].level = level;
+	pthread_mutex_unlock(&src->markers.mutex);
+}
+
 /* Wheel zooms the trace vertically around the pointer, e.g. into the blacks; zooming out to 1x resets. */
 static void wvs_mouse_wheel(void *data, const struct obs_mouse_event *event, int x_delta, int y_delta)
 {
@@ -1024,4 +1130,6 @@ const struct obs_source_info colormonitor_waveform = {
 	.video_render = wvs_render,
 	.video_tick = wvs_tick,
 	.mouse_wheel = wvs_mouse_wheel,
+	.mouse_click = wvs_mouse_click,
+	.mouse_move = wvs_mouse_move,
 };
