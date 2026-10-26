@@ -59,6 +59,7 @@ private:
 	void setArranging(bool on);
 	void exportScreenshot();
 	void setFullScreen(bool on);
+	void updateScreenScale();
 	class QDockWidget *findDock() const;
 	void quickControl(int tile, const struct qb_item &it, int x);
 	void addMarkerControls(class QWidget *panel, class QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,

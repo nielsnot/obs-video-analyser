@@ -2,13 +2,15 @@
 
 ## 0.7.6
 
+- **Text size Auto** (the new default): 200 % on a 1080 line screen and larger on taller screens such as 1440p or
+  4K at 100 % scaling; Text size in the right-click menu still picks a fixed size from 100 to 400 %.
 - **QC: dead or stuck pixels.** Finds single pixels that stay black (or white) while their neighbors are clearly
   brighter (or darker), for about two seconds of analyzed frames, and logs how many and where. Set the QC's Scale to
   1 to find single camera pixels; at Scale 2 only larger defects show.
 
 ## 0.7.5
 
-- Larger text: the dock's Text size is 150 % by default (up to 250 %), and the QC overview uses a larger base size.
+- Larger text: the QC overview uses a larger base size.
 - Info tiles have no name label by default (the timecode or date says enough), and while arranging a tile's name
   is shown once, in the middle.
 - **New view** starts empty instead of with the full ROI picture; it says how to add scopes. The ROI view is in the

@@ -205,7 +205,8 @@ struct scope_widget_s
 	volatile int hover_tile = -1;
 	int qb_drag_tile = -1; // dragging the intensity slider
 	float ui_scale = 1.0f; // device pixels per point, so the quick controls keep a readable size
-	int text_pct = 150;    // text size of the whole dock, in %
+	int text_pct = 0;      // text size of the whole dock, in %; 0 for automatic
+	float screen_k = 1.0f; // screen height over 1080 points, for the automatic text size
 
 	// Views: only the active one has live sources; the others are kept as saved settings.
 	struct view_s
@@ -216,6 +217,19 @@ struct scope_widget_s
 	std::vector<view_s> views;
 	int active_view = 0;
 };
+
+/* Text size in % of the base size: automatic is 200 % on a 1080 line screen and more on taller ones. */
+static inline float text_factor(const scope_widget_s *data)
+{
+	const float pct = data->text_pct > 0 ? (float)data->text_pct : 200.0f * std::max(1.0f, data->screen_k);
+	return pct / 100.0f;
+}
+
+/* Scale of the quick controls: with the display scaling and the text size, but not as large as the text. */
+static inline float qb_scale(const scope_widget_s *data)
+{
+	return std::max(1.0f, data->ui_scale) * std::clamp(text_factor(data), 1.0f, 1.5f);
+}
 
 static inline int n_tiles(const scope_widget_s *data)
 {
@@ -437,7 +451,7 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 	if (pthread_mutex_trylock(&data->mutex))
 		return;
 	// text in points, so it reads the same on Retina and HiDPI screens
-	text_set_ui_scale(data->ui_scale * data->text_pct / 100.0f);
+	text_set_ui_scale(data->ui_scale * text_factor(data));
 
 	const int total = n_tiles(data);
 	for (int t = 0; t < total; t++)
@@ -815,7 +829,7 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 		return items;
 	const scope_entry *e = data->entries[tile - 1];
 	const src_rect_s &r = e->rect;
-	const float k = std::max(1.0f, data->ui_scale) * data->text_pct / 100.0f;
+	const float k = qb_scale(data);
 	auto px = [k](int v) { return (int)std::lround(v * k); };
 	if (r.x1 - r.x0 < px(140) || r.y1 - r.y0 < px(70))
 		return items;
@@ -884,7 +898,7 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 		return;
 	const scope_entry *e = data->entries[tile - 1];
 	OBSDataAutoRelease s = obs_source_get_settings(e->src);
-	const float k = std::max(1.0f, data->ui_scale) * data->text_pct / 100.0f;
+	const float k = qb_scale(data);
 	const struct text_scale ts = {1.0f, 1.0f};
 	const float px = QB_TEXT_PX * k;
 	qb_fill((float)items.front().x0 - 4.0f * k, (float)y0, (float)items.back().x1 + 4.0f * k, (float)y1,
@@ -957,6 +971,7 @@ ScopeWidget::ScopeWidget(QWidget *parent) : NorisQTDisplay(parent)
 
 	data = new scope_widget_s;
 	data->ui_scale = (float)devicePixelRatioF();
+	updateScreenScale();
 	pthread_mutex_init(&data->mutex, NULL);
 
 	connect(this, &NorisQTDisplay::DisplayCreated, this, &ScopeWidget::RegisterCallbackToDisplay);
@@ -1320,6 +1335,18 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	return toolbar;
 }
 
+/* The automatic text size follows the screen the dock is on: its height in points over 1080. */
+void ScopeWidget::updateScreenScale()
+{
+	if (!data)
+		return;
+	QScreen *sc = screen();
+	if (!sc)
+		sc = QGuiApplication::primaryScreen();
+	if (sc)
+		data->screen_k = std::max(1.0f, (float)sc->geometry().height() / 1080.0f);
+}
+
 QDockWidget *ScopeWidget::findDock() const
 {
 	for (QWidget *p = parentWidget(); p; p = p->parentWidget()) {
@@ -1505,7 +1532,7 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 	switch (it.kind) {
 	case QB_INTENSITY:
 		data->qb_drag_tile = tile;
-		qb_set_intensity(src, x, it, std::max(1.0f, data->ui_scale) * data->text_pct / 100.0f);
+		qb_set_intensity(src, x, it, qb_scale(data));
 		return;
 	case QB_GRID:
 		set_grid_visible(src, grid_keys_for(e->type), !grid_visible(src, grid_keys_for(e->type)));
@@ -1719,6 +1746,7 @@ static Qt::CursorShape edge_cursor(int e)
 bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 {
 	data->ui_scale = (float)devicePixelRatioF();
+	updateScreenScale();
 	bool mouseUp = event->type() == QEvent::MouseButtonRelease;
 	int clickCount = 1;
 	if (event->type() == QEvent::MouseButtonDblClick)
@@ -1834,6 +1862,7 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 {
 	data->ui_scale = (float)devicePixelRatioF();
+	updateScreenScale();
 	struct obs_mouse_event mouseEvent = {};
 
 	bool mouseLeave = event->type() == QEvent::Leave;
@@ -1901,8 +1930,7 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 			pthread_mutex_unlock(&data->mutex);
 			for (const qb_item &it : items)
 				if (it.kind == QB_INTENSITY && src)
-					qb_set_intensity(src, x, it,
-							 std::max(1.0f, data->ui_scale) * data->text_pct / 100.0f);
+					qb_set_intensity(src, x, it, qb_scale(data));
 			return true;
 		}
 		if (prev != data->hover_tile)
@@ -2188,8 +2216,9 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 	}
 
 	QMenu *textMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.textsize")));
-	for (int pct : {100, 125, 150, 175, 200, 250}) {
-		act = textMenu->addAction(QString("%1 %").arg(pct));
+	for (int pct : {0, 100, 150, 200, 250, 300, 400}) {
+		act = textMenu->addAction(pct ? QString("%1 %").arg(pct)
+					      : QString::fromUtf8(obs_module_text("dock.menu.textsize.auto")));
 		act->setCheckable(true);
 		act->setChecked(data->text_pct == pct);
 		connect(act, &QAction::triggered, this, [this, pct]() { data->text_pct = pct; });
@@ -3492,7 +3521,7 @@ void ScopeWidget::openTabMenu(const QPoint &pos)
 void ScopeWidget::default_properties(obs_data_t *props)
 {
 	obs_data_set_default_bool(props, "toolbar", true);
-	obs_data_set_default_int(props, "text_pct", 150);
+	obs_data_set_default_int(props, "text_size_pct", 0);
 }
 
 void ScopeWidget::save_properties(obs_data_t *props)
@@ -3500,7 +3529,7 @@ void ScopeWidget::save_properties(obs_data_t *props)
 	storeActive();
 
 	obs_data_set_bool(props, "toolbar", toolbarVisible);
-	obs_data_set_int(props, "text_pct", data->text_pct);
+	obs_data_set_int(props, "text_size_pct", data->text_pct);
 	obs_data_set_int(props, "active_view", data->active_view);
 
 	if (data->roi) {
@@ -3523,8 +3552,8 @@ void ScopeWidget::load_properties(obs_data_t *props)
 	const std::string roi_name = roi_name_of(this);
 
 	setToolbarVisible(obs_data_get_bool(props, "toolbar"));
-	const int text_pct = (int)obs_data_get_int(props, "text_pct");
-	data->text_pct = text_pct >= 50 && text_pct <= 300 ? text_pct : 150;
+	const int text_pct = (int)obs_data_get_int(props, "text_size_pct");
+	data->text_pct = text_pct >= 50 && text_pct <= 400 ? text_pct : 0;
 
 	if (!data->roi) {
 		OBSDataAutoRelease prop = obs_data_get_obj(props, ROI_KEY "-prop");
