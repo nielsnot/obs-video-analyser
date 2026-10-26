@@ -72,7 +72,7 @@ to give each scope as much room as possible for the current dock size.
 `Layout` in the right-click menu switches between `Grid (automatic)`, `Vertical`, `Horizontal` and `Free`.
 
 **Free layout.** Turn on `⊞ Arrange` in the toolbar (this also switches to `Free`). Every scope gets a green
-outline: drag it to move it, drag its bottom right corner to resize it. Positions snap to 1 % of the dock, and
+outline: drag it to move it, drag any edge or corner to resize it. Positions snap to 1 % of the dock, and
 scopes may overlap. Turn `⊞ Arrange` off to use the scopes again. The places are saved with the view.
 
 **Shape.** In a scope's options, `Shape` keeps what suits the scope (`Auto`), fills its tile (`Fill`), or holds

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.5
+
+- **⊞ Arrange:** resize a scope from any edge or corner (handles at all four corners), not only the bottom right.
+
 ## 0.7.4
 
 - **+ Scope:** hover a scope in the menu for a short explanation of what it shows.

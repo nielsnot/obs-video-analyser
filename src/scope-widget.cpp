@@ -144,6 +144,8 @@ struct free_rect_s
 	float x = 0.0f, y = 0.0f, w = -1.0f, h = -1.0f;
 };
 
+enum { EDGE_L = 1, EDGE_R = 2, EDGE_T = 4, EDGE_B = 8 };
+
 enum aspect_e {
 	ASPECT_AUTO = 0, // what suits the scope type
 	ASPECT_FILL = 1,
@@ -194,7 +196,7 @@ struct scope_widget_s
 	free_rect_s roi_free;
 	volatile bool arranging = false; // tiles are moved and resized with the mouse
 	int drag_tile = -1;
-	bool drag_resize = false;
+	int drag_resize = 0; // edges being dragged: EDGE_* bits, 0 to move the tile
 	int drag_x = 0, drag_y = 0;
 	free_rect_s drag_start;
 	int last_cx = 0, last_cy = 0;
@@ -606,12 +608,18 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 				gs_vertex2f(x0, y1);
 				gs_vertex2f(x0, y0);
 				gs_render_stop(GS_LINES);
-				gs_render_start(false);
-				gs_vertex2f(x1 - 12.0f, y1 - 12.0f);
-				gs_vertex2f(x1, y1 - 12.0f);
-				gs_vertex2f(x1 - 12.0f, y1);
-				gs_vertex2f(x1, y1);
-				gs_render_stop(GS_TRISTRIP);
+				// a handle at every corner; the edges between them resize too
+				const float hs = 10.0f * std::max(1.0f, data->ui_scale);
+				const float corners[4][2] = {
+					{x0, y0}, {x1 - hs, y0}, {x0, y1 - hs}, {x1 - hs, y1 - hs}};
+				for (const auto &c : corners) {
+					gs_render_start(false);
+					gs_vertex2f(c[0], c[1]);
+					gs_vertex2f(c[0] + hs, c[1]);
+					gs_vertex2f(c[0], c[1] + hs);
+					gs_vertex2f(c[0] + hs, c[1] + hs);
+					gs_render_stop(GS_TRISTRIP);
+				}
 			}
 			const int t = tiles[k];
 			const char *name = t == 0 ? obs_module_text("ROI") : data->entries[t - 1]->label.c_str();
@@ -1662,6 +1670,35 @@ static inline QPointF event_pos(QWidget *w, QMouseEvent *event)
 #endif
 }
 
+/* Arranging: which edges of the tile's cell are under (x, y); corners give two. */
+static int edges_at(const src_rect_s *r, int x, int y, float ui_scale)
+{
+	const int m = (int)std::lround(10.0f * std::max(1.0f, ui_scale));
+	int e = 0;
+	if (x < r->cx0 + m)
+		e |= EDGE_L;
+	else if (x >= r->cx1 - m)
+		e |= EDGE_R;
+	if (y < r->cy0 + m)
+		e |= EDGE_T;
+	else if (y >= r->cy1 - m)
+		e |= EDGE_B;
+	return e;
+}
+
+static Qt::CursorShape edge_cursor(int e)
+{
+	if (e == (EDGE_L | EDGE_T) || e == (EDGE_R | EDGE_B))
+		return Qt::SizeFDiagCursor;
+	if (e == (EDGE_R | EDGE_T) || e == (EDGE_L | EDGE_B))
+		return Qt::SizeBDiagCursor;
+	if (e & (EDGE_L | EDGE_R))
+		return Qt::SizeHorCursor;
+	if (e & (EDGE_T | EDGE_B))
+		return Qt::SizeVerCursor;
+	return Qt::SizeAllCursor;
+}
+
 bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 {
 	data->ui_scale = (float)devicePixelRatioF();
@@ -1704,7 +1741,7 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 				if (!r->cell_inside(x, y))
 					continue;
 				data->drag_tile = t;
-				data->drag_resize = x >= r->cx1 - 16 && y >= r->cy1 - 16;
+				data->drag_resize = edges_at(r, x, y, data->ui_scale);
 				data->drag_x = x;
 				data->drag_y = y;
 				data->drag_start = *tile_free(data, t);
@@ -1801,8 +1838,17 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 			const float dy = (float)(y - data->drag_y) / data->last_cy;
 			const free_rect_s &s0 = data->drag_start;
 			if (data->drag_resize) {
-				f->w = std::clamp(snap(s0.w + dx), 0.05f, 1.0f - s0.x);
-				f->h = std::clamp(snap(s0.h + dy), 0.05f, 1.0f - s0.y);
+				const int e = data->drag_resize;
+				float x0 = s0.x, y0 = s0.y, x1 = s0.x + s0.w, y1 = s0.y + s0.h;
+				if (e & EDGE_L)
+					x0 = std::clamp(snap(s0.x + dx), 0.0f, x1 - 0.05f);
+				if (e & EDGE_R)
+					x1 = std::clamp(snap(x1 + dx), x0 + 0.05f, 1.0f);
+				if (e & EDGE_T)
+					y0 = std::clamp(snap(s0.y + dy), 0.0f, y1 - 0.05f);
+				if (e & EDGE_B)
+					y1 = std::clamp(snap(y1 + dy), y0 + 0.05f, 1.0f);
+				f->x = x0, f->y = y0, f->w = x1 - x0, f->h = y1 - y0;
 			} else {
 				f->x = std::clamp(snap(s0.x + dx), 0.0f, 1.0f - s0.w);
 				f->y = std::clamp(snap(s0.y + dy), 0.0f, 1.0f - s0.h);
@@ -1811,13 +1857,12 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 		// cursor: resize over a handle, move over a tile
 		Qt::CursorShape shape = Qt::ArrowCursor;
 		if (t >= 0) {
-			shape = data->drag_resize ? Qt::SizeFDiagCursor : Qt::SizeAllCursor;
+			shape = edge_cursor(data->drag_resize);
 		} else {
 			for (int k = n_tiles(data) - 1; k >= 0; k--) {
 				const src_rect_s *r = tile_rect(data, k);
 				if (r->cell_inside(x, y)) {
-					shape = x >= r->cx1 - 16 && y >= r->cy1 - 16 ? Qt::SizeFDiagCursor
-										     : Qt::SizeAllCursor;
+					shape = edge_cursor(edges_at(r, x, y, data->ui_scale));
 					break;
 				}
 			}
