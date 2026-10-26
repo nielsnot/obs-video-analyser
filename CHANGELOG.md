@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0
+
+- **Faces:** a new scope that finds and follows faces in up to four cameras (the first is the reference). Per camera:
+  a thumbnail with the faces marked, scene luma (median, P10-P90, P99, near black, near clipping), and for the
+  largest face its luma, hue against the skin tone line and saturation, with written advice and the difference to
+  camera 1. Face detection by libfacedetection (BSD), on the CPU, no extra installs.
+- **☺ Faces** in the toolbar: the dock selection follows every face found, so all scopes measure the faces.
+
 ## 0.6.0
 
 - **Free layout:** `⊞ Arrange` lets you drag scopes anywhere in the dock and resize them at their bottom right

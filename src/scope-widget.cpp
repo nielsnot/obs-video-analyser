@@ -78,6 +78,7 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "info_source", "info", "Info", FIT_ASPECT},
 	{ID_PREFIX "audio_source", "audio", "Audio", FIT_ASPECT},
 	{ID_PREFIX "cube_source", "cube", "Cube", FIT_SQUARE},
+	{ID_PREFIX "faces_source", "faces", "Faces", FIT_ASPECT},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -818,6 +819,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	auto *btnSnap = make_tool_button(toolbar, "dock.toolbar.snapshot", "dock.toolbar.snapshot.tip", false);
 	btnCompare = make_tool_button(toolbar, "dock.toolbar.compare", "dock.toolbar.compare.tip", true);
 	btnArrange = make_tool_button(toolbar, "dock.toolbar.arrange", "dock.toolbar.arrange.tip", true);
+	btnFaces = make_tool_button(toolbar, "dock.toolbar.faces", "dock.toolbar.faces.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
 
@@ -850,6 +852,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addSpacing(8);
 	layout->addWidget(btnSnap);
 	layout->addWidget(btnCompare);
+	layout->addWidget(btnFaces);
 	layout->addSpacing(8);
 	layout->addWidget(btnArrange);
 	layout->addStretch(1);
@@ -864,6 +867,13 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnSnap, &QToolButton::clicked, this, &ScopeWidget::takeSnapshot);
 	connect(btnCompare, &QToolButton::toggled, this, &ScopeWidget::setCompare);
 	connect(btnArrange, &QToolButton::toggled, this, &ScopeWidget::setArranging);
+	connect(btnFaces, &QToolButton::toggled, this, [this](bool on) {
+		if (!data->roi)
+			return;
+		OBSDataAutoRelease d = obs_data_create();
+		obs_data_set_bool(d, "face_follow", on);
+		obs_source_update(data->roi, d);
+	});
 	connect(btnUndo, &QToolButton::clicked, this, &ScopeWidget::undoShape);
 	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
 

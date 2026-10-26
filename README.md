@@ -50,6 +50,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **Line plot** | One picture line | R, G, B and luma of the line you choose |
 | **3D color cube** | Every pixel in the RGB cube | Turns by itself; drag to turn, wheel to zoom |
 | **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term, integrated) against a target, phase correlation and goniometer |
+| **Faces** | Faces in up to four cameras | Finds and follows faces; scene and skin levels, hue against the skin tone line, advice and the difference to camera 1. `☺ Faces` makes the dock selection follow the faces |
 | **Info and timecode** | Time and format | Time-of-day timecode, clock, date, video format and your own text |
 
 ## Tools
@@ -106,3 +107,5 @@ OBS Studio and Qt 6.
 ## License
 
 GPL-2.0-or-later, see [LICENSE](LICENSE). Based on Color Monitor by Norihiro Kamae.
+Face detection uses [libfacedetection](https://github.com/ShiqiYu/libfacedetection) by Shiqi Yu
+(BSD 3-clause, see [deps/libfacedetection/LICENSE](deps/libfacedetection/LICENSE)).

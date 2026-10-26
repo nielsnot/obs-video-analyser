@@ -2,6 +2,7 @@
 
 #include <util/darray.h>
 #include "common.h"
+#include "face.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,6 +73,12 @@ struct roi_source
 	// view zoom: the picture is shown zoomed by `zoom` with view_x/view_y (picture pixels) at the top left
 	float zoom, view_x, view_y;
 	int zoom_anchor; // roi_zoom_anchor_e
+
+	// follow faces: the selection is the faces found, instead of the drawn shapes
+	volatile bool face_follow;
+	struct face_detector *fd;
+	struct face_box faces[FACE_MAX];
+	int n_faces;
 	volatile bool panning;
 	int pan_mouse_x, pan_mouse_y; // view coordinates where the pan started
 	float pan_view_x, pan_view_y;

@@ -27,6 +27,7 @@ static const char *prof_render_name = "roi_render";
 #define MIN_SHAPE_PIXELS 2
 
 #define COLOR_SHAPE 0xFF00FF00   // green
+#define COLOR_FACE 0xFF40E0F0    // faces being followed
 #define COLOR_DRAWING 0xFFFFFFFF // white
 
 static void roi_update(void *, obs_data_t *);
@@ -110,6 +111,7 @@ static void roi_destroy(void *data)
 	struct roi_source *src = data;
 
 	cm_destroy(&src->cm);
+	face_detector_destroy(src->fd);
 
 	obs_enter_graphics();
 	gs_texture_destroy(src->mask_tex);
@@ -216,6 +218,12 @@ static void roi_update(void *data, obs_data_t *settings)
 
 	src->n_interleave = (int)obs_data_get_int(settings, "interleave");
 	src->zoom_anchor = (int)obs_data_get_int(settings, "zoom_anchor");
+	const bool follow = obs_data_get_bool(settings, "face_follow");
+	if (follow && !src->fd)
+		src->fd = face_detector_create();
+	if (follow != src->face_follow)
+		src->shapes_dirty = true;
+	src->face_follow = follow;
 
 	shapes_load(src, settings);
 
@@ -257,6 +265,7 @@ static obs_properties_t *roi_get_properties(void *data)
 	cm_get_properties(&src->cm, props);
 
 	obs_properties_add_int(props, "interleave", obs_module_text("Interleave"), 0, 1, 1);
+	obs_properties_add_bool(props, "face_follow", obs_module_text("ROI.FaceFollow"));
 	obs_property_t *za = obs_properties_add_list(props, "zoom_anchor", obs_module_text("ROI.ZoomAnchor"),
 						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Face"), ROI_ZOOM_FACE);
@@ -349,12 +358,40 @@ static void update_mask_texture(struct roi_source *src)
 		return;
 
 	const bool resized = w != src->mask_w || h != src->mask_h;
+
+	// following faces: the faces found replace the drawn shapes
+	struct roi_shape face_shapes[FACE_MAX];
+	int n_face_shapes = 0;
+	if (src->face_follow && src->fd) {
+		struct face_box faces[FACE_MAX];
+		const int n_faces = face_detector_get(src->fd, faces, FACE_MAX);
+		if (n_faces != src->n_faces || memcmp(faces, src->faces, sizeof(faces[0]) * n_faces) != 0) {
+			memcpy(src->faces, faces, sizeof(faces[0]) * n_faces);
+			src->n_faces = n_faces;
+			src->shapes_dirty = true;
+		}
+		for (int i = 0; i < src->n_faces; i++) {
+			// an ellipse a little larger than the box, over forehead to chin
+			const struct face_box *f = src->faces + i;
+			struct roi_shape *sh = face_shapes + n_face_shapes++;
+			sh->type = ROI_SHAPE_ELLIPSE;
+			sh->x0 = f->x - f->w * 0.05f;
+			sh->x1 = f->x + f->w * 1.05f;
+			sh->y0 = f->y - f->h * 0.05f;
+			sh->y1 = f->y + f->h * 1.05f;
+		}
+	} else if (src->n_faces) {
+		src->n_faces = 0;
+		src->shapes_dirty = true;
+	}
+
 	if (!src->shapes_dirty && !resized)
 		return;
 
 	pthread_mutex_lock(&src->shapes_mutex);
 	src->shapes_dirty = false;
-	const size_t n = src->shapes.num;
+	const bool follow = src->face_follow && src->fd;
+	const size_t n = follow ? (size_t)n_face_shapes : src->shapes.num;
 	if (n) {
 		if (resized || !src->mask_buf) {
 			bfree(src->mask_buf);
@@ -362,7 +399,7 @@ static void update_mask_texture(struct roi_source *src)
 		}
 		memset(src->mask_buf, 0, (size_t)w * h);
 		for (size_t i = 0; i < n; i++)
-			rasterize_shape(src->mask_buf, w, h, src->shapes.array + i);
+			rasterize_shape(src->mask_buf, w, h, follow ? face_shapes + i : src->shapes.array + i);
 	}
 	pthread_mutex_unlock(&src->shapes_mutex);
 
@@ -681,9 +718,18 @@ static void roi_render(void *data, gs_effect_t *effect)
 	pthread_mutex_lock(&src->shapes_mutex);
 	for (size_t i = 0; i < src->shapes.num; i++) {
 		const struct roi_shape *s = src->shapes.array + i;
+		if (src->face_follow)
+			break; // the faces are the selection now
 		draw_shape_outline(s->type, s->x0 * w, s->y0 * h, s->x1 * w, s->y1 * h, COLOR_SHAPE);
 	}
 	pthread_mutex_unlock(&src->shapes_mutex);
+
+	// faces being followed
+	for (int i = 0; src->face_follow && i < src->n_faces; i++) {
+		const struct face_box *f = src->faces + i;
+		draw_shape_outline(ROI_SHAPE_ELLIPSE, (f->x - f->w * 0.05f) * w, (f->y - f->h * 0.05f) * h,
+				   (f->x + f->w * 1.05f) * w, (f->y + f->h * 1.05f) * h, COLOR_FACE);
+	}
 
 	if (src->dragging) {
 		int x0, y0, x1, y1;
@@ -777,6 +823,9 @@ static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 
 	if (src->pins.num)
 		read_pins(src, surface_data);
+	if (src->face_follow && src->fd && surface_data->rgb_data)
+		face_detector_submit(src->fd, surface_data->rgb_data, surface_data->width, surface_data->height,
+				     surface_data->linesize);
 
 	pthread_mutex_lock(&src->sources_mutex);
 	for (size_t i = 0; i < src->sources.num; i++) {

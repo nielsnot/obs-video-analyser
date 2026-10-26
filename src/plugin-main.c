@@ -47,6 +47,8 @@ extern const struct obs_source_info colormonitor_lineplot;
 extern const struct obs_source_info colormonitor_info;
 extern const struct obs_source_info colormonitor_audio;
 extern const struct obs_source_info colormonitor_cube;
+extern const struct obs_source_info colormonitor_face_probe;
+extern const struct obs_source_info colormonitor_faces;
 void scope_docks_init();
 void text_render_init(void);
 void text_render_free(void);
@@ -123,6 +125,10 @@ bool obs_module_load(void)
 	if (!register_source_with_flags(&colormonitor_audio, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_cube, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_face_probe, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_faces, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_roi, src_flags))
 		return false;

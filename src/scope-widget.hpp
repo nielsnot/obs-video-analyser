@@ -21,6 +21,7 @@ class ScopeWidget : public NorisQTDisplay {
 	class QToolButton *btnPin = nullptr;
 	class QToolButton *btnCompare = nullptr;
 	class QToolButton *btnArrange = nullptr;
+	class QToolButton *btnFaces = nullptr;
 	bool comparing = false;
 	bool toolbarVisible = true;
 	int drawMode = 0;

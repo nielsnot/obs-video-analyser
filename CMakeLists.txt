@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-project(obs-video-analyser VERSION 0.6.0)
+project(obs-video-analyser VERSION 0.7.0)
 
 set(PLUGIN_AUTHOR "Niels Notenboom, based on Color Monitor by Norihiro Kamae")
 
@@ -57,6 +57,8 @@ set(PLUGIN_SOURCES
 	src/lut.c
 	src/audio.c
 	src/cube.c
+	src/face.cpp
+	src/faces.c
 	src/vectorscope.c
 	src/waveform.c
 	src/histogram.c
@@ -83,6 +85,22 @@ set(PLUGIN_SOURCES
 )
 
 add_library(${PROJECT_NAME} MODULE ${PLUGIN_SOURCES})
+
+# libfacedetection (BSD 3-clause): a small face detection CNN with its weights, no other libraries.
+# Built without SIMD so it runs on every CPU; it works on a picture scaled to 320 pixels wide.
+add_library(facedetection STATIC
+	deps/libfacedetection/facedetectcnn.cpp
+	deps/libfacedetection/facedetectcnn-model.cpp
+	deps/libfacedetection/facedetectcnn-data.cpp
+)
+set_target_properties(facedetection PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(facedetection PUBLIC deps/libfacedetection)
+if(MSVC)
+	target_compile_options(facedetection PRIVATE /O2 /wd4068 /wd4244 /wd4267)
+else()
+	target_compile_options(facedetection PRIVATE -O2 -w)
+endif()
+target_link_libraries(${PROJECT_NAME} facedetection)
 
 target_link_libraries(${PROJECT_NAME}
 	OBS::libobs
