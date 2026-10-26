@@ -806,7 +806,17 @@ static void qc_render(void *data, gs_effect_t *effect)
 	const int display = src->display;
 	const float W = (float)QC_W;
 	const float H_total = (float)qc_get_height(src);
-	const struct text_scale ts = text_scale_from_viewport(W, H_total);
+	struct text_scale ts = text_scale_from_viewport(W, H_total);
+	// never taller than the tile: with a large text size the text shrinks until the overview
+	// (about 16 lines: header, channels, values, checks and a few log lines) fits
+	{
+		const float need = 16.5f * (14.0f + 5.0f) * ts.uy;
+		if (need > (float)QC_H) {
+			const float k = (float)QC_H / need;
+			ts.ux *= k;
+			ts.uy *= k;
+		}
+	}
 	fill_rect(0.0f, 0.0f, W, H_total, 0xFF101013);
 	if (display == QC_DISPLAY_TIMELINE) {
 		render_timeline(src, &ts, hist, head, window, f.colorspace, 0.0f, (float)QC_TL_H);

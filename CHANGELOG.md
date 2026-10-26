@@ -2,6 +2,8 @@
 
 ## 0.7.6
 
+- The scope options panel scrolls when it is taller than the screen, so every option stays reachable.
+- **QC** never runs out of its tile: with a large text size the text shrinks just enough for every line to fit.
 - **Text size Auto** (the new default): 200 % on a 1080 line screen and larger on taller screens such as 1440p or
   4K at 100 % scaling; Text size in the right-click menu still picks a fixed size from 100 to 400 %.
 - **QC: dead or stuck pixels.** Finds single pixels that stay black (or white) while their neighbors are clearly

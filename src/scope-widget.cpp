@@ -41,6 +41,8 @@
 #include <QStandardPaths>
 #include <QWidgetAction>
 #include <QDockWidget>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QColor>
 #include <memory>
@@ -2272,6 +2274,11 @@ void ScopeWidget::openProperties(int tile)
 /* ---------- options panel ---------- */
 
 static const char *options_style = R"(
+QScrollArea#OptionsScroll { background: transparent; border: none; }
+QScrollArea#OptionsScroll > QWidget#qt_scrollarea_viewport { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 10px 0px; }
+QScrollBar::handle:vertical { background: #4a4a52; border-radius: 4px; min-height: 30px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 QFrame#ScopeOptions {
 	background: #1c1c1f;
 	border: 1px solid #3a3a40;
@@ -2988,11 +2995,21 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	auto *outer = new QVBoxLayout(popup);
 	outer->setContentsMargins(0, 0, 0, 0);
 
-	auto *panel = new QFrame(popup);
+	// the panel scrolls when it is taller than the screen
+	auto *scroll = new QScrollArea(popup);
+	scroll->setObjectName("OptionsScroll");
+	scroll->setFrameShape(QFrame::NoFrame);
+	scroll->setWidgetResizable(true);
+	scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	scroll->setAttribute(Qt::WA_TranslucentBackground, true);
+	scroll->viewport()->setAutoFillBackground(false);
+	outer->addWidget(scroll);
+
+	auto *panel = new QFrame();
 	panel->setObjectName("ScopeOptions");
 	panel->setMinimumWidth(260);
 	panel->setMaximumWidth(320);
-	outer->addWidget(panel);
+	scroll->setWidget(panel);
 
 	auto *vbox = new QVBoxLayout(panel);
 	vbox->setContentsMargins(14, 12, 14, 12);
@@ -3260,7 +3277,16 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 	}
 
 	widen_combo_popups(popup);
-	popup->adjustSize();
+	{
+		// as tall as the options, but never taller than the screen
+		const QSize hint = panel->sizeHint();
+		int max_h = 800;
+		if (QScreen *screen = QGuiApplication::screenAt(globalPos))
+			max_h = screen->availableGeometry().height() - 24;
+		const bool scrolls = hint.height() > max_h;
+		const int sb = scrolls ? scroll->verticalScrollBar()->sizeHint().width() : 0;
+		popup->resize(hint.width() + sb, std::min(hint.height(), max_h));
+	}
 
 	// keep the panel on screen
 	QPoint pos = globalPos;
