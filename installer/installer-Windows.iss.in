@@ -14,7 +14,14 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
+#ifdef OBS_MODULES
+; OBS 33 and later load plugins from C:\ProgramData\obs-studio\plugins\<plugin>
+DefaultDirName={commonappdata}\obs-studio\plugins
+DisableDirPage=yes
+UsePreviousAppDir=no
+#else
 DefaultDirName={code:GetDirName}
+#endif
 DefaultGroupName={#MyAppName}
 OutputBaseFilename={#MyAppName}-{#MyAppVersion}-Windows-Installer
 Compression=lzma

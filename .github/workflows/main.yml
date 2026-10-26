@@ -30,6 +30,12 @@ jobs:
             ubuntu: 'ubuntu-24.04'
           - obs: 32
             ubuntu: 'ubuntu-24.04'
+          # OBS 33: built against the OBS 32 development files (the API is compatible), installed in the
+          # obs-modules folders that OBS 33 loads plugins from
+          - obs: 33
+            devel: 32
+            ubuntu: 'ubuntu-24.04'
+            cmake: '-D OBS_MODULE_LAYOUT=ON'
     defaults:
       run:
         shell: bash
@@ -43,7 +49,7 @@ jobs:
         id: obsdeps
         uses: norihiro/obs-studio-devel-action@v2
         with:
-          obs: ${{ matrix.obs }}
+          obs: ${{ matrix.devel || matrix.obs }}
           verbose: true
 
       - name: Build plugin
@@ -53,7 +59,9 @@ jobs:
             -D CMAKE_BUILD_TYPE=RelWithDebInfo \
             -D CPACK_DEBIAN_PACKAGE_SHLIBDEPS=ON \
             -D PKG_SUFFIX=-obs${{ matrix.obs }}-${{ matrix.ubuntu }}-x86_64 \
-            ${{ steps.obsdeps.outputs.PLUGIN_CMAKE_OPTIONS }}
+            ${{ steps.obsdeps.outputs.PLUGIN_CMAKE_OPTIONS }} \
+            ${{ matrix.cmake }} \
+            -D CPACK_DEBIAN_PACKAGE_DEPENDS='obs-studio (>= ${{ matrix.obs }})'
           cd build
           make -j4
           make package
@@ -110,8 +118,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        obs: [30, 31, 32]
+        obs: [30, 31, 32, 33]
         arch: ['universal']
+        include:
+          # OBS 33: built against the OBS 32 development files; the bundle already sits where OBS 33 looks
+          - obs: 33
+            devel: 32
     defaults:
       run:
         shell: bash
@@ -165,7 +177,7 @@ jobs:
         with:
           path: /tmp/deps-${{ matrix.obs }}-${{ matrix.arch }}
           arch: ${{ matrix.arch }}
-          obs: ${{ matrix.obs }}
+          obs: ${{ matrix.devel || matrix.obs }}
           verbose: true
 
       - name: Build plugin
@@ -297,8 +309,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        obs: [30, 31, 32]
+        obs: [30, 31, 32, 33]
         arch: [x64]
+        include:
+          # OBS 33: built against the OBS 32 development files, installed in C:\ProgramData\obs-studio\plugins
+          - obs: 33
+            devel: 32
+            cmake: '-DOBS_MODULE_LAYOUT=ON' 
     env:
       visualStudio: 'Visual Studio 17 2022'
       Configuration: 'RelWithDebInfo'
@@ -314,13 +331,14 @@ jobs:
         id: obsdeps
         uses: norihiro/obs-studio-devel-action@v2
         with:
-          obs: ${{ matrix.obs }}
+          obs: ${{ matrix.devel || matrix.obs }}
       - name: Build plugin
         run: |
           $CmakeArgs = @(
             '-G', "${{ env.visualStudio }}"
             '-DCMAKE_SYSTEM_VERSION=10.0.18363.657'
           )
+          if ('${{ matrix.cmake }}'.Trim() -ne '') { $CmakeArgs += '${{ matrix.cmake }}'.Trim() }
           cmake -S . -B build ${{ steps.obsdeps.outputs.PLUGIN_CMAKE_OPTIONS_PS }} @CmakeArgs
           cmake --build build --config RelWithDebInfo -j 4 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) {
@@ -336,13 +354,21 @@ jobs:
           name: ${{ env.artifactName }}-windows-obs${{ matrix.obs }}-${{ matrix.arch }}
           path: package/*
 
+      - name: 'Install the plugin for OBS 33'
+        if: ${{ matrix.obs >= 33 }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:ProgramData\obs-studio\plugins" | Out-Null
+          7z x -y "-o$env:ProgramData\obs-studio\plugins" (Get-Item package/*.zip).FullName
+          Get-ChildItem -Recurse "$env:ProgramData\obs-studio\plugins" | Select-Object -First 20 FullName
+
       - name: 'Setup with onsdriver'
         uses: noris-plugins-for-obs/onsdriver@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          obs-plugins: package/*.zip
+          obs-plugins: ${{ matrix.obs < 33 && 'package/*.zip' || '' }}
           first-time-log: ./logs/
+          obs-version: ${{ matrix.obs >= 33 && '==33.*' || '' }}
 
       - name: 'Test with onsdriver'
         run: |
@@ -427,7 +453,6 @@ jobs:
           ## Which file do I need?
 
           Check your OBS version under **Help → About** in OBS, then pick the file with that `obsNN` in its name.
-          For **OBS 33** use the `obs32` files.
 
           | System | File |
           |---|---|
@@ -465,7 +490,6 @@ jobs:
           ## Which file do I need?
 
           Check your OBS version under **Help → About** in OBS, then pick the file with that `obsNN` in its name.
-          For **OBS 33** use the `obs32` files.
 
           | System | File |
           |---|---|

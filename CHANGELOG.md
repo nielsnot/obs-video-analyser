@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- **OBS 33 packages** (`obs33` in the file name). They install where OBS 33 looks for plugins:
+  `C:\ProgramData\obs-studio\plugins` on Windows and `obs-modules/plugins` on Linux, so OBS 33 no longer lists the
+  plugin as legacy (OBS 34 will stop loading plugins from the old folders). On macOS the plugin already sat in the
+  right place.
+
 ## 0.7.1
 
 - **Faces:** one source instead of up to four cameras; switch the camera in OBS. The largest face is shown up close.
