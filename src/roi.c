@@ -387,6 +387,10 @@ static void update_mask_texture(struct roi_source *src)
 		src->n_faces = 0;
 		src->shapes_dirty = true;
 	}
+	pthread_mutex_lock(&src->shapes_mutex);
+	memcpy(src->follow_shapes, face_shapes, sizeof(face_shapes[0]) * n_face_shapes);
+	src->n_follow_shapes = n_face_shapes;
+	pthread_mutex_unlock(&src->shapes_mutex);
 	if (src->face_follow) {
 		static uint64_t last_log;
 		const uint64_t now = os_gettime_ns();
@@ -844,6 +848,38 @@ static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 	if (src->face_follow && src->fd && surface_data->rgb_data)
 		face_detector_submit(src->fd, surface_data->rgb_data, surface_data->width, surface_data->height,
 				     surface_data->linesize);
+
+	// Following faces: the scopes measure only the faces. The pixels outside them are marked here, on the
+	// analyzed copy, so it does not depend on the mask texture having reached the capture in time.
+	if (src->face_follow) {
+		struct roi_shape shapes[FACE_MAX];
+		pthread_mutex_lock(&src->shapes_mutex);
+		const int n = src->n_follow_shapes;
+		memcpy(shapes, src->follow_shapes, sizeof(shapes[0]) * n);
+		pthread_mutex_unlock(&src->shapes_mutex);
+		const uint32_t w = surface_data->width, h = surface_data->height;
+		for (uint32_t y = 0; n > 0 && y < h; y++) {
+			const float v = (y + 0.5f) / h;
+			uint8_t *rgb = surface_data->rgb_data
+					       ? surface_data->rgb_data + (size_t)surface_data->linesize * y
+					       : NULL;
+			uint8_t *yuv = surface_data->yuv_data
+					       ? surface_data->yuv_data + (size_t)surface_data->linesize * y
+					       : NULL;
+			for (uint32_t x = 0; x < w; x++) {
+				const float u = (x + 0.5f) / w;
+				bool inside = false;
+				for (int i = 0; i < n && !inside; i++)
+					inside = shape_contains(shapes + i, u, v);
+				if (inside)
+					continue;
+				if (rgb)
+					rgb[x * 4 + 3] = 0;
+				if (yuv)
+					yuv[x * 4 + 3] = 0;
+			}
+		}
+	}
 
 	pthread_mutex_lock(&src->sources_mutex);
 	for (size_t i = 0; i < src->sources.num; i++) {

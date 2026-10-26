@@ -79,6 +79,9 @@ struct roi_source
 	struct face_detector *fd;
 	struct face_box faces[FACE_MAX];
 	int n_faces;
+	// the face ellipses, for masking the analyzed pixels on the pipeline thread (shapes_mutex)
+	struct roi_shape follow_shapes[FACE_MAX];
+	int n_follow_shapes;
 	volatile bool panning;
 	int pan_mouse_x, pan_mouse_y; // view coordinates where the pan started
 	float pan_view_x, pan_view_y;
