@@ -19,6 +19,8 @@
 #include <QDateTime>
 #include <QInputDialog>
 #include <QComboBox>
+#include <QAbstractItemView>
+#include <QFontMetrics>
 #include <QCheckBox>
 #include <QLineEdit>
 #include <QLabel>
@@ -2185,6 +2187,19 @@ static std::string visible_signature(obs_properties_t *props)
 
 /* Lays out a scope's own options: lists as dropdowns two to a row, sliders full width,
  * on/off options as check boxes. on_layout_change runs when a change shows or hides options. */
+/* Drop-down lists in the options panel open at least as wide as their longest item, so nothing is cut off. */
+static void widen_combo_popups(QWidget *panel)
+{
+	for (QComboBox *combo : panel->findChildren<QComboBox *>()) {
+		const QFontMetrics fm(combo->view()->font());
+		int w = 0;
+		for (int i = 0; i < combo->count(); i++)
+			w = std::max(w, fm.horizontalAdvance(combo->itemText(i)));
+		combo->view()->setTextElideMode(Qt::ElideNone);
+		combo->view()->setMinimumWidth(w + 48);
+	}
+}
+
 static void add_property_controls(QWidget *panel, QVBoxLayout *vbox, obs_source_t *src, obs_properties_t *props,
 				  obs_data_t *settings, const std::function<void()> &on_layout_change)
 {
@@ -3076,6 +3091,7 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 		vbox->addLayout(row);
 	}
 
+	widen_combo_popups(popup);
 	popup->adjustSize();
 
 	// keep the panel on screen

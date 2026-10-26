@@ -21,6 +21,8 @@
 - **☺ Faces follow:** the scopes now measure the faces also when shapes are drawn (the drawn shapes no longer
   crop the analysis while following faces). Faces and ☺ Faces are marked experimental.
 - **False color** shows its key below the picture by default.
+- Drop-down lists in the scope options open as wide as their longest item, so "Rec. 2100 HLG (HDR)" is no longer
+  cut off.
 - **Info:** a tile now shows one thing as a single line that fills it: timecode (default), clock, date, video
   format or your text; "All (stacked)" keeps the old tile. `+ Scope → Info and timecode` lets you pick which.
 
