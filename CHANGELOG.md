@@ -2,6 +2,8 @@
 
 ## 0.7.7
 
+- **Full screen** has a way out you can see: the toolbar button reads "✕ Exit full screen" while the dock is full
+  screen, and a scope shown full size has a close button (✕) at the top right.
 - **Quick controls** no longer flicker while the mouse moves: they stay a moment after the pointer leaves the scope.
 
 ## 0.7.6

@@ -236,6 +236,17 @@ static inline float qb_scale(const scope_widget_s *data)
 	return std::max(1.0f, data->ui_scale) * std::clamp(text_factor(data), 1.0f, 1.5f);
 }
 
+/* The close button at the top right while one scope is shown full size (widget pixels). */
+static inline void solo_close_rect(const scope_widget_s *data, int *x0, int *y0, int *x1, int *y1)
+{
+	const int k = (int)std::lround(std::max(1.0f, data->ui_scale) * 28.0f);
+	const int m = (int)std::lround(std::max(1.0f, data->ui_scale) * 8.0f);
+	*x1 = data->last_cx - m;
+	*x0 = *x1 - k;
+	*y0 = m;
+	*y1 = m + k;
+}
+
 static inline int n_tiles(const scope_widget_s *data)
 {
 	return 1 + (int)data->entries.size();
@@ -446,6 +457,7 @@ static void choose_grid(const scope_widget_s *data, const std::vector<int> &tile
 }
 
 static void draw_quickbar(scope_widget_s *data, int tile);
+static void qb_fill(float x0, float y0, float x1, float y1, uint32_t color);
 
 static void draw(void *param, uint32_t cx_, uint32_t cy_)
 {
@@ -593,6 +605,35 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		}
 
 		gs_viewport_pop();
+		gs_projection_pop();
+	}
+
+	// one scope full size: a close button to go back to all scopes
+	if (solo >= 0 && solo < total && !data->arranging) {
+		int bx0, by0, bx1, by1;
+		solo_close_rect(data, &bx0, &by0, &bx1, &by1);
+		gs_projection_push();
+		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+		qb_fill((float)bx0, (float)by0, (float)bx1, (float)by1, 0xD0202024);
+		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFF0F0F2);
+		const float pad = (bx1 - bx0) * 0.3f, t = std::max(1.5f, (bx1 - bx0) * 0.06f);
+		const float ax0 = bx0 + pad, ay0 = by0 + pad, ax1 = bx1 - pad, ay1 = by1 - pad;
+		while (gs_effect_loop(solid, "Solid")) {
+			// two thick diagonals
+			gs_render_start(false);
+			gs_vertex2f(ax0 - t * 0.5f, ay0 + t * 0.5f);
+			gs_vertex2f(ax0 + t * 0.5f, ay0 - t * 0.5f);
+			gs_vertex2f(ax1 - t * 0.5f, ay1 + t * 0.5f);
+			gs_vertex2f(ax1 + t * 0.5f, ay1 - t * 0.5f);
+			gs_render_stop(GS_TRISTRIP);
+			gs_render_start(false);
+			gs_vertex2f(ax1 - t * 0.5f, ay0 - t * 0.5f);
+			gs_vertex2f(ax1 + t * 0.5f, ay0 + t * 0.5f);
+			gs_vertex2f(ax0 - t * 0.5f, ay1 - t * 0.5f);
+			gs_vertex2f(ax0 + t * 0.5f, ay1 + t * 0.5f);
+			gs_render_stop(GS_TRISTRIP);
+		}
 		gs_projection_pop();
 	}
 
@@ -1399,10 +1440,14 @@ void ScopeWidget::setFullScreen(bool on)
 		dock->showFullScreen();
 		dock->raise();
 		dock->activateWindow();
+		if (btnFull)
+			btnFull->setText(QString::fromUtf8(obs_module_text("dock.toolbar.full.exit")));
 	} else {
 		if (!dock->isFullScreen())
 			return;
 		dock->showNormal();
+		if (btnFull)
+			btnFull->setText(QString::fromUtf8(obs_module_text("dock.toolbar.full")));
 		if (fullWasFloating)
 			dock->setGeometry(fullRestore);
 		else
@@ -1821,6 +1866,18 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 		}
 		pthread_mutex_unlock(&data->mutex);
 		return true;
+	}
+
+	// the close button of a scope shown full size
+	if (event->button() == Qt::LeftButton && data->solo >= 0 && !data->arranging) {
+		int bx0, by0, bx1, by1;
+		solo_close_rect(data, &bx0, &by0, &bx1, &by1);
+		const int x = (int)qtPos.x(), y = (int)qtPos.y();
+		if (x >= bx0 && x <= bx1 && y >= by0 && y <= by1) {
+			if (mouseUp)
+				toggleSolo(-1);
+			return true;
+		}
 	}
 
 	// quick controls at the bottom of the tile under the mouse
