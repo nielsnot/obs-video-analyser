@@ -629,6 +629,18 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		gs_projection_pop();
 	}
 
+	// an empty view: say how to fill it
+	if (n == 0) {
+		gs_projection_push();
+		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+		const struct text_scale ts = text_scale_from_viewport((float)cx, (float)cy);
+		text_draw(&ts, obs_module_text("dock.empty"), cx * 0.5f, cy * 0.5f - 10.0f * ts.uy, 15.0f, 0xFFD8D8DC,
+			  TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+		text_draw(&ts, obs_module_text("dock.empty.hint"), cx * 0.5f, cy * 0.5f + 12.0f * ts.uy, 11.0f,
+			  0xFF8D8D96, TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+		gs_projection_pop();
+	}
+
 	gs_blend_state_pop();
 
 	// Leave no vertex buffer of ours current for libobs' own draws.
@@ -3398,10 +3410,12 @@ void ScopeWidget::addView()
 {
 	storeActive();
 
-	// A new view starts empty apart from the ROI, ready for scopes of your choice.
+	// A new view starts empty, ready for scopes of your choice; the ROI view can be shown from the menu
+	// and comes back by itself when you draw a selection.
 	OBSDataAutoRelease state = obs_data_create();
 	OBSDataArrayAutoRelease empty = obs_data_array_create();
 	obs_data_set_array(state, "scopes", empty);
+	obs_data_set_bool(state, "roi-shown", false);
 
 	data->views.push_back({next_view_name(data), state.Get()});
 	data->active_view = (int)data->views.size() - 1;

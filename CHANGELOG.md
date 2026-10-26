@@ -2,6 +2,8 @@
 
 ## 0.7.5
 
+- **New view** starts empty instead of with the full ROI picture; it says how to add scopes. The ROI view is in the
+  right-click menu and comes back by itself when you draw a selection.
 - **⊞ Arrange:** resize a scope from any edge or corner (handles at all four corners), not only the bottom right.
 
 ## 0.7.4
