@@ -2,6 +2,8 @@
 
 ## 0.7.5
 
+- Info tiles have no name label by default (the timecode or date says enough), and while arranging a tile's name
+  is shown once, in the middle.
 - **New view** starts empty instead of with the full ROI picture; it says how to add scopes. The ROI view is in the
   right-click menu and comes back by itself when you draw a selection.
 - **⊞ Arrange:** resize a scope from any edge or corner (handles at all four corners), not only the bottom right.

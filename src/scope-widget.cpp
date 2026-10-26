@@ -550,7 +550,9 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 
 		if (t > 0) {
 			const scope_entry *e = data->entries[t - 1];
-			if (e->show_label && !e->label.empty()) {
+			// while arranging the name is shown in the middle of the tile instead
+			if (e->show_label && !e->label.empty() &&
+			    !(data->arranging && data->layout == SCOPE_LAYOUT_FREE)) {
 				// Draw in tile pixels so the label keeps its size whatever the scope's scale.
 				gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
 				const struct text_scale ts = text_scale_from_viewport((float)w, (float)h);
@@ -1030,6 +1032,9 @@ void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, 
 	auto *e = new scope_entry;
 	e->type = type;
 	e->label = obs_module_text(st.name_key);
+	// an info tile is its own label: a timecode or a date needs no name above it
+	if (!strcmp(st.key, "info"))
+		e->show_label = false;
 	if (meta) {
 		if (obs_data_has_user_value(meta, "label"))
 			e->label = obs_data_get_string(meta, "label");
