@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- **Quick controls:** hover a scope for a bar with intensity, grid, color, gain (1x, 2x, 5x), shape and full size.
+- **Waveform:** levels at the limits drawn orange (adjustable), an optional histogram along the right edge and
+  pixel positions along the top.
+- **Audio:** loudness timeline (30 s to 1.5 h) with short-term loudness and momentary peaks against the target,
+  momentary and short-term maximum, and a room meter for 5.1 and 7.1.
+- **Tile color:** a colored frame per scope, to group the scopes of one camera.
+- Vectorscope shows which matrix it uses (Rec. 601, 709 or 2020).
+
 ## 0.7.0
 
 - **Faces:** a new scope that finds and follows faces in up to four cameras (the first is the reference). Per camera:

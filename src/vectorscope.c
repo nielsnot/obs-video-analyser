@@ -741,6 +741,17 @@ static void vss_render(void *data, gs_effect_t *effect)
 
 	vss_render_markers(src);
 
+	// which matrix the scope uses
+	{
+		const int cs = src->tex_cs[src->w_tex_buf ^ 1];
+		const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+		text_draw(&ts,
+			  cs == CM_CS_601    ? "Rec. 601"
+			  : cm_cs_is_hdr(cs) ? "Rec. 2020"
+					     : "Rec. 709",
+			  4.0f * ts.ux, VS_SIZE - 4.0f * ts.uy, 10.0f, 0x90FFFFFF, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+	}
+
 	PROFILE_END(prof_render_name);
 }
 

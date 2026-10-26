@@ -77,6 +77,14 @@ struct wvs_source
 	struct cm_markers markers;
 	int gain; // zoom into the blacks, set from the options or quick controls
 
+	// extras: levels at the limits in orange, a histogram along the right edge, pixel positions
+	bool out_highlight;
+	float out_hi, out_lo; // 0..1
+	bool side_histogram;
+	bool x_axis;
+	float side_hist[2][WV_SIZE][4]; // per level and channel (B, G, R, A as in the trace buffer)
+	volatile int w_side;
+
 	// snapshot reference, shown over the live trace while comparing
 	volatile bool want_snapshot;
 	volatile bool compare;
@@ -154,6 +162,11 @@ static void wvs_update(void *data, obs_data_t *settings)
 	struct wvs_source *src = data;
 	cm_update(&src->cm, settings);
 	cm_markers_load(&src->markers, settings);
+	src->out_highlight = obs_data_get_bool(settings, "out_highlight");
+	src->out_hi = (float)obs_data_get_double(settings, "out_hi") / 100.0f;
+	src->out_lo = (float)obs_data_get_double(settings, "out_lo") / 100.0f;
+	src->side_histogram = obs_data_get_bool(settings, "side_histogram");
+	src->x_axis = obs_data_get_bool(settings, "x_axis");
 	const int gain = (int)obs_data_get_int(settings, "gain");
 	if (gain >= 1 && gain != src->gain) {
 		src->gain = gain;
@@ -183,6 +196,11 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "components", COMP_RGB);
 	obs_data_set_default_int(settings, "graticule_lines", 5);
 	obs_data_set_default_int(settings, "scale_labels", SCALE_PERCENT);
+	obs_data_set_default_bool(settings, "out_highlight", true);
+	obs_data_set_default_double(settings, "out_hi", 100.0);
+	obs_data_set_default_double(settings, "out_lo", 0.0);
+	obs_data_set_default_bool(settings, "side_histogram", false);
+	obs_data_set_default_bool(settings, "x_axis", false);
 }
 
 static bool components_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
@@ -245,6 +263,11 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.10bit"), SCALE_10BIT);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.HLGNits"), SCALE_HLG_NITS);
 	obs_properties_add_bool(props, "colorize", obs_module_text("WV.Prop.Colorize"));
+	obs_properties_add_bool(props, "side_histogram", obs_module_text("WV.Prop.SideHistogram"));
+	obs_properties_add_bool(props, "x_axis", obs_module_text("WV.Prop.XAxis"));
+	obs_properties_add_bool(props, "out_highlight", obs_module_text("WV.Prop.OutHighlight"));
+	obs_properties_add_float_slider(props, "out_hi", obs_module_text("WV.Prop.OutHi"), 80.0, 100.0, 0.5);
+	obs_properties_add_float_slider(props, "out_lo", obs_module_text("WV.Prop.OutLo"), 0.0, 20.0, 0.5);
 
 	return props;
 }
@@ -408,6 +431,22 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 	PROFILE_START(prof_draw_waveform_name);
 	wvs_draw_waveform(src, src->tex_buf[src->w_tex_buf], surface_data);
 	PROFILE_END(prof_draw_waveform_name);
+	if (src->side_histogram) {
+		// how many pixels sit at each level, from the trace buffer
+		float(*h)[4] = src->side_hist[src->w_side ^ 1];
+		const uint8_t *buf = src->tex_buf[src->w_tex_buf];
+		const uint32_t w = surface_data->width;
+		for (int level = 0; level < WV_SIZE; level++) {
+			uint32_t sum[4] = {0, 0, 0, 0};
+			const uint8_t *row = buf + (size_t)level * w * 4;
+			for (uint32_t x = 0; x < w; x++)
+				for (int c = 0; c < 4; c++)
+					sum[c] += row[x * 4 + c];
+			for (int c = 0; c < 4; c++)
+				h[level][c] = (float)sum[c];
+		}
+		src->w_side ^= 1;
+	}
 	src->w_tex_buf ^= 1;
 }
 
@@ -675,6 +714,147 @@ static void wvs_render_hlg_reference(struct wvs_source *src, float width, float 
 	}
 }
 
+/* Levels at or beyond the limits drawn orange: a multiplying tint over those rows. */
+static void wvs_render_out_of_range(struct wvs_source *src, float width)
+{
+	if (!src->out_highlight)
+		return;
+	const bool stack = src->display == DISP_STACK;
+	const int n_stack = stack ? (int)n_components(src) : 1;
+	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
+	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_DSTCOLOR, GS_BLEND_ZERO);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFF1A8CFF); // ABGR: orange
+	for (int k = 0; k < n_stack; k++) {
+		const float base = (float)(WV_SIZE * k);
+		// rows with a level at or above out_hi, and at or below out_lo (row 0 is 100 %)
+		const float hi_rows = WV_SIZE * (1.0f - src->out_hi) + 1.0f;
+		const float lo_row = WV_SIZE * (1.0f - src->out_lo) - 1.0f;
+		const float ya0 = base + (0.0f - off) * zoom, ya1 = base + (hi_rows - off) * zoom;
+		const float yb0 = base + (lo_row - off) * zoom, yb1 = base + (WV_SIZE - off) * zoom;
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			gs_vertex2f(0.0f, fmaxf(ya0, base));
+			gs_vertex2f(width, fmaxf(ya0, base));
+			gs_vertex2f(0.0f, fminf(ya1, base + WV_SIZE));
+			gs_vertex2f(width, fminf(ya1, base + WV_SIZE));
+			gs_render_stop(GS_TRISTRIP);
+			gs_render_start(false);
+			gs_vertex2f(0.0f, fmaxf(yb0, base));
+			gs_vertex2f(width, fmaxf(yb0, base));
+			gs_vertex2f(0.0f, fminf(yb1, base + WV_SIZE));
+			gs_vertex2f(width, fminf(yb1, base + WV_SIZE));
+			gs_render_stop(GS_TRISTRIP);
+		}
+	}
+	gs_blend_state_pop();
+}
+
+/* A histogram along the right edge: how much of the picture sits at each level. */
+static void wvs_render_side_histogram(struct wvs_source *src, float width)
+{
+	if (!src->side_histogram || src->display == DISP_STACK)
+		return;
+	const float(*h)[4] = src->side_hist[src->w_side];
+	const bool yrgb = is_yrgb(src->components);
+	// channels in the trace buffer: B, G, R (and luma in A for YRGB); luma alone is in G
+	int chans[4], n = 0;
+	uint32_t colors[4];
+	if (src->components & COMP_RGB) {
+		chans[n] = 2, colors[n++] = 0xC04040FF; // ABGR: red
+		chans[n] = 1, colors[n++] = 0xC040E040;
+		chans[n] = 0, colors[n++] = 0xC0FF7040;
+	}
+	if (yrgb)
+		chans[n] = 3, colors[n++] = 0xC0F0F0F0;
+	else if (src->components == COMP_Y || src->colorize)
+		chans[n] = 1, colors[n++] = 0xC0F0F0F0;
+	if (!n)
+		return;
+	float mx = 1.0f;
+	for (int level = 0; level < WV_SIZE; level++)
+		for (int c = 0; c < n; c++)
+			mx = fmaxf(mx, h[level][chans[c]]);
+
+	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
+	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
+	const float hw = width * 0.15f, x1 = width;
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xB0000000);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(x1 - hw, 0.0f);
+		gs_vertex2f(x1, 0.0f);
+		gs_vertex2f(x1 - hw, (float)WV_SIZE);
+		gs_vertex2f(x1, (float)WV_SIZE);
+		gs_render_stop(GS_TRISTRIP);
+	}
+	for (int c = 0; c < n; c++) {
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), colors[c]);
+		while (gs_effect_loop(solid, "Solid")) {
+			int in_batch = 0;
+			gs_render_start(false);
+			for (int level = 0; level < WV_SIZE; level++) {
+				const float v =
+					sqrtf(h[level][chans[c]] / mx); // square root: small values stay visible
+				const float y = (level + 0.5f - off) * zoom;
+				if (y < 0.0f || y > WV_SIZE || v <= 0.0f)
+					continue;
+				gs_vertex2f(x1, y);
+				gs_vertex2f(x1 - hw * v, y);
+				if ((in_batch += 2) >= 500) {
+					gs_render_stop(GS_LINES);
+					gs_render_start(false);
+					in_batch = 0;
+				}
+			}
+			gs_render_stop(GS_LINES);
+		}
+	}
+}
+
+/* Pixel positions of the picture along the top. */
+static void wvs_render_x_axis(struct wvs_source *src, float width, float height)
+{
+	if (!src->x_axis)
+		return;
+	const uint32_t w = src->tex_buf_width[src->r_tex_buf];
+	if (!w)
+		return;
+	const int scale = src->cm.target_scale > 0 ? src->cm.target_scale : 1;
+	const int picture_w = (int)w * scale;
+	const int segments = src->display == DISP_PARADE ? (int)n_components(src) : 1;
+	const float seg_w = width / segments;
+	const struct text_scale ts = text_scale_from_viewport(width, height);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x80FFFFFF);
+	const int divisions = seg_w / ts.ux > 500.0f ? 10 : 4;
+	for (int sgm = 0; sgm < segments; sgm++) {
+		const float x0 = seg_w * sgm;
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			for (int i = 0; i <= divisions * 2; i++) {
+				const float x = x0 + seg_w * i / (divisions * 2.0f);
+				gs_vertex2f(x, 0.0f);
+				gs_vertex2f(x, (i % 2 ? 3.0f : 6.0f) * ts.uy);
+			}
+			gs_render_stop(GS_LINES);
+		}
+		for (int i = 0; i <= divisions; i++) {
+			char buf[16];
+			snprintf(buf, sizeof(buf), "%d", picture_w * i / divisions);
+			const float x = x0 + seg_w * i / divisions;
+			text_draw(&ts, buf, x, 7.0f * ts.uy, 10.0f, 0xC0FFFFFF,
+				  i == 0           ? TEXT_ALIGN_LEFT
+				  : i == divisions ? TEXT_ALIGN_RIGHT
+						   : TEXT_ALIGN_CENTER,
+				  TEXT_VALIGN_TOP);
+		}
+	}
+}
+
 /* Labels sit on a dark backing so they stay readable over the trace. */
 static void draw_label(const struct text_scale *ts, const char *text, float x, float y, float px, uint32_t color,
 		       int align, int valign)
@@ -785,6 +965,9 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	wvs_render_scale(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 	wvs_render_hlg_reference(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 	wvs_render_markers(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
+	wvs_render_out_of_range(src, (float)wvs_get_width(src));
+	wvs_render_side_histogram(src, (float)wvs_get_width(src));
+	wvs_render_x_axis(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 
 	PROFILE_END(prof_render_name);
 }

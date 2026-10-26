@@ -163,6 +163,7 @@ struct scope_entry
 
 	int aspect = ASPECT_AUTO;
 	free_rect_s free;
+	uint32_t border = 0; // tile border color (0xAARRGGBB), 0 for none; groups the scopes of one camera
 };
 
 /* Tiles are numbered 0 for the ROI and 1..n for the added scopes. */
@@ -509,6 +510,30 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		r->h = h_src;
 
 		obs_source_video_render(s);
+
+		if (t > 0 && data->entries[t - 1]->border) {
+			// colored frame around the tile, in tile pixels
+			gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+			gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+			gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), data->entries[t - 1]->border);
+			const float b = 2.0f, fw = (float)w, fh = (float)h;
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				// four thin quads as two triangles each
+				const float q[4][4] = {
+					{0, 0, fw, b}, {0, fh - b, fw, fh}, {0, 0, b, fh}, {fw - b, 0, fw, fh}};
+				for (int i = 0; i < 4; i++) {
+					gs_vertex2f(q[i][0], q[i][1]);
+					gs_vertex2f(q[i][2], q[i][1]);
+					gs_vertex2f(q[i][0], q[i][3]);
+					gs_vertex2f(q[i][0], q[i][3]);
+					gs_vertex2f(q[i][2], q[i][1]);
+					gs_vertex2f(q[i][2], q[i][3]);
+				}
+				gs_render_stop(GS_TRIS);
+			}
+			gs_ortho(0.0f, (float)w_src, -1.0f, (float)h_src, -100.0f, 100.0f);
+		}
 
 		if (t > 0) {
 			const scope_entry *e = data->entries[t - 1];
@@ -934,6 +959,7 @@ void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, 
 			e->use_roi = obs_data_get_bool(meta, "use_roi");
 		e->target = obs_data_get_string(meta, "target");
 		e->aspect = (int)obs_data_get_int(meta, "aspect");
+		e->border = (uint32_t)obs_data_get_int(meta, "border");
 		if (obs_data_has_user_value(meta, "free-w")) {
 			e->free.x = (float)obs_data_get_double(meta, "free-x");
 			e->free.y = (float)obs_data_get_double(meta, "free-y");
@@ -979,6 +1005,7 @@ static void entry_meta(const scope_entry *e, obs_data_t *meta)
 	obs_data_set_bool(meta, "use_roi", e->use_roi);
 	obs_data_set_string(meta, "target", e->target.c_str());
 	obs_data_set_int(meta, "aspect", e->aspect);
+	obs_data_set_int(meta, "border", (long long)e->border);
 	if (e->free.w > 0.0f) {
 		obs_data_set_double(meta, "free-x", e->free.x);
 		obs_data_set_double(meta, "free-y", e->free.y);
@@ -2724,6 +2751,31 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 			pthread_mutex_unlock(&data->mutex);
 		});
 		vbox->addWidget(combo);
+
+		vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Options.Border"))));
+		auto *bcombo = new QComboBox(panel);
+		static const struct
+		{
+			const char *name;
+			uint32_t color;
+		} borders[] = {{"Options.Border.None", 0},           {"Options.Border.Yellow", 0xFFE8B030},
+			       {"Options.Border.Green", 0xFF6FCF86}, {"Options.Border.Pink", 0xFFE0508C},
+			       {"Options.Border.Blue", 0xFF4AA8E8},  {"Options.Border.Purple", 0xFFA070E0},
+			       {"Options.Border.White", 0xFFE8E8EC}};
+		int cur = 0;
+		for (size_t i = 0; i < sizeof(borders) / sizeof(borders[0]); i++) {
+			bcombo->addItem(QString::fromUtf8(obs_module_text(borders[i].name)),
+					QVariant((qulonglong)borders[i].color));
+			if (e->border == borders[i].color)
+				cur = (int)i;
+		}
+		bcombo->setCurrentIndex(cur);
+		connect(bcombo, QOverload<int>::of(&QComboBox::activated), this, [this, e, bcombo](int idx) {
+			pthread_mutex_lock(&data->mutex);
+			e->border = (uint32_t)bcombo->itemData(idx).toULongLong();
+			pthread_mutex_unlock(&data->mutex);
+		});
+		vbox->addWidget(bcombo);
 	}
 
 	vbox->addWidget(divider(panel));

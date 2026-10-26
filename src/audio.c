@@ -19,6 +19,8 @@
 
 #define AU_W 520
 #define AU_H 300
+#define AU_TL_H 150 // loudness timeline below the meters
+#define AU_HIST 400 // timeline buckets
 #define AU_MAX_CH 8
 #define GONIO 128
 #define SUB_BLOCKS 30 // 100 ms sub-blocks: 4 for momentary, 30 for short-term
@@ -65,6 +67,17 @@ struct au_source
 	int n_subs, i_sub;
 	DARRAY(double) blocks; // 400 ms block energies for the integrated loudness
 	float momentary, short_term, integrated;
+	float momentary_max, short_term_max;
+
+	// loudness timeline: per bucket the highest momentary and short-term loudness
+	struct
+	{
+		float m, s;
+	} hist[AU_HIST];
+	int hist_head;
+	uint64_t bucket_start;
+	double window; // seconds shown
+	bool timeline;
 
 	// stereo
 	double sum_lr, sum_ll, sum_rr;
@@ -121,6 +134,11 @@ static void loudness_reset(struct au_source *src)
 	src->n_subs = src->i_sub = 0;
 	da_resize(src->blocks, 0);
 	src->momentary = src->short_term = src->integrated = -INFINITY;
+	src->momentary_max = src->short_term_max = -INFINITY;
+	for (int i = 0; i < AU_HIST; i++)
+		src->hist[i].m = src->hist[i].s = -INFINITY;
+	src->hist_head = 0;
+	src->bucket_start = 0;
 	for (size_t c = 0; c < AU_MAX_CH; c++) {
 		src->hold[c] = -INFINITY;
 		src->shown[c] = -INFINITY;
@@ -238,6 +256,27 @@ static void process_audio(struct au_source *src, const struct audio_data *data, 
 				src->integrated = integrated_loudness(src->blocks.array, src->blocks.num);
 			}
 			src->short_term = src->n_subs >= SUB_BLOCKS ? to_lufs(st / src->n_subs) : -INFINITY;
+			if (src->momentary > src->momentary_max)
+				src->momentary_max = src->momentary;
+			if (src->short_term > src->short_term_max)
+				src->short_term_max = src->short_term;
+
+			// timeline
+			const uint64_t now = os_gettime_ns();
+			const uint64_t len = (uint64_t)(src->window / AU_HIST * 1e9);
+			if (!src->bucket_start)
+				src->bucket_start = now;
+			while (len && now - src->bucket_start >= len) {
+				src->bucket_start += len;
+				src->hist_head = (src->hist_head + 1) % AU_HIST;
+				src->hist[src->hist_head].m = src->hist[src->hist_head].s = -INFINITY;
+				if (now - src->bucket_start > len * AU_HIST)
+					src->bucket_start = now;
+			}
+			if (src->momentary > src->hist[src->hist_head].m)
+				src->hist[src->hist_head].m = src->momentary;
+			if (src->short_term > src->hist[src->hist_head].s)
+				src->hist[src->hist_head].s = src->short_term;
 
 			const double den = sqrt(src->sum_ll * src->sum_rr);
 			src->correlation = den > 1e-12 ? (float)(src->sum_lr / den) : 0.0f;
@@ -302,6 +341,16 @@ static void au_update(void *data, obs_data_t *settings)
 	struct au_source *src = data;
 	const char *name = obs_data_get_string(settings, "audio_source");
 	src->target_lufs = (int)obs_data_get_int(settings, "target_lufs");
+	src->timeline = obs_data_get_bool(settings, "audio_timeline");
+	const double window = (double)obs_data_get_int(settings, "audio_window");
+	if (window != src->window) {
+		pthread_mutex_lock(&src->mutex);
+		src->window = window > 0.0 ? window : 300.0;
+		for (int i = 0; i < AU_HIST; i++)
+			src->hist[i].m = src->hist[i].s = -INFINITY;
+		src->bucket_start = 0;
+		pthread_mutex_unlock(&src->mutex);
+	}
 	if (!src->source_name || strcmp(name, src->source_name) != 0 || (!src->mix_connected && !src->weak_src)) {
 		bfree(src->source_name);
 		src->source_name = bstrdup(name);
@@ -341,6 +390,8 @@ static void au_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "audio_source", "");
 	obs_data_set_default_int(settings, "target_lufs", -23);
+	obs_data_set_default_bool(settings, "audio_timeline", true);
+	obs_data_set_default_int(settings, "audio_window", 300);
 }
 
 static bool add_audio_source(void *param, obs_source_t *s)
@@ -374,6 +425,16 @@ static obs_properties_t *au_get_properties(void *data)
 	obs_property_list_add_int(prop, "ATSC A/85 (-24 LUFS)", -24);
 	obs_property_list_add_int(prop, "Streaming (-16 LUFS)", -16);
 	obs_property_list_add_int(prop, "Streaming (-14 LUFS)", -14);
+	obs_properties_add_bool(props, "audio_timeline", obs_module_text("Audio.Prop.Timeline"));
+	prop = obs_properties_add_list(props, "audio_window", obs_module_text("Audio.Prop.Window"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, "30 s", 30);
+	obs_property_list_add_int(prop, "1 min", 60);
+	obs_property_list_add_int(prop, "5 min", 300);
+	obs_property_list_add_int(prop, "15 min", 900);
+	obs_property_list_add_int(prop, "30 min", 1800);
+	obs_property_list_add_int(prop, "1 h", 3600);
+	obs_property_list_add_int(prop, "1.5 h", 5400);
 	obs_properties_add_button2(props, "audio_reset", obs_module_text("Audio.Reset"), au_reset_clicked, data);
 	return props;
 }
@@ -386,8 +447,8 @@ static uint32_t au_get_width(void *data)
 
 static uint32_t au_get_height(void *data)
 {
-	UNUSED_PARAMETER(data);
-	return AU_H;
+	const struct au_source *src = data;
+	return src->timeline ? AU_H + AU_TL_H : AU_H;
 }
 
 static void au_tick(void *data, float seconds)
@@ -445,12 +506,175 @@ static void format_lufs(char *buf, size_t size, const char *label, float v)
 		snprintf(buf, size, "%s  --", label);
 }
 
+/* Surround: every channel's level on its direction, as a polygon (L and R at 30 degrees,
+ * the surrounds at 110 and the back channels at 150; LFE is left out). */
+static void render_room_meter(struct au_source *src, const struct text_scale *ts, size_t n, float x0, float y0,
+			      float size)
+{
+	static const float angles[AU_MAX_CH] = {-30.0f, 30.0f, 0.0f, 0.0f, -110.0f, 110.0f, -150.0f, 150.0f};
+	const float cx = x0 + size * 0.5f, cy = y0 + size * 0.5f, r = size * 0.45f;
+	fill(x0, y0, x0 + size, y0 + size, 0xFF0A0A0C);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+
+	float px[AU_MAX_CH], py[AU_MAX_CH];
+	int idx[AU_MAX_CH], m = 0;
+	for (size_t c = 0; c < n && c < AU_MAX_CH; c++) {
+		if (c == 3)
+			continue; // LFE
+		idx[m++] = (int)c;
+	}
+	// sort by angle so the polygon goes round
+	for (int i = 0; i < m; i++)
+		for (int j = i + 1; j < m; j++)
+			if (angles[idx[j]] < angles[idx[i]]) {
+				const int t = idx[i];
+				idx[i] = idx[j];
+				idx[j] = t;
+			}
+	for (int i = 0; i < m; i++) {
+		const int c = idx[i];
+		float db = src->shown[c];
+		if (!isfinite(db) || db < DB_MIN)
+			db = DB_MIN;
+		const float k = (db - DB_MIN) / -DB_MIN;
+		const float a = angles[c] * (float)M_PI / 180.0f;
+		px[i] = cx + r * k * sinf(a);
+		py[i] = cy - r * k * cosf(a);
+	}
+	// rings at -40, -20 and 0 dBFS and the channel directions
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x40FFFFFF);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		for (int ring = 1; ring <= 3; ring++) {
+			const float rr = r * ring / 3.0f;
+			for (int i = 0; i < 48; i++) {
+				const float a0 = i * 2.0f * (float)M_PI / 48, a1 = (i + 1) * 2.0f * (float)M_PI / 48;
+				gs_vertex2f(cx + rr * sinf(a0), cy - rr * cosf(a0));
+				gs_vertex2f(cx + rr * sinf(a1), cy - rr * cosf(a1));
+			}
+		}
+		for (int i = 0; i < m; i++) {
+			const float a = angles[idx[i]] * (float)M_PI / 180.0f;
+			gs_vertex2f(cx, cy);
+			gs_vertex2f(cx + r * sinf(a), cy - r * cosf(a));
+		}
+		gs_render_stop(GS_LINES);
+	}
+	// level polygon
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x9050D070);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		for (int i = 0; i < m; i++) {
+			const int j = (i + 1) % m;
+			gs_vertex2f(cx, cy);
+			gs_vertex2f(px[i], py[i]);
+			gs_vertex2f(px[j], py[j]);
+		}
+		gs_render_stop(GS_TRIS);
+	}
+	for (int i = 0; i < m; i++) {
+		const int c = idx[i];
+		const float a = angles[c] * (float)M_PI / 180.0f;
+		text_draw(ts, channel_name((size_t)c, n), cx + (r + 8.0f * ts->ux) * sinf(a),
+			  cy - (r + 8.0f * ts->uy) * cosf(a), 10.0f, 0xFFB8B8C0, TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+	}
+}
+
+/* Loudness over time: short-term as a filled area, momentary peaks as a line, the target dashed. */
+static void render_loudness_timeline(struct au_source *src, const struct text_scale *ts, const void *hist_v, int head,
+				     double window, float top, float height)
+{
+	const struct
+	{
+		float m, s;
+	} *hist = hist_v;
+	const float W = (float)AU_W;
+	const float x0 = 40.0f * ts->ux, x1 = W - 8.0f * ts->ux;
+	const float y0 = top + 18.0f * ts->uy, y1 = top + height - 16.0f * ts->uy;
+	const float lo = -50.0f, hi = -5.0f; // LUFS shown
+	fill(8.0f * ts->ux, top, W - 8.0f * ts->ux, top + 1.0f * ts->uy, 0xFF303036);
+	char buf[48];
+	if (window >= 3600.0)
+		snprintf(buf, sizeof(buf), "LOUDNESS  %.1f h", window / 3600.0);
+	else if (window >= 60.0)
+		snprintf(buf, sizeof(buf), "LOUDNESS  %.0f min", window / 60.0);
+	else
+		snprintf(buf, sizeof(buf), "LOUDNESS  %.0f s", window);
+	text_draw(ts, buf, 8.0f * ts->ux, top + 3.0f * ts->uy, 10.0f, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	fill(x0, y0, x1, y1, 0xFF17171B);
+	for (int l = -50; l <= -10; l += 10) {
+		const float y = y1 - (y1 - y0) * (l - lo) / (hi - lo);
+		fill(x0, y, x1, y + 1.0f * ts->uy, 0x30FFFFFF);
+		snprintf(buf, sizeof(buf), "%d", l);
+		text_draw(ts, buf, x0 - 4.0f * ts->ux, y, 10.0f, 0xFF8D8D96, TEXT_ALIGN_RIGHT, TEXT_VALIGN_MIDDLE);
+	}
+	const float yt = y1 - (y1 - y0) * ((float)src->target_lufs - lo) / (hi - lo);
+	for (float x = x0; x < x1; x += 10.0f * ts->ux)
+		fill(x, yt, fminf(x + 5.0f * ts->ux, x1), yt + 1.0f * ts->uy, 0xC06FCF86);
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	const float bw = (x1 - x0) / AU_HIST;
+	// short-term: filled bars, green near the target, orange above it
+	for (int pass = 0; pass < 2; pass++) {
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), pass == 0 ? 0xA050C070 : 0xC03C8CFF);
+		while (gs_effect_loop(solid, "Solid")) {
+			int in_batch = 0;
+			gs_render_start(false);
+			for (int i = 0; i < AU_HIST; i++) {
+				const float v = hist[(head + 1 + i) % AU_HIST].s;
+				if (!isfinite(v))
+					continue;
+				const bool over = v > src->target_lufs + 1.0f;
+				if ((pass == 1) != over)
+					continue;
+				const float y = y1 - (y1 - y0) * fminf(fmaxf((v - lo) / (hi - lo), 0.0f), 1.0f);
+				const float x = x0 + bw * i;
+				gs_vertex2f(x, y1);
+				gs_vertex2f(x + bw, y1);
+				gs_vertex2f(x, y);
+				gs_vertex2f(x, y);
+				gs_vertex2f(x + bw, y1);
+				gs_vertex2f(x + bw, y);
+				if ((in_batch += 6) >= 480) {
+					gs_render_stop(GS_TRIS);
+					gs_render_start(false);
+					in_batch = 0;
+				}
+			}
+			gs_render_stop(GS_TRIS);
+		}
+	}
+	// momentary maximum as a thin line
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xC0F0F0F0);
+	while (gs_effect_loop(solid, "Solid")) {
+		int in_batch = 0;
+		gs_render_start(false);
+		for (int i = 1; i < AU_HIST; i++) {
+			const float a = hist[(head + i) % AU_HIST].m, b = hist[(head + 1 + i) % AU_HIST].m;
+			if (!isfinite(a) || !isfinite(b))
+				continue;
+			const float ya = y1 - (y1 - y0) * fminf(fmaxf((a - lo) / (hi - lo), 0.0f), 1.0f);
+			const float yb = y1 - (y1 - y0) * fminf(fmaxf((b - lo) / (hi - lo), 0.0f), 1.0f);
+			gs_vertex2f(x0 + bw * (i - 0.5f), ya);
+			gs_vertex2f(x0 + bw * (i + 0.5f), yb);
+			if ((in_batch += 2) >= 500) {
+				gs_render_stop(GS_LINES);
+				gs_render_start(false);
+				in_batch = 0;
+			}
+		}
+		gs_render_stop(GS_LINES);
+	}
+	text_draw(ts, "now", x1, y1 + 2.0f * ts->uy, 10.0f, 0xFF8D8D96, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+}
+
 static void au_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
 	struct au_source *src = data;
 	const float W = (float)AU_W, H = (float)AU_H;
-	const struct text_scale ts = text_scale_from_viewport(W, H);
+	const float H_total = (float)au_get_height(src);
+	const struct text_scale ts = text_scale_from_viewport(W, H_total);
 	const float px = 11.0f;
 
 	float peak[AU_MAX_CH];
@@ -465,6 +689,14 @@ static void au_render(void *data, gs_effect_t *effect)
 	st = src->short_term;
 	in = src->integrated;
 	corr = src->correlation;
+	const float m_max = src->momentary_max, st_max = src->short_term_max;
+	static struct
+	{
+		float m, s;
+	} hist[AU_HIST];
+	memcpy(hist, src->hist, sizeof(hist));
+	const int head = src->hist_head;
+	const double window = src->window;
 	// persistence: fade the plot a little every frame
 	for (int i = 0; i < GONIO * GONIO; i++) {
 		gonio[i] = src->gonio[i];
@@ -472,7 +704,7 @@ static void au_render(void *data, gs_effect_t *effect)
 	}
 	pthread_mutex_unlock(&src->mutex);
 
-	fill(0.0f, 0.0f, W, H, 0xFF101013);
+	fill(0.0f, 0.0f, W, H_total, 0xFF101013);
 
 	// peak meters with a fall-back of 20 dB/s and a 2 s hold
 	const uint64_t now = os_gettime_ns();
@@ -536,6 +768,16 @@ static void au_render(void *data, gs_effect_t *effect)
 				: vals[k] > target              ? 0xFFFF5A50
 								: 0xFFFFC040;
 		text_draw(&ts, buf, tx, ty, px + 5.0f, color, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		if (k < 2) {
+			const float mx = k == 0 ? m_max : st_max;
+			char mb[32];
+			if (isfinite(mx))
+				snprintf(mb, sizeof(mb), "max %.1f", mx);
+			else
+				snprintf(mb, sizeof(mb), "max --");
+			text_draw(&ts, mb, tx + 92.0f * ts.ux, ty + 4.0f * ts.uy, px - 1.0f, 0xFF8D8D96,
+				  TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		}
 		ty += lh * 1.25f;
 	}
 	snprintf(buf, sizeof(buf), "target %d", src->target_lufs);
@@ -556,9 +798,17 @@ static void au_render(void *data, gs_effect_t *effect)
 	text_draw(&ts, "-1", cx0, ty + 10.0f * ts.uy, px - 2.0f, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 	text_draw(&ts, "+1", cx1, ty + 10.0f * ts.uy, px - 2.0f, 0xFF8D8D96, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
 
-	// goniometer
+	if (src->timeline)
+		render_loudness_timeline(src, &ts, hist, head, window, H, (float)AU_TL_H);
+
 	const float gs = fminf(W * 0.28f, H - 20.0f * ts.uy);
 	const float gx0 = W - gs - 8.0f * ts.ux, gy0 = (H - gs) * 0.5f;
+	if (n > 2) {
+		render_room_meter(src, &ts, n, gx0, gy0, gs);
+		return;
+	}
+
+	// goniometer
 	fill(gx0, gy0, gx0 + gs, gy0 + gs, 0xFF0A0A0C);
 	if (src->effect) {
 		const uint8_t *p = gonio;
