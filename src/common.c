@@ -55,6 +55,7 @@ void cm_destroy(struct cm_source *src)
 	for (int i = 0; i < CM_SURFACE_QUEUE_SIZE; i++) {
 		gs_stagesurface_destroy(src->queue[i].stagesurface);
 		gs_texrender_destroy(src->queue[i].texrender);
+		bfree(src->queue[i].copy);
 	}
 	if (src->texrender)
 		gs_texrender_destroy(src->texrender);
@@ -388,14 +389,28 @@ static void cm_pipeline_thread_loop(struct cm_surface_queue_item *item)
 	if (!(item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV)))
 		return;
 
+	// Copy the staged picture and unmap right away, in the same graphics section.
+	// Keeping the buffer mapped while the scopes compute, and unmapping later, makes the
+	// macOS OpenGL driver fail glUnmapBuffer now and then.
 	obs_enter_graphics();
 	PROFILE_START(prof_stagesurface_map_name);
 	bool ret = gs_stagesurface_map(item->stagesurface, &video_data, &video_linesize);
+	if (ret) {
+		const size_t size = (size_t)video_linesize * item->sheight;
+		if (item->copy_size < size) {
+			bfree(item->copy);
+			item->copy = bmalloc(size);
+			item->copy_size = size;
+		}
+		memcpy(item->copy, video_data, size);
+		gs_stagesurface_unmap(item->stagesurface);
+	}
 	PROFILE_END(prof_stagesurface_map_name);
 	obs_leave_graphics();
 
 	if (!ret)
 		return;
+	video_data = item->copy;
 
 	struct cm_surface_data surface_data = {
 		.linesize = video_linesize,
@@ -416,10 +431,6 @@ static void cm_pipeline_thread_loop(struct cm_surface_queue_item *item)
 	if (item->cb) {
 		item->cb(item->cb_data, &surface_data);
 	}
-
-	obs_enter_graphics();
-	gs_stagesurface_unmap(item->stagesurface);
-	obs_leave_graphics();
 }
 
 static void *cm_pipeline_thread(void *data)

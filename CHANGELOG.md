@@ -9,6 +9,8 @@
   momentary and short-term maximum, and a room meter for 5.1 and 7.1.
 - **Tile color:** a colored frame per scope, to group the scopes of one camera.
 - Vectorscope shows which matrix it uses (Rec. 601, 709 or 2020).
+- macOS: the analysis no longer keeps a graphics buffer mapped while the scopes compute, which made the OpenGL
+  driver report "glUnmapBuffer failed" now and then.
 - **Export screenshot:** `⤓ Export` (or the dock menu) saves the whole dock as it is now as a PNG.
 
 ## 0.7.0

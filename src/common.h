@@ -49,6 +49,8 @@ struct cm_surface_queue_item
 	gs_stagesurf_t *stagesurface;
 	uint32_t width, height, sheight;
 	uint32_t flags; // RGB or YUV
+	uint8_t *copy;  // the staged picture, copied so the buffer is unmapped at once
+	size_t copy_size;
 	int colorspace;
 
 	cm_surface_cb_t cb;
