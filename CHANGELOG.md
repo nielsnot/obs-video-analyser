@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.3
+
+- **Vectorscope zoom:** the mouse wheel and Gain magnify only the trace; the graticule, color targets, hue ring,
+  rings and markers stay where they are, so you can still read which color is where. The zoom shows as
+  "Trace x2.0" at the bottom right.
+- **Quick controls** are larger and follow the display scaling, so they are readable on Retina and HiDPI screens.
+- **⛶ Full** in the toolbar shows the dock full screen on the screen it is on (it is taken out of the main window
+  if needed); press it again or Esc to go back.
+- **RGB parade:** clearer red, green and blue, and dense parts of the trace glow a little toward white.
+
 ## 0.7.2
 
 - **OBS 33 packages** (`obs33` in the file name). They install where OBS 33 looks for plugins:

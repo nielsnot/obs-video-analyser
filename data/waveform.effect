@@ -1,10 +1,11 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
 uniform float intensity;
+// parade and stack colors: clear red, green and blue (blue a little lifted so it reads on black)
 uniform float4x4 color = {
-	1.00, 0.41, 0.41, 0.0,
-	0.00, 1.00, 0.00, 0.0,
-	0.53, 0.53, 1.00, 0.0,
+	1.00, 0.14, 0.12, 0.0,
+	0.12, 0.95, 0.22, 0.0,
+	0.16, 0.40, 1.00, 0.0,
 	0.00, 0.00, 0.00, 1.0
 };
 
@@ -50,13 +51,21 @@ float4 PSDrawColorize(VertInOut vert_in) : TARGET
 	return float4(c * k, 1.0);
 }
 
+// A trace in its own color; where it is dense it glows a little toward white, like a phosphor.
+float4 trace(float3 c, float r)
+{
+	if (r > 1.0)
+		r = 1.0;
+	float hot = r * r * r * 0.35;
+	return float4(c * r + (float3(1.0, 1.0, 1.0) - c) * hot, 1.0);
+}
+
 float4 PSDrawStack(VertInOut vert_in) : TARGET
 {
 	int i = int(vert_in.uv.y * 3);
 	float v = vert_in.uv.y * 3 - i;
 	float r = image.Sample(def_sampler, float2(vert_in.uv.x, v))[i] * intensity;
-	if (r>1.0) r = 1.0;
-	return float4(color[i].xyz*r, 1.0);
+	return trace(color[i].xyz, r);
 }
 
 float4 PSDrawParade(VertInOut vert_in) : TARGET
@@ -64,8 +73,7 @@ float4 PSDrawParade(VertInOut vert_in) : TARGET
 	int i = int(vert_in.uv.x * 3);
 	float u = vert_in.uv.x * 3 - i;
 	float r = image.Sample(def_sampler, float2(u, vert_in.uv.y))[i] * intensity;
-	if (r>1.0) r = 1.0;
-	return float4(color[i].xyz*r, 1.0);
+	return trace(color[i].xyz, r);
 }
 
 float4 PSDrawStackUV(VertInOut vert_in) : TARGET
@@ -77,8 +85,7 @@ float4 PSDrawStackUV(VertInOut vert_in) : TARGET
 		i = 2;
 	float v = vert_in.uv.y * 2;
 	float r = image.Sample(def_sampler, float2(vert_in.uv.x, v))[i] * intensity;
-	if (r>1.0) r = 1.0;
-	return float4(color[i].xyz*r, 1.0);
+	return trace(color[i].xyz, r);
 }
 
 float4 PSDrawParadeUV(VertInOut vert_in) : TARGET
@@ -90,8 +97,7 @@ float4 PSDrawParadeUV(VertInOut vert_in) : TARGET
 		i = 2;
 	float u = vert_in.uv.x * 2;
 	float r = image.Sample(def_sampler, float2(u, vert_in.uv.y))[i] * intensity;
-	if (r>1.0) r = 1.0;
-	return float4(color[i].xyz*r, 1.0);
+	return trace(color[i].xyz, r);
 }
 
 // YRGB: luma (fourth channel) followed by R, G and B.
@@ -106,10 +112,7 @@ float4 yrgb_column(float4 s, int i)
 		r = s[i - 1];
 		c = color[i - 1].xyz;
 	}
-	r = r * intensity;
-	if (r > 1.0)
-		r = 1.0;
-	return float4(c * r, 1.0);
+	return trace(c, r * intensity);
 }
 
 float4 PSDrawParadeYRGB(VertInOut vert_in) : TARGET

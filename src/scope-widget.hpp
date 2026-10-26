@@ -4,6 +4,7 @@
 
 #include <obs.h>
 #include <QWidget>
+#include <QRect>
 #include <memory>
 #include <string>
 #include <NorisQTDisplay.hpp>
@@ -22,6 +23,9 @@ class ScopeWidget : public NorisQTDisplay {
 	class QToolButton *btnCompare = nullptr;
 	class QToolButton *btnArrange = nullptr;
 	class QToolButton *btnFaces = nullptr;
+	class QToolButton *btnFull = nullptr;
+	bool fullWasFloating = false;
+	QRect fullRestore;
 	bool comparing = false;
 	bool toolbarVisible = true;
 	int drawMode = 0;
@@ -54,6 +58,8 @@ private:
 	void openOptions(int tile, const QPoint &globalPos);
 	void setArranging(bool on);
 	void exportScreenshot();
+	void setFullScreen(bool on);
+	class QDockWidget *findDock() const;
 	void quickControl(int tile, const struct qb_item &it, int x);
 	void addMarkerControls(class QWidget *panel, class QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
 			       const std::function<void()> &reopen);

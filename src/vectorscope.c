@@ -568,7 +568,7 @@ static void draw_hue_ring(int colorspace)
 }
 
 /* User markers: points at a hue and saturation, or lines from the center towards a hue.
- * Drawn after the zoom transform so line widths and labels keep their pixel size. */
+ * They stay put when the trace is magnified, like the graticule. */
 static void vss_render_markers(struct vss_source *src)
 {
 	struct cm_marker items[CM_MARKERS_MAX];
@@ -577,7 +577,6 @@ static void vss_render_markers(struct vss_source *src)
 		return;
 
 	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
-	const float zoom = src->zoom > 1.01f ? src->zoom : 1.0f;
 	const float c = 127.5f;
 	const float px = 10.0f;
 
@@ -586,7 +585,7 @@ static void vss_render_markers(struct vss_source *src)
 		if (k->kind != CM_MARKER_POINT && k->kind != CM_MARKER_LINE)
 			continue;
 		const float a = k->hue * (float)M_PI / 180.0f;
-		const float r = (k->kind == CM_MARKER_LINE ? 1.0f : k->sat) * 127.0f * zoom;
+		const float r = (k->kind == CM_MARKER_LINE ? 1.0f : k->sat) * 127.0f;
 		const float x = c + r * cosf(a), y = c - r * sinf(a);
 		if (k->kind == CM_MARKER_LINE) {
 			cm_marker_draw_line(c, c, x, y, k->color, k->style, k->width, ts.ux, ts.uy);
@@ -712,6 +711,11 @@ static void vss_render(void *data, gs_effect_t *effect)
 	}
 	PROFILE_END(prof_draw_name);
 
+	// Only the trace is magnified; the graticule, color targets, rings and markers stay put,
+	// like the gain of a hardware vectorscope, so the colors can still be read.
+	if (b_zoom)
+		gs_matrix_pop();
+
 	PROFILE_START(prof_draw_graticule_name);
 	if (src->graticule_img.loaded && src->graticule && src->effect) {
 		create_graticule_vbuf(src, src->tex_cs[r_tex_buf]);
@@ -735,10 +739,6 @@ static void vss_render(void *data, gs_effect_t *effect)
 		draw_ring_scale(src->graticule ? (uint32_t)src->graticule_color : 0x80FFBF00);
 	PROFILE_END(prof_draw_graticule_name);
 
-	if (b_zoom) {
-		gs_matrix_pop();
-	}
-
 	vss_render_markers(src);
 
 	// which matrix the scope uses
@@ -750,6 +750,12 @@ static void vss_render(void *data, gs_effect_t *effect)
 			  : cm_cs_is_hdr(cs) ? "Rec. 2020"
 					     : "Rec. 709",
 			  4.0f * ts.ux, VS_SIZE - 4.0f * ts.uy, 10.0f, 0x90FFFFFF, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+		if (b_zoom) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "Trace x%.1f", src->zoom);
+			text_draw(&ts, buf, VS_SIZE - 4.0f * ts.ux, VS_SIZE - 4.0f * ts.uy, 10.0f, 0xC0FFD060,
+				  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+		}
 	}
 
 	PROFILE_END(prof_render_name);

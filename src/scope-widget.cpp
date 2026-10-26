@@ -38,6 +38,8 @@
 #include <QImage>
 #include <QStandardPaths>
 #include <QWidgetAction>
+#include <QDockWidget>
+#include <QShortcut>
 #include <QColor>
 #include <memory>
 #include "plugin-macros.generated.h"
@@ -197,6 +199,7 @@ struct scope_widget_s
 	// quick controls shown on the tile under the mouse
 	volatile int hover_tile = -1;
 	int qb_drag_tile = -1; // dragging the intensity slider
+	float ui_scale = 1.0f; // device pixels per point, so the quick controls keep a readable size
 
 	// Views: only the active one has live sources; the others are kept as saved settings.
 	struct view_s
@@ -712,7 +715,7 @@ struct qb_item
 	int x0, x1;
 };
 
-#define QB_HEIGHT 26
+#define QB_HEIGHT 30
 
 static bool type_has_intensity(int type)
 {
@@ -736,27 +739,29 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 		return items;
 	const scope_entry *e = data->entries[tile - 1];
 	const src_rect_s &r = e->rect;
-	if (r.x1 - r.x0 < 120 || r.y1 - r.y0 < 60)
+	const float k = std::max(1.0f, data->ui_scale);
+	auto px = [k](int v) { return (int)std::lround(v * k); };
+	if (r.x1 - r.x0 < px(140) || r.y1 - r.y0 < px(70))
 		return items;
-	*bar_y1 = r.y1 - 4;
-	*bar_y0 = *bar_y1 - QB_HEIGHT;
-	int x = r.x0 + 6;
+	*bar_y1 = r.y1 - px(4);
+	*bar_y0 = *bar_y1 - px(QB_HEIGHT);
+	int x = r.x0 + px(6);
 	auto add = [&](int kind, int w) {
-		if (x + w > r.x1 - 6)
+		if (x + px(w) > r.x1 - px(6))
 			return;
-		items.push_back({kind, x, x + w});
-		x += w + 4;
+		items.push_back({kind, x, x + px(w)});
+		x += px(w) + px(4);
 	};
 	if (type_has_intensity(e->type))
-		add(QB_INTENSITY, 110);
+		add(QB_INTENSITY, 120);
 	if (grid_keys_for(e->type))
-		add(QB_GRID, 40);
+		add(QB_GRID, 46);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
-		add(QB_COLORS, 46);
+		add(QB_COLORS, 52);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
-		add(QB_GAIN, 56);
-	add(QB_ASPECT, 44);
-	add(QB_MAX, 36);
+		add(QB_GAIN, 64);
+	add(QB_ASPECT, 50);
+	add(QB_MAX, 44);
 	return items;
 }
 
@@ -804,22 +809,24 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 		return;
 	const scope_entry *e = data->entries[tile - 1];
 	OBSDataAutoRelease s = obs_source_get_settings(e->src);
+	const float k = std::max(1.0f, data->ui_scale);
 	const struct text_scale ts = {1.0f, 1.0f};
-	const float px = 11.0f;
-	qb_fill((float)items.front().x0 - 4.0f, (float)y0, (float)items.back().x1 + 4.0f, (float)y1, 0xC0141418);
+	const float px = 13.0f * k;
+	qb_fill((float)items.front().x0 - 4.0f * k, (float)y0, (float)items.back().x1 + 4.0f * k, (float)y1,
+		0xD0141418);
 	for (const qb_item &it : items) {
 		const float x0 = (float)it.x0, x1 = (float)it.x1, ym = (y0 + y1) * 0.5f;
 		bool on = false;
 		std::string label;
 		switch (it.kind) {
 		case QB_INTENSITY: {
-			text_draw(&ts, "Int", x0, ym, px, 0xFFB8B8C0, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
-			const float tx0 = x0 + 26.0f, tx1 = x1 - 4.0f;
-			qb_fill(tx0, ym - 2.0f, tx1, ym + 2.0f, 0xFF3A3A40);
+			text_draw(&ts, "Int", x0 + 2.0f * k, ym, px, 0xFFD0D0D6, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+			const float tx0 = x0 + 30.0f * k, tx1 = x1 - 6.0f * k;
+			qb_fill(tx0, ym - 2.0f * k, tx1, ym + 2.0f * k, 0xFF3A3A40);
 			const float t = intensity_to_t(obs_data_get_int(s, "intensity"));
 			const float kx = tx0 + (tx1 - tx0) * t;
-			qb_fill(tx0, ym - 2.0f, kx, ym + 2.0f, 0xFF6FCF86);
-			qb_fill(kx - 5.0f, ym - 6.0f, kx + 5.0f, ym + 6.0f, 0xFFF0F0F2);
+			qb_fill(tx0, ym - 2.0f * k, kx, ym + 2.0f * k, 0xFF6FCF86);
+			qb_fill(kx - 5.0f * k, ym - 7.0f * k, kx + 5.0f * k, ym + 7.0f * k, 0xFFF0F0F2);
 			continue;
 		}
 		case QB_GRID:
@@ -845,15 +852,16 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 			label = data->solo >= 0 ? "Back" : "Full";
 			break;
 		}
-		qb_fill(x0, (float)y0 + 3.0f, x1, (float)y1 - 3.0f, on ? 0xFF3D5C45 : 0xFF2A2A2F);
-		text_draw(&ts, label.c_str(), (x0 + x1) * 0.5f, ym, px, 0xFFE8E8EC, TEXT_ALIGN_CENTER,
+		qb_fill(x0, (float)y0 + 3.0f * k, x1, (float)y1 - 3.0f * k, on ? 0xFF3D5C45 : 0xFF2A2A2F);
+		text_draw(&ts, label.c_str(), (x0 + x1) * 0.5f, ym, px, 0xFFF4F4F6, TEXT_ALIGN_CENTER,
 			  TEXT_VALIGN_MIDDLE);
 	}
 }
 
-static void qb_set_intensity(obs_source_t *src, int x, const qb_item &it)
+static void qb_set_intensity(obs_source_t *src, int x, const qb_item &it, float ui_scale)
 {
-	const float tx0 = it.x0 + 26.0f, tx1 = it.x1 - 4.0f;
+	const float k = std::max(1.0f, ui_scale);
+	const float tx0 = it.x0 + 30.0f * k, tx1 = it.x1 - 6.0f * k;
 	const float t = std::clamp((x - tx0) / std::max(tx1 - tx0, 1.0f), 0.0f, 1.0f);
 	const long long v = std::clamp((long long)std::lround(std::exp(t * std::log(255.0))), 1LL, 255LL);
 	OBSDataAutoRelease d = obs_data_create();
@@ -1103,6 +1111,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	btnCompare = make_tool_button(toolbar, "dock.toolbar.compare", "dock.toolbar.compare.tip", true);
 	btnArrange = make_tool_button(toolbar, "dock.toolbar.arrange", "dock.toolbar.arrange.tip", true);
 	auto *btnExport = make_tool_button(toolbar, "dock.toolbar.export", "dock.toolbar.export.tip", false);
+	btnFull = make_tool_button(toolbar, "dock.toolbar.full", "dock.toolbar.full.tip", true);
 	btnFaces = make_tool_button(toolbar, "dock.toolbar.faces", "dock.toolbar.faces.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
@@ -1140,6 +1149,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addSpacing(8);
 	layout->addWidget(btnArrange);
 	layout->addWidget(btnExport);
+	layout->addWidget(btnFull);
 	layout->addStretch(1);
 
 	// The shape buttons behave like radio buttons that can also be switched off.
@@ -1153,6 +1163,14 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnCompare, &QToolButton::toggled, this, &ScopeWidget::setCompare);
 	connect(btnArrange, &QToolButton::toggled, this, &ScopeWidget::setArranging);
 	connect(btnExport, &QToolButton::clicked, this, &ScopeWidget::exportScreenshot);
+	connect(btnFull, &QToolButton::toggled, this, &ScopeWidget::setFullScreen);
+	// Esc leaves full screen
+	auto *esc = new QShortcut(QKeySequence(Qt::Key_Escape), parent);
+	esc->setContext(Qt::WidgetWithChildrenShortcut);
+	connect(esc, &QShortcut::activated, this, [this]() {
+		if (btnFull && btnFull->isChecked())
+			btnFull->setChecked(false);
+	});
 	connect(btnFaces, &QToolButton::toggled, this, [this](bool on) {
 		if (!data->roi)
 			return;
@@ -1165,6 +1183,43 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 
 	toolbar->setVisible(toolbarVisible);
 	return toolbar;
+}
+
+QDockWidget *ScopeWidget::findDock() const
+{
+	for (QWidget *p = parentWidget(); p; p = p->parentWidget()) {
+		if (auto *d = qobject_cast<QDockWidget *>(p))
+			return d;
+	}
+	return nullptr;
+}
+
+/* Full screen: the dock is taken out of the main window if needed and shown full screen on the screen it is on;
+ * switching off puts it back where it was. */
+void ScopeWidget::setFullScreen(bool on)
+{
+	QDockWidget *dock = findDock();
+	if (!dock)
+		return;
+	if (on) {
+		if (dock->isFullScreen())
+			return;
+		fullWasFloating = dock->isFloating();
+		if (!fullWasFloating)
+			dock->setFloating(true);
+		fullRestore = dock->geometry();
+		dock->showFullScreen();
+		dock->raise();
+		dock->activateWindow();
+	} else {
+		if (!dock->isFullScreen())
+			return;
+		dock->showNormal();
+		if (fullWasFloating)
+			dock->setGeometry(fullRestore);
+		else
+			dock->setFloating(false);
+	}
 }
 
 static struct roi_source *widget_roi(struct scope_widget_s *data)
@@ -1315,7 +1370,7 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 	switch (it.kind) {
 	case QB_INTENSITY:
 		data->qb_drag_tile = tile;
-		qb_set_intensity(src, x, it);
+		qb_set_intensity(src, x, it, data->ui_scale);
 		return;
 	case QB_GRID:
 		set_grid_visible(src, grid_keys_for(e->type), !grid_visible(src, grid_keys_for(e->type)));
@@ -1481,6 +1536,7 @@ static inline QPointF event_pos(QWidget *w, QMouseEvent *event)
 
 bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 {
+	data->ui_scale = (float)devicePixelRatioF();
 	bool mouseUp = event->type() == QEvent::MouseButtonRelease;
 	int clickCount = 1;
 	if (event->type() == QEvent::MouseButtonDblClick)
@@ -1595,6 +1651,7 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 
 bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 {
+	data->ui_scale = (float)devicePixelRatioF();
 	struct obs_mouse_event mouseEvent = {};
 
 	bool mouseLeave = event->type() == QEvent::Leave;
@@ -1654,7 +1711,7 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 			pthread_mutex_unlock(&data->mutex);
 			for (const qb_item &it : items)
 				if (it.kind == QB_INTENSITY && src)
-					qb_set_intensity(src, x, it);
+					qb_set_intensity(src, x, it, data->ui_scale);
 			return true;
 		}
 		if (prev != data->hover_tile)
