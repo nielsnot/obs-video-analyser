@@ -3,6 +3,7 @@
 ## 0.7.4
 
 - **+ Scope:** hover a scope in the menu for a short explanation of what it shows.
+- Text in the scopes is drawn semi-bold, so it reads better over the traces.
 
 ## 0.7.3
 

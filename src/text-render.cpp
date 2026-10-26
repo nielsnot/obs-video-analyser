@@ -90,6 +90,7 @@ extern "C" void text_render_init(void)
 
 	QFont font = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
 	font.setPixelSize(FONT_PX);
+	font.setWeight(QFont::DemiBold); // reads better over the traces and at small sizes
 	font.setHintingPreference(QFont::PreferNoHinting);
 	QFontMetricsF fm(font);
 
