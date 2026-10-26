@@ -77,10 +77,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          obs-plugins: ${{ env.FILE_NAME }}
+          # the OBS 33 package needs OBS 33, which may not be in the Ubuntu PPA yet; installed below
+          obs-plugins: ${{ matrix.obs < 33 && env.FILE_NAME || '' }}
           first-time-log: ./logs/
 
+      - name: 'Install the OBS 33 package'
+        id: install33
+        if: ${{ matrix.obs >= 33 }}
+        run: |
+          v=$(dpkg-query -W -f='${Version}' obs-studio | sed 's/[^0-9.].*//')
+          echo "OBS from the PPA: $v"
+          if dpkg --compare-versions "$v" ge ${{ matrix.obs }}; then
+            sudo apt install -y "$FILE_NAME"
+            echo "test=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::OBS ${{ matrix.obs }} is not in the Ubuntu PPA yet (found $v); the package is built but not tested."
+            echo "test=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 'Test with onsdriver'
+        if: ${{ matrix.obs < 33 || steps.install33.outputs.test == 'true' }}
         run: |
           python -m pip install Pillow
           set -o pipefail
