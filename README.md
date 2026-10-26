@@ -31,11 +31,12 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | 2 | `+ Scope` | Adds a scope (see the list below). |
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
 | 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
-| | `☺ Faces` | The selection follows every face found, so all scopes measure the faces. |
-| | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
-| | `⊞ Arrange` | Drag scopes anywhere in the dock and resize them at their bottom right corner (free layout, saved per view). |
+| 10 | `☺ Faces` | The selection follows every face found, so all scopes measure the faces. |
+| 10 | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
+| 10 | `⊞ Arrange` | Drag scopes anywhere in the dock and resize them at their bottom right corner (free layout, saved per view). |
 | 5 | **ROI view** | The picture being analyzed. Shapes are outlined in green, faces in cyan, everything outside them is darkened. Pins show RGB, luma and HSL values. The mouse wheel zooms toward face height (or the pointer, or the middle). |
 | 6 – 8 | **Scopes** | In a grid that fits the dock, in a row or column, or placed freely. Each shows a name label, optionally a colored frame to group the scopes of one camera. Hover one for quick controls: intensity, grid, color, gain, shape and full size. |
+| 11 | **Quick controls** | Hover a scope: intensity, grid, color, gain (1x, 2x, 5x), shape and full size. |
 | 9 | **Options panel** | Right-click a scope: name, source, type, shape (auto, fill, 16:9, 4:3, 1:1), tile color, graticule and all its options, markers, order, maximize, projector, delete and duplicate. |
 
 ## The scopes

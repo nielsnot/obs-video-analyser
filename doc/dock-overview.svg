@@ -15,13 +15,15 @@
     <text x="306" y="62">▭</text><text x="326" y="62">◯</text><text x="346" y="62">⊕</text>
     <text x="368" y="62">↶</text><text x="388" y="62">✕</text>
     <text x="414" y="62">◉ Snapshot</text><text x="496" y="62">⇆ Compare</text>
+    <text x="572" y="62">☺</text><text x="596" y="62">⤓</text><text x="620" y="62">⊞</text>
   </g>
 
   <!-- ROI view -->
   <rect x="52" y="88" width="316" height="178" fill="#2a3540"/>
   <rect x="52" y="88" width="316" height="178" fill="#000" opacity="0.45"/>
   <ellipse cx="200" cy="172" rx="58" ry="58" fill="#5d7a90"/>
-  <ellipse cx="200" cy="172" rx="58" ry="58" fill="none" stroke="#2fe05a" stroke-width="2"/>
+  <ellipse cx="200" cy="172" rx="58" ry="58" fill="none" stroke="#40e0f0" stroke-width="2"/>
+  <text x="200" y="244" font-size="9" fill="#40e0f0" text-anchor="middle">face</text>
   <g stroke="#fff" stroke-width="1.5"><line x1="290" y1="130" x2="304" y2="130"/><line x1="297" y1="123" x2="297" y2="137"/></g>
   <rect x="306" y="120" width="58" height="22" rx="3" fill="#101012" opacity="0.85"/>
   <rect x="309" y="124" width="12" height="14" fill="#c69a7a"/>
@@ -29,16 +31,25 @@
   <rect x="58" y="94" width="34" height="16" rx="3" fill="#000" opacity="0.6"/><text x="63" y="106" font-size="11" fill="#fff">ROI</text>
 
   <!-- waveform RGB parade -->
-  <rect x="376" y="88" width="316" height="178" fill="#050506"/>
+  <rect x="376" y="88" width="316" height="178" fill="#050506" stroke="#e8b030" stroke-width="2"/>
   <g stroke="#ffbf00" stroke-opacity="0.35"><line x1="376" y1="110" x2="692" y2="110"/><line x1="376" y1="152" x2="692" y2="152"/><line x1="376" y1="194" x2="692" y2="194"/><line x1="376" y1="236" x2="692" y2="236"/></g>
   <path d="M380 220 Q420 140 460 170 T478 150" stroke="#ff6a6a" stroke-width="10" fill="none" opacity="0.55"/>
   <path d="M484 210 Q520 130 560 160 T584 140" stroke="#40ff40" stroke-width="10" fill="none" opacity="0.55"/>
   <path d="M588 230 Q620 160 660 190 T688 170" stroke="#8a8aff" stroke-width="10" fill="none" opacity="0.55"/>
   <rect x="382" y="94" width="74" height="16" rx="3" fill="#000" opacity="0.6"/><text x="387" y="106" font-size="11" fill="#fff">RGB parade</text>
-  <text x="380" y="114" font-size="9" fill="#ffd060">100%</text><text x="380" y="240" font-size="9" fill="#ffd060">0%</text>
+  <text x="380" y="114" font-size="9" fill="#ffd060">100%</text>
+  <g font-size="8" fill="#e8e8ec">
+    <rect x="384" y="240" width="300" height="20" rx="3" fill="#141418" opacity="0.92"/>
+    <text x="390" y="253">Int</text><rect x="406" y="249" width="50" height="2" fill="#3a3a40"/><rect x="406" y="249" width="30" height="2" fill="#6fcf86"/><circle cx="436" cy="250" r="3.5" fill="#f0f0f2"/>
+    <rect x="462" y="243" width="30" height="14" rx="2" fill="#3d5c45"/><text x="477" y="253" text-anchor="middle">Grid</text>
+    <rect x="496" y="243" width="34" height="14" rx="2" fill="#2a2a2f"/><text x="513" y="253" text-anchor="middle">Color</text>
+    <rect x="534" y="243" width="44" height="14" rx="2" fill="#3d5c45"/><text x="556" y="253" text-anchor="middle">Gain 2x</text>
+    <rect x="582" y="243" width="34" height="14" rx="2" fill="#2a2a2f"/><text x="599" y="253" text-anchor="middle">16:9</text>
+    <rect x="620" y="243" width="30" height="14" rx="2" fill="#2a2a2f"/><text x="635" y="253" text-anchor="middle">Full</text>
+  </g><text x="380" y="240" font-size="9" fill="#ffd060">0%</text>
 
   <!-- vectorscope -->
-  <rect x="52" y="274" width="210" height="274" fill="#050506"/>
+  <rect x="52" y="274" width="210" height="274" fill="#050506" stroke="#e8b030" stroke-width="2"/>
   <circle cx="157" cy="411" r="92" fill="none" stroke="#ffbf00" stroke-opacity="0.6"/>
   <circle cx="157" cy="411" r="69" fill="none" stroke="#ffbf00" stroke-opacity="0.25"/>
   <circle cx="157" cy="411" r="46" fill="none" stroke="#ffbf00" stroke-opacity="0.25"/>
@@ -81,6 +92,7 @@
       <path d="M455 56 C470 50 600 100 720 190"/><path d="M230 172 C400 260 600 230 720 230"/>
       <path d="M600 140 C650 140 680 260 720 270"/><path d="M157 330 C300 520 600 330 720 310"/>
       <path d="M470 420 C600 470 650 360 720 350"/><path d="M692 300 C705 300 710 390 720 390"/>
+      <path d="M600 56 C650 30 700 380 720 430"/><path d="M684 250 C700 260 705 460 720 470"/>
     </g>
     <text x="728" y="74">1  Views (tabs)</text>
     <text x="728" y="114">2  Add a scope</text>
@@ -91,6 +103,9 @@
     <text x="728" y="314">7  Vectorscope with ring scale</text>
     <text x="728" y="354">8  False color table</text>
     <text x="728" y="394">9  Options panel (right-click)</text>
+    <text x="728" y="434">10 Follow faces, export, arrange</text>
+    <text x="728" y="474">11 Quick controls (hover)</text>
   </g>
-  <text x="728" y="440" font-size="11" fill="#8d8d96">Schematic, not a screenshot</text>
+  <text x="728" y="510" font-size="11" fill="#8d8d96">Schematic, not a screenshot</text>
+  <text x="728" y="528" font-size="11" fill="#8d8d96">Yellow frames: tile color per camera</text>
 </svg>
