@@ -106,7 +106,9 @@ jobs:
       - name: 'Report face following'
         if: always()
         shell: bash
-        run: { grep -rh "following faces" logs 2>/dev/null | tail -n 6; grep -rhE "staging [0-9]|waveform input" logs 2>/dev/null | tail -n 6; } | sed 's/^/::notice::/' || true
+        run: |
+          { grep -rh "following faces" logs 2>/dev/null | tail -n 6
+            grep -rhE "staging [0-9]|waveform input" logs 2>/dev/null | tail -n 6; } | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: failure()
@@ -309,7 +311,9 @@ jobs:
       - name: 'Report face following'
         if: always()
         shell: bash
-        run: { grep -rh "following faces" logs 2>/dev/null | tail -n 6; grep -rhE "staging [0-9]|waveform input" logs 2>/dev/null | tail -n 6; } | sed 's/^/::notice::/' || true
+        run: |
+          { grep -rh "following faces" logs 2>/dev/null | tail -n 6
+            grep -rhE "staging [0-9]|waveform input" logs 2>/dev/null | tail -n 6; } | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: ${{ failure() || steps.onsdriver.outcome == 'failure' }}
@@ -412,7 +416,9 @@ jobs:
       - name: 'Report face following'
         if: always()
         shell: bash
-        run: { grep -rh "following faces" logs 2>/dev/null | tail -n 6; grep -rhE "staging [0-9]|waveform input" logs 2>/dev/null | tail -n 6; } | sed 's/^/::notice::/' || true
+        run: |
+          { grep -rh "following faces" logs 2>/dev/null | tail -n 6
+            grep -rhE "staging [0-9]|waveform input" logs 2>/dev/null | tail -n 6; } | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: failure()
@@ -507,14 +513,21 @@ jobs:
 
           See the [README](https://github.com/${{ github.repository }}#readme) for a quick start guide.
           NOTES
+          echo "::notice::packages: $(ls packages | tr '\n' ' ')"
+          set +e
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --clobber > publish.log 2>&1
           else
             gh release create "$TAG" packages/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "Video Analyser $TAG" \
-              --notes-file notes.md
+              --notes-file notes.md > publish.log 2>&1
+          fi
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::publish failed: $(tail -c 1500 publish.log | tr '\n' ' ')"
+            exit $rc
           fi
 
       - name: Refresh release notes from the changelog
