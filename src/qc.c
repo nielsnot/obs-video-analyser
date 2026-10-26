@@ -742,7 +742,7 @@ static void qc_render(void *data, gs_effect_t *effect)
 	if (display == QC_DISPLAY_BOTH)
 		render_timeline(src, &ts, hist, head, window, f.colorspace, (float)QC_H, (float)QC_TL_H);
 	const float H = (float)QC_H;
-	const float px = 12.0f;
+	const float px = 14.0f;
 	const float lh = (px + 5.0f) * ts.uy; // line height
 	const float pad = 8.0f * ts.ux;
 	float y = 6.0f * ts.uy;

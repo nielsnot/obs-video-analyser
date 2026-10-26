@@ -106,7 +106,7 @@ jobs:
       - name: 'Report face following'
         if: always()
         shell: bash
-        run: grep -rh "following faces" logs 2>/dev/null | tail -n 3 | sed 's/^/::notice::/' || true
+        run: grep -rhE "following faces|staging [0-9]|waveform input" logs 2>/dev/null | tail -n 9 | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: failure()
@@ -309,7 +309,7 @@ jobs:
       - name: 'Report face following'
         if: always()
         shell: bash
-        run: grep -rh "following faces" logs 2>/dev/null | tail -n 3 | sed 's/^/::notice::/' || true
+        run: grep -rhE "following faces|staging [0-9]|waveform input" logs 2>/dev/null | tail -n 9 | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: ${{ failure() || steps.onsdriver.outcome == 'failure' }}
@@ -412,7 +412,7 @@ jobs:
       - name: 'Report face following'
         if: always()
         shell: bash
-        run: grep -rh "following faces" logs 2>/dev/null | tail -n 3 | sed 's/^/::notice::/' || true
+        run: grep -rhE "following faces|staging [0-9]|waveform input" logs 2>/dev/null | tail -n 9 | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: failure()

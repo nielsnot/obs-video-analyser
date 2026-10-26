@@ -2,6 +2,7 @@
 
 ## 0.7.5
 
+- Larger text: the dock's Text size is 150 % by default (up to 250 %), and the QC overview uses a larger base size.
 - Info tiles have no name label by default (the timecode or date says enough), and while arranging a tile's name
   is shown once, in the middle.
 - **New view** starts empty instead of with the full ROI picture; it says how to add scopes. The ROI view is in the

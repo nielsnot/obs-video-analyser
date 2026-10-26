@@ -205,7 +205,7 @@ struct scope_widget_s
 	volatile int hover_tile = -1;
 	int qb_drag_tile = -1; // dragging the intensity slider
 	float ui_scale = 1.0f; // device pixels per point, so the quick controls keep a readable size
-	int text_pct = 125;    // text size of the whole dock, in %
+	int text_pct = 150;    // text size of the whole dock, in %
 
 	// Views: only the active one has live sources; the others are kept as saved settings.
 	struct view_s
@@ -2188,7 +2188,7 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 	}
 
 	QMenu *textMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.textsize")));
-	for (int pct : {100, 125, 150, 175, 200}) {
+	for (int pct : {100, 125, 150, 175, 200, 250}) {
 		act = textMenu->addAction(QString("%1 %").arg(pct));
 		act->setCheckable(true);
 		act->setChecked(data->text_pct == pct);
@@ -3492,7 +3492,7 @@ void ScopeWidget::openTabMenu(const QPoint &pos)
 void ScopeWidget::default_properties(obs_data_t *props)
 {
 	obs_data_set_default_bool(props, "toolbar", true);
-	obs_data_set_default_int(props, "text_size", 125);
+	obs_data_set_default_int(props, "text_pct", 150);
 }
 
 void ScopeWidget::save_properties(obs_data_t *props)
@@ -3500,7 +3500,7 @@ void ScopeWidget::save_properties(obs_data_t *props)
 	storeActive();
 
 	obs_data_set_bool(props, "toolbar", toolbarVisible);
-	obs_data_set_int(props, "text_size", data->text_pct);
+	obs_data_set_int(props, "text_pct", data->text_pct);
 	obs_data_set_int(props, "active_view", data->active_view);
 
 	if (data->roi) {
@@ -3523,8 +3523,8 @@ void ScopeWidget::load_properties(obs_data_t *props)
 	const std::string roi_name = roi_name_of(this);
 
 	setToolbarVisible(obs_data_get_bool(props, "toolbar"));
-	const int text_pct = (int)obs_data_get_int(props, "text_size");
-	data->text_pct = text_pct >= 50 && text_pct <= 300 ? text_pct : 125;
+	const int text_pct = (int)obs_data_get_int(props, "text_pct");
+	data->text_pct = text_pct >= 50 && text_pct <= 300 ? text_pct : 150;
 
 	if (!data->roi) {
 		OBSDataAutoRelease prop = obs_data_get_obj(props, ROI_KEY "-prop");

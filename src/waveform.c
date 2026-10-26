@@ -437,6 +437,21 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		return;
 
 	ensure_tex_buf_size(src, surface_data->width, src->w_tex_buf);
+	if (surface_data->yuv_data) {
+		static uint64_t last_log;
+		const uint64_t now = os_gettime_ns();
+		if (now - last_log > 3000000000ULL) {
+			last_log = now;
+			uint64_t n = 0, masked = 0;
+			for (uint32_t y = 0; y < surface_data->height; y += 4)
+				for (uint32_t x = 0; x < surface_data->width; x += 4, n++)
+					masked +=
+						surface_data->yuv_data[(size_t)surface_data->linesize * y + x * 4 + 3] ==
+						0;
+			blog(LOG_INFO, "[" PLUGIN_NAME "] waveform input %ux%u, %.0f%% masked", surface_data->width,
+			     surface_data->height, n ? 100.0 * masked / n : 0.0);
+		}
+	}
 
 	PROFILE_START(prof_draw_waveform_name);
 	wvs_draw_waveform(src, src->tex_buf[src->w_tex_buf], surface_data);
