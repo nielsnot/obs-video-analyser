@@ -229,9 +229,10 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 				const uint64_t now = os_gettime_ns();
 				if (now - last_log > 3000000000ULL) {
 					last_log = now;
-					blog(LOG_INFO, "[" PLUGIN_NAME "] staging %ux%u at %u,%u, mask %s, flags 0x%x",
-					     item->width, item->height, x, y, src->mask->tex ? "on" : "off",
-					     item->flags);
+					blog(LOG_INFO,
+					     "[" PLUGIN_NAME "] staging %ux%u at %u,%u, mask %p %s, flags 0x%x",
+					     item->width, item->height, x, y, (void *)src->mask,
+					     src->mask->tex ? "on" : "off", item->flags);
 				}
 			}
 			cm_set_signal_params(src->effect, src->colorspace);

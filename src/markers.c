@@ -1,6 +1,7 @@
 #include <obs-module.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 #include "plugin-macros.generated.h"
 #include "markers.h"
 
@@ -250,6 +251,14 @@ int cm_markers_store(obs_source_t *src, int index, int kind, float a, float b, b
 		obs_data_t *d = obs_data_array_item(array, index);
 		if (obs_data_get_int(d, "kind") == CM_MARKER_LEVEL) {
 			obs_data_set_double(d, "level", a * 100.0);
+			// a marker named after its level ("80%") is renamed to the new level
+			const char *name = obs_data_get_string(d, "name");
+			char *end = NULL;
+			if (name && *name && (strtod(name, &end), end && end != name && end[0] == '%' && !end[1])) {
+				char buf[32];
+				snprintf(buf, sizeof(buf), "%.0f%%", a * 100.0f);
+				obs_data_set_string(d, "name", buf);
+			}
 		} else {
 			obs_data_set_double(d, "hue", a);
 			if (obs_data_get_int(d, "kind") == CM_MARKER_POINT)

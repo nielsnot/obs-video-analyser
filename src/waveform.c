@@ -1,4 +1,5 @@
 #include <obs-module.h>
+#include <stdlib.h>
 #include <util/platform.h>
 #include "plugin-macros.generated.h"
 #include <graphics/matrix4.h>
@@ -904,6 +905,14 @@ static void draw_label(const struct text_scale *ts, const char *text, float x, f
 	text_draw(ts, text, x, y, px, color, align, valign);
 }
 
+/* A marker named after its level ("80%"), which follows the level when the marker is moved. */
+static bool name_is_level(const char *name)
+{
+	char *end = NULL;
+	strtod(name, &end);
+	return end && end != name && end[0] == '%' && end[1] == 0;
+}
+
 /* User markers: a line at each marker's level, in every stacked trace. */
 static void wvs_render_markers(struct wvs_source *src, float width, float height)
 {
@@ -935,9 +944,19 @@ static void wvs_render_markers(struct wvs_source *src, float width, float height
 				cm_marker_draw_point(10.0f * ts.ux, y, sel ? 0xFFFFFFFF : 0xC0FFFFFF,
 						     CM_MARKER_SHAPE_SQUARE, sel ? 14.0f : 10.0f, ts.ux, ts.uy);
 			}
-			if (k->show_label && k->name[0]) {
+			// while editing the label shows the level as it moves
+			char label[96];
+			if (src->marker_edit) {
+				if (k->name[0] && !name_is_level(k->name))
+					snprintf(label, sizeof(label), "%s  %.1f%%", k->name, k->level * 100.0f);
+				else
+					snprintf(label, sizeof(label), "%.1f%%", k->level * 100.0f);
+			} else {
+				snprintf(label, sizeof(label), "%s", k->name);
+			}
+			if ((k->show_label || src->marker_edit) && label[0]) {
 				const bool below = y - (px + 2.0f) * ts.uy < base;
-				draw_label(&ts, k->name, width - 6.0f * ts.ux,
+				draw_label(&ts, label, width - 6.0f * ts.ux,
 					   below ? y + 2.0f * ts.uy : y - 2.0f * ts.uy, px, k->color | 0xFF000000,
 					   TEXT_ALIGN_RIGHT, below ? TEXT_VALIGN_TOP : TEXT_VALIGN_BOTTOM);
 			}

@@ -2,6 +2,9 @@
 
 ## 0.7.6
 
+- **Quick controls** that do not fit next to each other in a narrow scope go to a second row instead of dropping off.
+- **Waveform markers:** while Markers is on, each label shows the level as you drag (e.g. "Skin  71.4%"), and a
+  marker named after its level ("80%") gets the new level as its name when you let go.
 - The scope options panel scrolls when it is taller than the screen, so every option stays reachable.
 - **QC** never runs out of its tile: with a large text size the text shrinks just enough for every line to fit.
 - **Text size Auto** (the new default): 200 % on a 1080 line screen and larger on taller screens such as 1440p or

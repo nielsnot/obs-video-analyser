@@ -1,5 +1,6 @@
 #include <obs-module.h>
 #include <util/platform.h>
+#include <util/threading.h>
 #include <util/darray.h>
 #include <graphics/matrix4.h>
 #include <limits.h>
@@ -350,6 +351,8 @@ static void rasterize_shape(uint8_t *buf, uint32_t w, uint32_t h, const struct r
 	}
 }
 
+static volatile long roi_frames_seen; // analyzed frames, for the face follow log
+
 static void update_mask_texture(struct roi_source *src)
 {
 	const uint32_t w = roi_get_width(src);
@@ -389,8 +392,13 @@ static void update_mask_texture(struct roi_source *src)
 		const uint64_t now = os_gettime_ns();
 		if (now - last_log > 3000000000ULL) {
 			last_log = now;
-			blog(LOG_INFO, "[" PLUGIN_NAME "] following faces: %d found, detector %s, mask %ux%u", src->n_faces,
-			     src->fd ? "on" : "off", w, h);
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME
+			     "] following faces: %d found, detector %s, mask %ux%u, mask %p tex %p dirty %d",
+			     src->n_faces, src->fd ? "on" : "off", w, h, (void *)&src->mask, (void *)src->mask.tex,
+			     (int)src->shapes_dirty);
+			blog(LOG_INFO, "[" PLUGIN_NAME "] following faces: %ld frames analyzed, flags 0x%x",
+			     os_atomic_set_long(&roi_frames_seen, 0), src->cm.flags);
 		}
 	}
 
@@ -832,6 +840,7 @@ static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 
 	if (src->pins.num)
 		read_pins(src, surface_data);
+	os_atomic_inc_long(&roi_frames_seen);
 	if (src->face_follow && src->fd && surface_data->rgb_data)
 		face_detector_submit(src->fd, surface_data->rgb_data, surface_data->width, surface_data->height,
 				     surface_data->linesize);

@@ -761,6 +761,7 @@ struct qb_item
 {
 	int kind;
 	int x0, x1;
+	int y0, y1; // the row the button is in
 };
 
 #define QB_HEIGHT 30
@@ -833,11 +834,13 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 	const src_rect_s &r = e->rect;
 	const float k = qb_scale(data);
 	auto px = [k](int v) { return (int)std::lround(v * k); };
-	if (r.x1 - r.x0 < px(140) || r.y1 - r.y0 < px(70))
+	if (r.x1 - r.x0 < px(80) || r.y1 - r.y0 < px(50))
 		return items;
 	*bar_y1 = r.y1 - px(4);
 	*bar_y0 = *bar_y1 - px(QB_HEIGHT);
 	int x = r.x0 + px(6);
+	int row_y1 = *bar_y1; // buttons that do not fit go to a row above
+	bool full = false;
 	// buttons as wide as their text, so no letter is cut off
 	const struct text_scale ts = {1.0f, 1.0f};
 	auto add = [&](int kind, int min_w) {
@@ -847,9 +850,20 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 			const float tw = text_width(&ts, label.c_str(), QB_TEXT_PX * k);
 			w = std::max(w, (int)std::ceil(tw + 16.0f * k));
 		}
-		if (x + w > r.x1 - px(6))
+		if (full)
 			return;
-		items.push_back({kind, x, x + w});
+		if (x + w > r.x1 - px(6) && x > r.x0 + px(6)) {
+			// next row up
+			row_y1 -= px(QB_HEIGHT) + px(4);
+			x = r.x0 + px(6);
+			if (row_y1 - px(QB_HEIGHT) < r.y0 + px(4)) {
+				full = true;
+				return;
+			}
+		}
+		w = std::min(w, r.x1 - px(6) - x);
+		items.push_back({kind, x, x + w, row_y1 - px(QB_HEIGHT), row_y1});
+		*bar_y0 = std::min(*bar_y0, row_y1 - px(QB_HEIGHT));
 		x += w + px(4);
 	};
 	if (type_has_intensity(e->type))
@@ -903,10 +917,13 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 	const float k = qb_scale(data);
 	const struct text_scale ts = {1.0f, 1.0f};
 	const float px = QB_TEXT_PX * k;
-	qb_fill((float)items.front().x0 - 4.0f * k, (float)y0, (float)items.back().x1 + 4.0f * k, (float)y1,
-		0xD0141418);
+	UNUSED_PARAMETER(y0);
+	UNUSED_PARAMETER(y1);
+	for (const qb_item &it : items)
+		qb_fill((float)it.x0 - 3.0f * k, (float)it.y0, (float)it.x1 + 3.0f * k, (float)it.y1, 0xD0141418);
 	for (const qb_item &it : items) {
-		const float x0 = (float)it.x0, x1 = (float)it.x1, ym = (y0 + y1) * 0.5f;
+		const float x0 = (float)it.x0, x1 = (float)it.x1, ym = (it.y0 + it.y1) * 0.5f;
+		const int y0 = it.y0, y1 = it.y1;
 		bool on = false;
 		std::string label;
 		switch (it.kind) {
@@ -1812,7 +1829,7 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 		const std::vector<qb_item> items = qb_layout(data, tile, &by0, &by1);
 		const qb_item *hit = nullptr;
 		for (const qb_item &it : items)
-			if (y >= by0 && y <= by1 && x >= it.x0 && x <= it.x1)
+			if (y >= it.y0 && y <= it.y1 && x >= it.x0 && x <= it.x1)
 				hit = &it;
 		scope_entry *e = hit ? data->entries[tile - 1] : nullptr;
 		pthread_mutex_unlock(&data->mutex);
