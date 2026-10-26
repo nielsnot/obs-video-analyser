@@ -18,6 +18,7 @@
 enum dm_color_e {
 	DM_COLOR_GREEN = 0,
 	DM_COLOR_WHITE = 1,
+	DM_COLOR_PIXEL = 2, // the trace in the colors of the pixels
 };
 
 struct dm_source
@@ -27,7 +28,10 @@ struct dm_source
 	gs_texture_t *tex;
 	uint8_t *tex_buf[2];
 	volatile int w_tex_buf;
+	volatile bool buf_color[2]; // the buffer holds BGRA colors and counts instead of counts only
+	gs_texture_t *tex_color;
 	gs_effect_t *effect;
+	gs_effect_t *effect_color; // waveform.effect, for its DrawColorize
 
 	int intensity;
 	int trace_color;
@@ -54,6 +58,7 @@ static void *dm_create(obs_data_t *settings, obs_source_t *source)
 
 	obs_enter_graphics();
 	src->effect = create_effect_from_module_file("vectorscope.effect");
+	src->effect_color = create_effect_from_module_file("waveform.effect");
 	obs_leave_graphics();
 
 	dm_update(src, settings);
@@ -66,6 +71,7 @@ static void dm_destroy(void *data)
 
 	obs_enter_graphics();
 	gs_texture_destroy(src->tex);
+	gs_texture_destroy(src->tex_color);
 	obs_leave_graphics();
 
 	cm_destroy(&src->cm);
@@ -111,6 +117,7 @@ static obs_properties_t *dm_get_properties(void *data)
 				       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(prop, obs_module_text("Green"), DM_COLOR_GREEN);
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.ColorType.White"), DM_COLOR_WHITE);
+	obs_property_list_add_int(prop, obs_module_text("Diamond.Prop.TraceColor.Pixel"), DM_COLOR_PIXEL);
 
 	obs_properties_add_bool(props, "show_graticule", obs_module_text("Graticule"));
 	obs_properties_add_bool(props, "labels", obs_module_text("Diamond.Prop.Labels"));
@@ -170,16 +177,60 @@ static void dm_draw(uint8_t *dbuf, const struct cm_surface_data *surface_data)
 	}
 }
 
+static inline void add_color(uint8_t *d, const uint8_t *c)
+{
+	// a running average of the colors that land in the bin, the count in alpha
+	const int n = d[3] < 255 ? d[3] + 1 : 255;
+	d[3] = (uint8_t)n;
+	for (int k = 0; k < 3; k++)
+		d[k] = (uint8_t)(d[k] + ((int)c[k] - (int)d[k]) / n);
+}
+
+/* As dm_draw, but every bin is BGRA: the average color of its pixels and their count. */
+static void dm_draw_color(uint8_t *dbuf, const struct cm_surface_data *surface_data)
+{
+	memset(dbuf, 0, DM_SIZE * DM_SIZE * 4);
+
+	const uint8_t *rgb = surface_data->rgb_data;
+	for (uint32_t y = 0; y < surface_data->height; y++) {
+		const uint8_t *p = rgb + (size_t)surface_data->linesize * y;
+		for (uint32_t x = 0; x < surface_data->width; x++, p += 4) {
+			if (!p[3])
+				continue;
+			const int b = p[0], g = p[1], r = p[2];
+			int ux = 128 + (b - g) / 2, uy = 127 - (b + g) / 4;
+			int lx = 128 + (r - g) / 2, ly = 128 + (r + g) / 4;
+			if (ux > 255)
+				ux = 255;
+			if (lx > 255)
+				lx = 255;
+			if (uy < 0)
+				uy = 0;
+			if (ly > 255)
+				ly = 255;
+			add_color(dbuf + (uy * DM_SIZE + ux) * 4, p);
+			add_color(dbuf + (ly * DM_SIZE + lx) * 4, p);
+		}
+	}
+}
+
 static void dm_surface_cb(void *data, struct cm_surface_data *surface_data)
 {
 	struct dm_source *src = data;
 	if (!surface_data->rgb_data || !surface_data->width)
 		return;
 
-	if (!src->tex_buf[src->w_tex_buf])
-		src->tex_buf[src->w_tex_buf] = bzalloc(DM_SIZE * DM_SIZE);
+	const int w = src->w_tex_buf;
+	if (!src->tex_buf[w])
+		src->tex_buf[w] = bzalloc(DM_SIZE * DM_SIZE * 4); // room for the color trace too
 
-	dm_draw(src->tex_buf[src->w_tex_buf], surface_data);
+	if (src->trace_color == DM_COLOR_PIXEL) {
+		dm_draw_color(src->tex_buf[w], surface_data);
+		src->buf_color[w] = true;
+	} else {
+		dm_draw(src->tex_buf[w], surface_data);
+		src->buf_color[w] = false;
+	}
 	src->w_tex_buf ^= 1;
 }
 
@@ -239,7 +290,19 @@ static void dm_render(void *data, gs_effect_t *effect)
 	cm_render_target(&src->cm);
 
 	const int r_tex_buf = src->w_tex_buf ^ 1;
-	if (src->tex_buf[r_tex_buf] && src->effect) {
+	if (src->tex_buf[r_tex_buf] && src->buf_color[r_tex_buf] && src->effect_color) {
+		const uint8_t *buf = src->tex_buf[r_tex_buf];
+		if (!src->tex_color)
+			src->tex_color = gs_texture_create(DM_SIZE, DM_SIZE, GS_BGRA, 1, &buf, GS_DYNAMIC);
+		else
+			gs_texture_set_image(src->tex_color, buf, DM_SIZE * 4, false);
+		gs_effect_t *e = src->effect_color;
+		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->tex_color);
+		// the count in alpha is a fraction of 255 here, so the same intensity looks alike in both modes
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"), (float)src->intensity);
+		while (gs_effect_loop(e, "DrawColorize"))
+			gs_draw_sprite(src->tex_color, 0, DM_SIZE, DM_SIZE);
+	} else if (src->tex_buf[r_tex_buf] && src->effect) {
 		const uint8_t *buf = src->tex_buf[r_tex_buf];
 		if (!src->tex)
 			src->tex = gs_texture_create(DM_SIZE, DM_SIZE, GS_R8, 1, &buf, GS_DYNAMIC);

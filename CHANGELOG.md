@@ -16,6 +16,8 @@
   again), or click the close-up or turn the mouse wheel to step through them. The faces are numbered and the
   close-up says which one it shows ("Live 2/3"). New layout with more room for the text, and a Text size option
   (130 % by default).
+- **Diamond:** trace color "Picture colors" shows each point in the colors of the pixels that land there, like
+  the colored vectorscope; also with the Color quick control.
 - **Info:** a tile now shows one thing as a single line that fills it: timecode (default), clock, date, video
   format or your text; "All (stacked)" keeps the old tile. `+ Scope → Info and timecode` lets you pick which.
 

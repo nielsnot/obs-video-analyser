@@ -806,7 +806,7 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 		add(QB_INTENSITY, 120);
 	if (grid_keys_for(e->type))
 		add(QB_GRID, 40);
-	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
+	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM || e->type == TYPE_DIAMOND)
 		add(QB_COLORS, 40);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
 		add(QB_GAIN, 56);
@@ -868,6 +868,7 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 			break;
 		case QB_COLORS:
 			on = e->type == TYPE_VECTORSCOPE ? obs_data_get_int(s, "color_type") != 0
+			     : e->type == TYPE_DIAMOND   ? obs_data_get_int(s, "trace_color") == 2
 							 : obs_data_get_bool(s, "colorize");
 			break;
 		case QB_GAIN:
@@ -1424,6 +1425,8 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 	case QB_COLORS:
 		if (e->type == TYPE_VECTORSCOPE)
 			obs_data_set_int(d, "color_type", obs_data_get_int(s, "color_type") ? 0 : 1);
+		else if (e->type == TYPE_DIAMOND)
+			obs_data_set_int(d, "trace_color", obs_data_get_int(s, "trace_color") == 2 ? 0 : 2);
 		else
 			obs_data_set_bool(d, "colorize", !obs_data_get_bool(s, "colorize"));
 		break;
