@@ -45,6 +45,10 @@ float text_draw(const struct text_scale *scale, const char *text, float x, float
 /* Width the text would take, in source units. */
 float text_width(const struct text_scale *scale, const char *text, float px_size);
 
+/* Device pixels per point of the display being drawn (2 on Retina); text sizes are in points while it is set.
+ * The dock sets it while it draws and puts it back to 1 afterwards. Graphics thread only. */
+void text_set_ui_scale(float scale);
+
 #ifdef __cplusplus
 }
 #endif

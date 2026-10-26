@@ -176,6 +176,10 @@ with the faces marked, the largest face up close, the scene levels and, for that
 tone line and saturation, with written advice. Detection runs on the CPU a few times per second on a picture 320
 pixels wide.
 
+With more than one face, click a face in the picture to measure that one (click beside the faces to follow the
+largest again), or click the close-up or turn the mouse wheel to step through them. `Text size` in the options makes
+the text larger.
+
 `◉ Snapshot` also keeps the face. Switch to another camera or angle and, with `Compare` on, the kept face appears
 next to the live one with the differences (luma and about how many stops, hue, saturation) and whether it matches.
 

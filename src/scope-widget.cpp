@@ -430,6 +430,8 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 
 	if (pthread_mutex_trylock(&data->mutex))
 		return;
+	// text in points, so it reads the same on Retina and HiDPI screens
+	text_set_ui_scale(data->ui_scale);
 
 	const int total = n_tiles(data);
 	for (int t = 0; t < total; t++)
@@ -620,6 +622,7 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 	// Leave no vertex buffer of ours current for libobs' own draws.
 	gs_load_vertexbuffer(NULL);
 
+	text_set_ui_scale(1.0f);
 	pthread_mutex_unlock(&data->mutex);
 }
 
@@ -731,6 +734,44 @@ static bool type_has_intensity(int type)
 	}
 }
 
+static const char *aspect_label(int aspect)
+{
+	switch (aspect) {
+	case ASPECT_FILL:
+		return "Fill";
+	case ASPECT_16_9:
+		return "16:9";
+	case ASPECT_4_3:
+		return "4:3";
+	case ASPECT_1_1:
+		return "1:1";
+	default:
+		return "Auto";
+	}
+}
+
+/* The text on a quick control button. */
+static std::string qb_label(const scope_widget_s *data, const scope_entry *e, int kind)
+{
+	OBSDataAutoRelease s = obs_source_get_settings(e->src);
+	switch (kind) {
+	case QB_GRID:
+		return "Grid";
+	case QB_COLORS:
+		return "Color";
+	case QB_GAIN:
+		return "Gain " + std::to_string(std::max(1LL, obs_data_get_int(s, "gain"))) + "x";
+	case QB_ASPECT:
+		return aspect_label(e->aspect);
+	case QB_MAX:
+		return data->solo >= 0 ? "Back" : "Full";
+	default:
+		return "Int";
+	}
+}
+
+#define QB_TEXT_PX 13.0f
+
 /* The bar at the bottom of a scope tile: which controls, and where (widget pixels). */
 static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int *bar_y0, int *bar_y1)
 {
@@ -746,39 +787,31 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 	*bar_y1 = r.y1 - px(4);
 	*bar_y0 = *bar_y1 - px(QB_HEIGHT);
 	int x = r.x0 + px(6);
-	auto add = [&](int kind, int w) {
-		if (x + px(w) > r.x1 - px(6))
+	// buttons as wide as their text, so no letter is cut off
+	const struct text_scale ts = {1.0f, 1.0f};
+	auto add = [&](int kind, int min_w) {
+		int w = px(min_w);
+		if (kind != QB_INTENSITY) {
+			const std::string label = qb_label(data, e, kind);
+			const float tw = text_width(&ts, label.c_str(), QB_TEXT_PX * k);
+			w = std::max(w, (int)std::ceil(tw + 16.0f * k));
+		}
+		if (x + w > r.x1 - px(6))
 			return;
-		items.push_back({kind, x, x + px(w)});
-		x += px(w) + px(4);
+		items.push_back({kind, x, x + w});
+		x += w + px(4);
 	};
 	if (type_has_intensity(e->type))
 		add(QB_INTENSITY, 120);
 	if (grid_keys_for(e->type))
-		add(QB_GRID, 46);
+		add(QB_GRID, 40);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
-		add(QB_COLORS, 52);
+		add(QB_COLORS, 40);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
-		add(QB_GAIN, 64);
-	add(QB_ASPECT, 50);
-	add(QB_MAX, 44);
+		add(QB_GAIN, 56);
+	add(QB_ASPECT, 40);
+	add(QB_MAX, 40);
 	return items;
-}
-
-static const char *aspect_label(int aspect)
-{
-	switch (aspect) {
-	case ASPECT_FILL:
-		return "Fill";
-	case ASPECT_16_9:
-		return "16:9";
-	case ASPECT_4_3:
-		return "4:3";
-	case ASPECT_1_1:
-		return "1:1";
-	default:
-		return "Auto";
-	}
 }
 
 static void qb_fill(float x0, float y0, float x1, float y1, uint32_t color)
@@ -811,7 +844,7 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 	OBSDataAutoRelease s = obs_source_get_settings(e->src);
 	const float k = std::max(1.0f, data->ui_scale);
 	const struct text_scale ts = {1.0f, 1.0f};
-	const float px = 13.0f * k;
+	const float px = QB_TEXT_PX * k;
 	qb_fill((float)items.front().x0 - 4.0f * k, (float)y0, (float)items.back().x1 + 4.0f * k, (float)y1,
 		0xD0141418);
 	for (const qb_item &it : items) {
@@ -830,28 +863,20 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 			continue;
 		}
 		case QB_GRID:
-			label = "Grid";
 			on = grid_visible(e->src, grid_keys_for(e->type));
 			break;
 		case QB_COLORS:
-			label = "Color";
 			on = e->type == TYPE_VECTORSCOPE ? obs_data_get_int(s, "color_type") != 0
 							 : obs_data_get_bool(s, "colorize");
 			break;
-		case QB_GAIN: {
-			const long long g = std::max(1LL, obs_data_get_int(s, "gain"));
-			label = "Gain " + std::to_string(g) + "x";
-			on = g > 1;
+		case QB_GAIN:
+			on = obs_data_get_int(s, "gain") > 1;
 			break;
-		}
 		case QB_ASPECT:
-			label = aspect_label(e->aspect);
 			on = e->aspect != ASPECT_AUTO;
 			break;
-		case QB_MAX:
-			label = data->solo >= 0 ? "Back" : "Full";
-			break;
 		}
+		label = qb_label(data, e, it.kind);
 		qb_fill(x0, (float)y0 + 3.0f * k, x1, (float)y1 - 3.0f * k, on ? 0xFF3D5C45 : 0xFF2A2A2F);
 		text_draw(&ts, label.c_str(), (x0 + x1) * 0.5f, ym, px, 0xFFF4F4F6, TEXT_ALIGN_CENTER,
 			  TEXT_VALIGN_MIDDLE);
@@ -885,6 +910,7 @@ ScopeWidget::ScopeWidget(QWidget *parent) : NorisQTDisplay(parent)
 	QObject::installEventFilter(new ScopeWidgetInteractiveEventFilter(this));
 
 	data = new scope_widget_s;
+	data->ui_scale = (float)devicePixelRatioF();
 	pthread_mutex_init(&data->mutex, NULL);
 
 	connect(this, &NorisQTDisplay::DisplayCreated, this, &ScopeWidget::RegisterCallbackToDisplay);
@@ -1072,6 +1098,25 @@ void ScopeWidget::removeScope(int tile)
 void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 {
 	for (int t = 0; t < N_TYPES; t++) {
+		if (!strcmp(scope_types[t].key, "info")) {
+			// one line per tile: timecode, clock, date, video format, text, or all of them stacked
+			QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+			static const char *items[][2] = {
+				{"timecode", "Info.Prop.Timecode"}, {"clock", "Info.Prop.Clock"},
+				{"date", "Info.Prop.Date"},         {"video", "Info.Prop.Video"},
+				{"text", "Info.Prop.Text"},         {"all", "Info.Prop.All"},
+			};
+			for (const auto &it : items) {
+				QAction *act = sub->addAction(QString::fromUtf8(obs_module_text(it[1])));
+				const std::string item = it[0];
+				connect(act, &QAction::triggered, this, [this, t, item]() {
+					OBSDataAutoRelease d = obs_data_create();
+					obs_data_set_string(d, "item", item.c_str());
+					addScope(t, d);
+				});
+			}
+			continue;
+		}
 		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
 		connect(act, &QAction::triggered, this, [this, t]() { addScope(t); });
 	}

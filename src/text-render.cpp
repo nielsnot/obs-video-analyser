@@ -149,13 +149,20 @@ extern "C" void text_render_free(void)
 	obs_leave_graphics();
 }
 
+static float ui_scale = 1.0f;
+
+extern "C" void text_set_ui_scale(float scale)
+{
+	ui_scale = scale >= 1.0f && scale <= 4.0f ? scale : 1.0f;
+}
+
 extern "C" struct text_scale text_scale_from_viewport(float source_width, float source_height)
 {
 	struct gs_rect vp;
 	gs_get_viewport(&vp);
 	text_scale s;
-	s.ux = vp.cx > 0 ? source_width / (float)vp.cx : 1.0f;
-	s.uy = vp.cy > 0 ? source_height / (float)vp.cy : 1.0f;
+	s.ux = (vp.cx > 0 ? source_width / (float)vp.cx : 1.0f) * ui_scale;
+	s.uy = (vp.cy > 0 ? source_height / (float)vp.cy : 1.0f) * ui_scale;
 	return s;
 }
 

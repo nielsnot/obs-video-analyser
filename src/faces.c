@@ -26,7 +26,7 @@
 #endif
 
 #define FC_W 1200
-#define FC_H 260
+#define FC_H 450
 #define SKIN_LINE_DEG 123.0f // the skin tone (I) line on the vectorscope
 
 /* ---------- probe: one camera ---------- */
@@ -40,6 +40,7 @@ struct face_stats
 	// faces
 	int n_faces;
 	struct face_box faces[FACE_MAX];
+	int sel; // the face measured: index into faces
 	bool skin_valid;
 	float skin_luma; // median, %
 	float skin_hue;  // degrees on the vectorscope, counter-clockwise from +U
@@ -53,6 +54,7 @@ struct probe_source
 	struct face_detector *fd;
 	pthread_mutex_t mutex;
 	struct face_stats stats;
+	volatile int want_id; // the face to measure; 0 for the largest
 };
 
 static const char *probe_get_name(void *unused)
@@ -151,8 +153,13 @@ static void probe_surface_cb(void *data, struct cm_surface_data *sd)
 
 	st.n_faces = face_detector_get(p->fd, st.faces, FACE_MAX);
 	if (st.n_faces > 0) {
-		// skin of the largest face: cheeks and nose, between the eyes and the mouth
-		const struct face_box *f = st.faces;
+		// skin of the chosen face (the largest by default): cheeks and nose, between the eyes and the mouth
+		const int want = p->want_id;
+		for (int k = 0; want && k < st.n_faces; k++) {
+			if (st.faces[k].id == want)
+				st.sel = k;
+		}
+		const struct face_box *f = st.faces + st.sel;
 		const int x0 = (int)((f->x + f->w * 0.25f) * sd->width), x1 = (int)((f->x + f->w * 0.75f) * sd->width);
 		const int y0 = (int)((f->y + f->h * 0.40f) * sd->height),
 			  y1 = (int)((f->y + f->h * 0.75f) * sd->height);
@@ -231,6 +238,15 @@ struct faces_source
 	struct face_stats ref;
 	bool have_ref;
 	gs_texture_t *ref_tex;
+
+	// which face: 0 follows the largest, otherwise the tracker id clicked or stepped to
+	int sel_id;
+	int text_pct;
+	// where the picture and the close-up were drawn, for clicks (source units)
+	float pic_x0, pic_y0, pic_w, pic_h;
+	float live_x0, live_y0, live_size;
+	struct face_box shown[FACE_MAX];
+	int n_shown;
 };
 
 static const char *faces_get_name(void *unused)
@@ -255,6 +271,9 @@ static void faces_update(void *data, obs_data_t *settings)
 	struct faces_source *src = data;
 	src->scale = (int)obs_data_get_int(settings, "target_scale");
 	src->advice = obs_data_get_bool(settings, "face_advice");
+	src->text_pct = (int)obs_data_get_int(settings, "face_text");
+	if (src->text_pct < 50)
+		src->text_pct = 100;
 	const char *name = obs_data_get_string(settings, "target_name");
 	if (!name)
 		name = "";
@@ -301,6 +320,7 @@ static void faces_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "target_scale", 2);
 	obs_data_set_default_bool(settings, "face_advice", true);
+	obs_data_set_default_int(settings, "face_text", 130);
 }
 
 static obs_properties_t *faces_get_properties(void *data)
@@ -312,6 +332,8 @@ static obs_properties_t *faces_get_properties(void *data)
 	property_list_add_sources(prop, NULL);
 	obs_properties_add_int(props, "target_scale", obs_module_text("Scale"), 1, 16, 1);
 	obs_properties_add_bool(props, "face_advice", obs_module_text("Faces.Advice"));
+	prop = obs_properties_add_int_slider(props, "face_text", obs_module_text("Faces.TextSize"), 80, 250, 10);
+	obs_property_int_set_suffix(prop, "%");
 	return props;
 }
 
@@ -507,14 +529,15 @@ static void assessment(const struct face_stats *s, const struct face_stats *ref,
 }
 
 static void face_panel(const struct text_scale *ts, gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-		       float px, float py, float size, const char *label, uint32_t color)
+		       float px, float py, float size, const char *label, uint32_t color, float tk)
 {
 	fill(px, py, px + size, py + size, 0xFF000000);
 	if (tex && w && h)
 		draw_tex_region(tex, x, y, w, h, px, py, size, size);
 	outline(px, py, px + size, py + size, color);
-	fill(px, py + size - 16.0f * ts->uy, px + size, py + size, 0xA0000000);
-	text_draw(ts, label, px + size * 0.5f, py + size - 2.0f * ts->uy, 10.0f, color, TEXT_ALIGN_CENTER,
+	const float lh = 11.0f * tk + 6.0f;
+	fill(px, py + size - lh * ts->uy, px + size, py + size, 0xA0000000);
+	text_draw(ts, label, px + size * 0.5f, py + size - 3.0f * ts->uy, 11.0f * tk, color, TEXT_ALIGN_CENTER,
 		  TEXT_VALIGN_BOTTOM);
 }
 
@@ -536,8 +559,23 @@ static void faces_render(void *data, gs_effect_t *effect)
 	}
 	gs_texture_t *tex = p ? cm_bypass_get_texture(&p->cm) : NULL;
 	const uint32_t cw = p ? cm_bypass_get_width(&p->cm) : 0, ch = p ? cm_bypass_get_height(&p->cm) : 0;
+
+	// the chosen face; back to the largest when it is gone
+	if (src->sel_id) {
+		bool found = false;
+		for (int k = 0; k < st.n_faces; k++)
+			found |= st.faces[k].id == src->sel_id;
+		if (!found && st.valid)
+			src->sel_id = 0;
+	}
+	if (p)
+		p->want_id = src->sel_id;
+	memcpy(src->shown, st.faces, sizeof(src->shown));
+	src->n_shown = st.n_faces;
+	const int sel = st.sel >= 0 && st.sel < st.n_faces ? st.sel : 0;
+
 	uint32_t fx = 0, fy = 0, fw = 0, fh = 0;
-	const bool face = tex && cw && ch && st.n_faces > 0 && face_crop(st.faces, cw, ch, &fx, &fy, &fw, &fh);
+	const bool face = tex && cw && ch && st.n_faces > 0 && face_crop(st.faces + sel, cw, ch, &fx, &fy, &fw, &fh);
 
 	// snapshot: keep the face crop and the measurements
 	if (src->want_snapshot) {
@@ -552,34 +590,45 @@ static void faces_render(void *data, gs_effect_t *effect)
 		}
 	}
 	const bool show_ref = src->have_ref && src->compare;
+	const float tk = src->text_pct / 100.0f;
 
-	// the picture with the faces marked
-	const float y0 = 8.0f * ts.uy, y1 = H - 8.0f * ts.uy;
-	const float th = y1 - y0, tw = th * 16.0f / 9.0f, tx = 8.0f * ts.ux;
-	fill(tx, y0, tx + tw, y1, 0xFF000000);
+	// left: the picture with the faces marked, the chosen face up close and the kept one below it
+	const float m = 8.0f;
+	const float tw = 500.0f, th = tw * 9.0f / 16.0f, tx = m, ty = m;
+	fill(tx, ty, tx + tw, ty + th, 0xFF000000);
 	if (tex && cw && ch)
-		draw_tex_region(tex, 0, 0, cw, ch, tx, y0, tw, th);
+		draw_tex_region(tex, 0, 0, cw, ch, tx, ty, tw, th);
 	for (int k = 0; k < st.n_faces; k++) {
 		const struct face_box *f = st.faces + k;
-		outline(tx + f->x * tw, y0 + f->y * th, tx + (f->x + f->w) * tw, y0 + (f->y + f->h) * th,
-			k == 0 ? 0xFF6FCF86 : 0xFFB8B8C0);
+		outline(tx + f->x * tw, ty + f->y * th, tx + (f->x + f->w) * tw, ty + (f->y + f->h) * th,
+			k == sel ? 0xFF6FCF86 : 0xFFB8B8C0);
+		if (st.n_faces > 1) {
+			char num[8];
+			snprintf(num, sizeof(num), "%d", k + 1);
+			text_draw(&ts, num, tx + f->x * tw + 3.0f * ts.ux, ty + f->y * th + 2.0f * ts.uy, 11.0f * tk,
+				  k == sel ? 0xFF6FCF86 : 0xFFD0D0D6, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		}
 	}
+	src->pic_x0 = tx, src->pic_y0 = ty, src->pic_w = tw, src->pic_h = th;
 
-	// the face up close, and the kept one next to it
-	const float size = th;
-	float x = tx + tw + 10.0f * ts.ux;
-	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, x, y0, size, obs_module_text("Faces.Live"), 0xFF6FCF86);
-	x += size + 6.0f * ts.ux;
-	if (show_ref) {
+	const float py = ty + th + m;
+	const float size = H - m - py;
+	char label[64];
+	if (st.n_faces > 1)
+		snprintf(label, sizeof(label), "%s %d/%d", obs_module_text("Faces.Live"), sel + 1, st.n_faces);
+	else
+		snprintf(label, sizeof(label), "%s", obs_module_text("Faces.Live"));
+	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, tx, py, size, label, 0xFF6FCF86, tk);
+	src->live_x0 = tx, src->live_y0 = py, src->live_size = size;
+	if (show_ref)
 		face_panel(&ts, src->ref_tex, 0, 0, gs_texture_get_width(src->ref_tex),
-			   gs_texture_get_height(src->ref_tex), x, y0, size, obs_module_text("Faces.Snapshot"),
-			   0xFFFF59D9);
-		x += size + 6.0f * ts.ux;
-	}
+			   gs_texture_get_height(src->ref_tex), tx + size + m, py, size,
+			   obs_module_text("Faces.Snapshot"), 0xFFFF59D9, tk);
 
-	// text
-	x += 6.0f * ts.ux;
-	const float text_w = W - x - 10.0f * ts.ux;
+	// right: the text
+	const float x = tx + tw + 2.0f * m;
+	const float text_w = W - x - m;
+	const float y1 = H - m;
 	char buf[1200];
 	const char *name = obs_module_text("Faces.DockSelection");
 	if (src->name && is_program_name(src->name))
@@ -588,28 +637,80 @@ static void faces_render(void *data, gs_effect_t *effect)
 		name = src->name;
 	if (!p || !st.valid) {
 		snprintf(buf, sizeof(buf), "%s  -  %s", name, obs_module_text("QC.NoSignal"));
-		text_draw(&ts, buf, x, y0, 13.0f, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		text_draw(&ts, buf, x, ty, 14.0f * tk, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 		return;
 	}
 	snprintf(buf, sizeof(buf), "%s  \xe2\x80\xa2  %d %s", name, st.n_faces,
 		 st.n_faces == 1 ? obs_module_text("Faces.FaceFound") : obs_module_text("Faces.FacesFound"));
-	float y = y0;
-	text_draw(&ts, buf, x, y, 13.0f, 0xFFF0F0F2, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
-	y += 18.0f * ts.uy;
+	float y = wrapped(&ts, buf, x, ty, text_w, 14.0f * tk, 0xFFF0F0F2, y1);
+	y += 2.0f * ts.uy;
 	snprintf(buf, sizeof(buf),
 		 "Scene luma: median %.1f%%, P10-P90 %.1f-%.1f, P99 %.0f; near black %.0f%%, near clipping %.0f%%.",
 		 st.median, st.p10, st.p90, st.p99, st.near_black, st.near_clip);
-	y = wrapped(&ts, buf, x, y, text_w, 11.5f, 0xFFD8D8DC, y1);
+	y = wrapped(&ts, buf, x, y, text_w, 12.0f * tk, 0xFFD8D8DC, y1);
 	assessment(&st, show_ref ? &src->ref : NULL, src->advice, buf, sizeof(buf));
-	y = wrapped(&ts, buf, x, y + 4.0f * ts.uy, text_w, 11.5f, 0xFFD8D8DC, y1);
+	y = wrapped(&ts, buf, x, y + 4.0f * ts.uy, text_w, 12.0f * tk, 0xFFD8D8DC, y1);
 	if (!src->have_ref)
-		wrapped(&ts, obs_module_text("Faces.SnapshotHint"), x, y + 4.0f * ts.uy, text_w, 10.5f, 0xFF8D8D96, y1);
+		y = wrapped(&ts, obs_module_text("Faces.SnapshotHint"), x, y + 4.0f * ts.uy, text_w, 11.0f * tk,
+			    0xFF8D8D96, y1);
+	if (st.n_faces > 1)
+		wrapped(&ts, obs_module_text("Faces.ChooseHint"), x, y + 4.0f * ts.uy, text_w, 11.0f * tk, 0xFF8D8D96,
+			y1);
+}
+
+/* Choosing a face: click it in the picture (click beside the faces to follow the largest again), click the
+ * close-up or turn the mouse wheel to step through them. */
+static void faces_step(struct faces_source *src, int dir)
+{
+	const int n = src->n_shown;
+	if (n <= 1) {
+		src->sel_id = 0;
+		return;
+	}
+	int cur = 0;
+	for (int k = 0; k < n; k++) {
+		if (src->shown[k].id == src->sel_id)
+			cur = k;
+	}
+	const int next = ((cur + dir) % n + n) % n;
+	src->sel_id = next == 0 ? 0 : src->shown[next].id;
+}
+
+static void faces_mouse_click(void *data, const struct obs_mouse_event *event, int32_t type, bool mouse_up,
+			      uint32_t click_count)
+{
+	UNUSED_PARAMETER(click_count);
+	struct faces_source *src = data;
+	if (type != MOUSE_LEFT || !mouse_up)
+		return;
+	const float x = (float)event->x, y = (float)event->y;
+	if (x >= src->pic_x0 && x < src->pic_x0 + src->pic_w && y >= src->pic_y0 && y < src->pic_y0 + src->pic_h) {
+		const float u = (x - src->pic_x0) / src->pic_w, v = (y - src->pic_y0) / src->pic_h;
+		int hit = -1;
+		for (int k = 0; k < src->n_shown; k++) {
+			const struct face_box *f = src->shown + k;
+			if (u >= f->x && u < f->x + f->w && v >= f->y && v < f->y + f->h)
+				hit = k;
+		}
+		src->sel_id = hit > 0 ? src->shown[hit].id : 0;
+	} else if (x >= src->live_x0 && x < src->live_x0 + src->live_size && y >= src->live_y0 &&
+		   y < src->live_y0 + src->live_size) {
+		faces_step(src, 1);
+	}
+}
+
+static void faces_mouse_wheel(void *data, const struct obs_mouse_event *event, int x_delta, int y_delta)
+{
+	UNUSED_PARAMETER(event);
+	UNUSED_PARAMETER(x_delta);
+	if (y_delta)
+		faces_step(data, y_delta < 0 ? 1 : -1);
 }
 
 const struct obs_source_info colormonitor_faces = {
 	.id = ID_PREFIX "faces_source",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION,
 	.get_name = faces_get_name,
 	.create = faces_create,
 	.destroy = faces_destroy,
@@ -620,4 +721,6 @@ const struct obs_source_info colormonitor_faces = {
 	.get_height = faces_get_height,
 	.video_render = faces_render,
 	.video_tick = faces_tick,
+	.mouse_click = faces_mouse_click,
+	.mouse_wheel = faces_mouse_wheel,
 };

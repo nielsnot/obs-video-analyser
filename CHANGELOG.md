@@ -9,6 +9,14 @@
 - **⛶ Full** in the toolbar shows the dock full screen on the screen it is on (it is taken out of the main window
   if needed); press it again or Esc to go back.
 - **RGB parade:** clearer red, green and blue, and dense parts of the trace glow a little toward white.
+- **Text on Retina and HiDPI screens:** all text in the dock (scope labels, markers, scales) is sized in points,
+  so it is no longer half as large on a Retina screen. Quick control buttons are as wide as their text.
+- **Faces:** choose the face to measure: click it in the picture (click beside the faces to follow the largest
+  again), or click the close-up or turn the mouse wheel to step through them. The faces are numbered and the
+  close-up says which one it shows ("Live 2/3"). New layout with more room for the text, and a Text size option
+  (130 % by default).
+- **Info:** a tile now shows one thing as a single line that fills it: timecode (default), clock, date, video
+  format or your text; "All (stacked)" keeps the old tile. `+ Scope → Info and timecode` lets you pick which.
 
 ## 0.7.2
 
