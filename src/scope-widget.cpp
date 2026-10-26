@@ -191,6 +191,10 @@ struct scope_widget_s
 	free_rect_s drag_start;
 	int last_cx = 0, last_cy = 0;
 
+	// quick controls shown on the tile under the mouse
+	volatile int hover_tile = -1;
+	int qb_drag_tile = -1; // dragging the intensity slider
+
 	// Views: only the active one has live sources; the others are kept as saved settings.
 	struct view_s
 	{
@@ -410,6 +414,8 @@ static void choose_grid(const scope_widget_s *data, const std::vector<int> &tile
 	*rows_out = (n + best_cols - 1) / best_cols;
 }
 
+static void draw_quickbar(scope_widget_s *data, int tile);
+
 static void draw(void *param, uint32_t cx_, uint32_t cy_)
 {
 	auto *data = (struct scope_widget_s *)param;
@@ -531,6 +537,13 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		gs_projection_pop();
 	}
 
+	if (!data->arranging && data->hover_tile > 0 && data->hover_tile < total) {
+		gs_projection_push();
+		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+		draw_quickbar(data, data->hover_tile);
+		gs_projection_pop();
+	}
+
 	// arranging: outline every cell with a resize handle at the bottom right
 	if (data->arranging && data->layout == SCOPE_LAYOUT_FREE && solo < 0) {
 		gs_projection_push();
@@ -578,6 +591,247 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 	gs_load_vertexbuffer(NULL);
 
 	pthread_mutex_unlock(&data->mutex);
+}
+
+struct grid_key_s
+{
+	const char *key;
+	bool is_double;
+};
+
+/* Settings that draw a scope's graticule; 0 means no graticule. */
+static const grid_key_s grid_keys_waveform[] = {{"graticule_lines", false}, {NULL, false}};
+static const grid_key_s grid_keys_vectorscope[] = {{"graticule", false}, {NULL, false}};
+static const grid_key_s grid_keys_histogram[] = {{"graticule_vertical_lines", false},
+						 {"graticule_horizontal_step_fixed", true},
+						 {"graticule_horizontal_step_ratio", true},
+						 {NULL, false}};
+
+static const grid_key_s *grid_keys_for(int type)
+{
+	switch (type) {
+	case TYPE_WAVEFORM:
+		return grid_keys_waveform;
+	case TYPE_VECTORSCOPE:
+		return grid_keys_vectorscope;
+	case TYPE_HISTOGRAM:
+		return grid_keys_histogram;
+	default:
+		return NULL;
+	}
+}
+
+static bool grid_visible(obs_source_t *src, const grid_key_s *keys)
+{
+	OBSDataAutoRelease settings = obs_source_get_settings(src);
+	for (const grid_key_s *k = keys; k->key; k++) {
+		if (k->is_double ? obs_data_get_double(settings, k->key) != 0.0
+				 : obs_data_get_int(settings, k->key) != 0)
+			return true;
+	}
+	return false;
+}
+
+/* Hiding remembers the current values so showing brings back the same graticule. */
+static void set_grid_visible(obs_source_t *src, const grid_key_s *keys, bool visible)
+{
+	OBSDataAutoRelease settings = obs_source_get_settings(src);
+	OBSDataAutoRelease changes = obs_data_create();
+	for (const grid_key_s *k = keys; k->key; k++) {
+		std::string prev = std::string("grid_prev_") + k->key;
+		if (k->is_double) {
+			double cur = obs_data_get_double(settings, k->key);
+			if (visible) {
+				double v = obs_data_has_user_value(settings, prev.c_str())
+						   ? obs_data_get_double(settings, prev.c_str())
+						   : obs_data_get_default_double(settings, k->key);
+				obs_data_set_double(changes, k->key, v);
+			} else {
+				if (cur != 0.0)
+					obs_data_set_double(changes, prev.c_str(), cur);
+				obs_data_set_double(changes, k->key, 0.0);
+			}
+		} else {
+			long long cur = obs_data_get_int(settings, k->key);
+			if (visible) {
+				long long v = obs_data_has_user_value(settings, prev.c_str())
+						      ? obs_data_get_int(settings, prev.c_str())
+						      : obs_data_get_default_int(settings, k->key);
+				obs_data_set_int(changes, k->key, v);
+			} else {
+				if (cur != 0)
+					obs_data_set_int(changes, prev.c_str(), cur);
+				obs_data_set_int(changes, k->key, 0);
+			}
+		}
+	}
+	obs_source_update(src, changes);
+}
+
+/* ---------- quick controls ---------- */
+
+enum qb_kind_e {
+	QB_INTENSITY,
+	QB_GRID,
+	QB_COLORS,
+	QB_GAIN,
+	QB_ASPECT,
+	QB_MAX,
+};
+
+struct qb_item
+{
+	int kind;
+	int x0, x1;
+};
+
+#define QB_HEIGHT 26
+
+static bool type_has_intensity(int type)
+{
+	switch (type) {
+	case TYPE_WAVEFORM:
+	case TYPE_VECTORSCOPE:
+	case TYPE_DIAMOND:
+		return true;
+	default:
+		// CIE and Sat / Lum
+		return type >= 0 && type < N_TYPES &&
+		       (!strcmp(scope_types[type].key, "cie") || !strcmp(scope_types[type].key, "satlum"));
+	}
+}
+
+/* The bar at the bottom of a scope tile: which controls, and where (widget pixels). */
+static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int *bar_y0, int *bar_y1)
+{
+	std::vector<qb_item> items;
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return items;
+	const scope_entry *e = data->entries[tile - 1];
+	const src_rect_s &r = e->rect;
+	if (r.x1 - r.x0 < 120 || r.y1 - r.y0 < 60)
+		return items;
+	*bar_y1 = r.y1 - 4;
+	*bar_y0 = *bar_y1 - QB_HEIGHT;
+	int x = r.x0 + 6;
+	auto add = [&](int kind, int w) {
+		if (x + w > r.x1 - 6)
+			return;
+		items.push_back({kind, x, x + w});
+		x += w + 4;
+	};
+	if (type_has_intensity(e->type))
+		add(QB_INTENSITY, 110);
+	if (grid_keys_for(e->type))
+		add(QB_GRID, 40);
+	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
+		add(QB_COLORS, 46);
+	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
+		add(QB_GAIN, 56);
+	add(QB_ASPECT, 44);
+	add(QB_MAX, 36);
+	return items;
+}
+
+static const char *aspect_label(int aspect)
+{
+	switch (aspect) {
+	case ASPECT_FILL:
+		return "Fill";
+	case ASPECT_16_9:
+		return "16:9";
+	case ASPECT_4_3:
+		return "4:3";
+	case ASPECT_1_1:
+		return "1:1";
+	default:
+		return "Auto";
+	}
+}
+
+static void qb_fill(float x0, float y0, float x1, float y1, uint32_t color)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(x0, y0);
+		gs_vertex2f(x1, y0);
+		gs_vertex2f(x0, y1);
+		gs_vertex2f(x1, y1);
+		gs_render_stop(GS_TRISTRIP);
+	}
+}
+
+static float intensity_to_t(long long v)
+{
+	return (float)(std::log((double)std::max(v, 1LL)) / std::log(255.0));
+}
+
+/* Called from draw() with a projection in widget pixels. */
+static void draw_quickbar(scope_widget_s *data, int tile)
+{
+	int y0 = 0, y1 = 0;
+	const std::vector<qb_item> items = qb_layout(data, tile, &y0, &y1);
+	if (items.empty())
+		return;
+	const scope_entry *e = data->entries[tile - 1];
+	OBSDataAutoRelease s = obs_source_get_settings(e->src);
+	const struct text_scale ts = {1.0f, 1.0f};
+	const float px = 11.0f;
+	qb_fill((float)items.front().x0 - 4.0f, (float)y0, (float)items.back().x1 + 4.0f, (float)y1, 0xC0141418);
+	for (const qb_item &it : items) {
+		const float x0 = (float)it.x0, x1 = (float)it.x1, ym = (y0 + y1) * 0.5f;
+		bool on = false;
+		std::string label;
+		switch (it.kind) {
+		case QB_INTENSITY: {
+			text_draw(&ts, "Int", x0, ym, px, 0xFFB8B8C0, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+			const float tx0 = x0 + 26.0f, tx1 = x1 - 4.0f;
+			qb_fill(tx0, ym - 2.0f, tx1, ym + 2.0f, 0xFF3A3A40);
+			const float t = intensity_to_t(obs_data_get_int(s, "intensity"));
+			const float kx = tx0 + (tx1 - tx0) * t;
+			qb_fill(tx0, ym - 2.0f, kx, ym + 2.0f, 0xFF6FCF86);
+			qb_fill(kx - 5.0f, ym - 6.0f, kx + 5.0f, ym + 6.0f, 0xFFF0F0F2);
+			continue;
+		}
+		case QB_GRID:
+			label = "Grid";
+			on = grid_visible(e->src, grid_keys_for(e->type));
+			break;
+		case QB_COLORS:
+			label = "Color";
+			on = e->type == TYPE_VECTORSCOPE ? obs_data_get_int(s, "color_type") != 0
+							 : obs_data_get_bool(s, "colorize");
+			break;
+		case QB_GAIN: {
+			const long long g = std::max(1LL, obs_data_get_int(s, "gain"));
+			label = "Gain " + std::to_string(g) + "x";
+			on = g > 1;
+			break;
+		}
+		case QB_ASPECT:
+			label = aspect_label(e->aspect);
+			on = e->aspect != ASPECT_AUTO;
+			break;
+		case QB_MAX:
+			label = data->solo >= 0 ? "Back" : "Full";
+			break;
+		}
+		qb_fill(x0, (float)y0 + 3.0f, x1, (float)y1 - 3.0f, on ? 0xFF3D5C45 : 0xFF2A2A2F);
+		text_draw(&ts, label.c_str(), (x0 + x1) * 0.5f, ym, px, 0xFFE8E8EC, TEXT_ALIGN_CENTER,
+			  TEXT_VALIGN_MIDDLE);
+	}
+}
+
+static void qb_set_intensity(obs_source_t *src, int x, const qb_item &it)
+{
+	const float tx0 = it.x0 + 26.0f, tx1 = it.x1 - 4.0f;
+	const float t = std::clamp((x - tx0) / std::max(tx1 - tx0, 1.0f), 0.0f, 1.0f);
+	const long long v = std::clamp((long long)std::lround(std::exp(t * std::log(255.0))), 1LL, 255LL);
+	OBSDataAutoRelease d = obs_data_create();
+	obs_data_set_int(d, "intensity", v);
+	obs_source_update(src, d);
 }
 
 /* ---------- widget ---------- */
@@ -953,6 +1207,46 @@ void ScopeWidget::takeSnapshot()
 		btnCompare->setChecked(true); // show what was just taken
 }
 
+/* A click on one of the quick controls of a scope tile. */
+void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
+{
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return;
+	scope_entry *e = data->entries[tile - 1];
+	obs_source_t *src = e->src;
+	OBSDataAutoRelease s = obs_source_get_settings(src);
+	OBSDataAutoRelease d = obs_data_create();
+	switch (it.kind) {
+	case QB_INTENSITY:
+		data->qb_drag_tile = tile;
+		qb_set_intensity(src, x, it);
+		return;
+	case QB_GRID:
+		set_grid_visible(src, grid_keys_for(e->type), !grid_visible(src, grid_keys_for(e->type)));
+		return;
+	case QB_COLORS:
+		if (e->type == TYPE_VECTORSCOPE)
+			obs_data_set_int(d, "color_type", obs_data_get_int(s, "color_type") ? 0 : 1);
+		else
+			obs_data_set_bool(d, "colorize", !obs_data_get_bool(s, "colorize"));
+		break;
+	case QB_GAIN: {
+		const long long g = obs_data_get_int(s, "gain");
+		obs_data_set_int(d, "gain", g >= 5 ? 1 : g >= 2 ? 5 : 2);
+		break;
+	}
+	case QB_ASPECT:
+		pthread_mutex_lock(&data->mutex);
+		e->aspect = (e->aspect + 1) % 5;
+		pthread_mutex_unlock(&data->mutex);
+		return;
+	case QB_MAX:
+		toggleSolo(data->solo >= 0 ? -1 : tile);
+		return;
+	}
+	obs_source_update(src, d);
+}
+
 /* Arranging: tiles are moved by dragging and resized at their bottom right corner, in the free layout. */
 void ScopeWidget::setArranging(bool on)
 {
@@ -1141,6 +1435,31 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 		return true;
 	}
 
+	// quick controls at the bottom of the tile under the mouse
+	if (event->button() == Qt::LeftButton && !data->arranging) {
+		const int x = (int)qtPos.x(), y = (int)qtPos.y();
+		if (mouseUp && data->qb_drag_tile >= 0) {
+			data->qb_drag_tile = -1;
+			return true;
+		}
+		const int tile = tile_at(data, x, y);
+		int by0 = 0, by1 = 0;
+		pthread_mutex_lock(&data->mutex);
+		const std::vector<qb_item> items = qb_layout(data, tile, &by0, &by1);
+		const qb_item *hit = nullptr;
+		for (const qb_item &it : items)
+			if (y >= by0 && y <= by1 && x >= it.x0 && x <= it.x1)
+				hit = &it;
+		scope_entry *e = hit ? data->entries[tile - 1] : nullptr;
+		pthread_mutex_unlock(&data->mutex);
+		if (hit) {
+			if (!mouseUp && clickCount == 1)
+				quickControl(tile, *hit, x);
+			return true;
+		}
+		UNUSED_PARAMETER(e);
+	}
+
 	if (clickCount == 2 && event->button() == Qt::LeftButton) {
 		int hit = tile_at(data, (int)qtPos.x(), (int)qtPos.y());
 		// The ROI uses clicks to draw shapes, so it is maximized from the menu instead.
@@ -1225,6 +1544,25 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 		pthread_mutex_unlock(&data->mutex);
 		setCursor(shape);
 		return true;
+	}
+
+	{
+		const int x = (int)qtPos.x(), y = (int)qtPos.y();
+		const int prev = data->hover_tile;
+		data->hover_tile = mouseLeave ? -1 : tile_at(data, x, y);
+		if (data->qb_drag_tile >= 0 && !mouseLeave) {
+			int by0 = 0, by1 = 0;
+			pthread_mutex_lock(&data->mutex);
+			const std::vector<qb_item> items = qb_layout(data, data->qb_drag_tile, &by0, &by1);
+			obs_source_t *src = tile_source(data, data->qb_drag_tile);
+			pthread_mutex_unlock(&data->mutex);
+			for (const qb_item &it : items)
+				if (it.kind == QB_INTENSITY && src)
+					qb_set_intensity(src, x, it);
+			return true;
+		}
+		if (prev != data->hover_tile)
+			update();
 	}
 
 	mouseEvent.modifiers |= INTERACT_KEEP_SOURCE;
@@ -1316,81 +1654,6 @@ bool ScopeWidget::HandleKeyEvent(QKeyEvent *)
 }
 
 /* ---------- quick settings in the context menu ---------- */
-
-struct grid_key_s
-{
-	const char *key;
-	bool is_double;
-};
-
-/* Settings that draw a scope's graticule; 0 means no graticule. */
-static const grid_key_s grid_keys_waveform[] = {{"graticule_lines", false}, {NULL, false}};
-static const grid_key_s grid_keys_vectorscope[] = {{"graticule", false}, {NULL, false}};
-static const grid_key_s grid_keys_histogram[] = {{"graticule_vertical_lines", false},
-						 {"graticule_horizontal_step_fixed", true},
-						 {"graticule_horizontal_step_ratio", true},
-						 {NULL, false}};
-
-static const grid_key_s *grid_keys_for(int type)
-{
-	switch (type) {
-	case TYPE_WAVEFORM:
-		return grid_keys_waveform;
-	case TYPE_VECTORSCOPE:
-		return grid_keys_vectorscope;
-	case TYPE_HISTOGRAM:
-		return grid_keys_histogram;
-	default:
-		return NULL;
-	}
-}
-
-static bool grid_visible(obs_source_t *src, const grid_key_s *keys)
-{
-	OBSDataAutoRelease settings = obs_source_get_settings(src);
-	for (const grid_key_s *k = keys; k->key; k++) {
-		if (k->is_double ? obs_data_get_double(settings, k->key) != 0.0
-				 : obs_data_get_int(settings, k->key) != 0)
-			return true;
-	}
-	return false;
-}
-
-/* Hiding remembers the current values so showing brings back the same graticule. */
-static void set_grid_visible(obs_source_t *src, const grid_key_s *keys, bool visible)
-{
-	OBSDataAutoRelease settings = obs_source_get_settings(src);
-	OBSDataAutoRelease changes = obs_data_create();
-	for (const grid_key_s *k = keys; k->key; k++) {
-		std::string prev = std::string("grid_prev_") + k->key;
-		if (k->is_double) {
-			double cur = obs_data_get_double(settings, k->key);
-			if (visible) {
-				double v = obs_data_has_user_value(settings, prev.c_str())
-						   ? obs_data_get_double(settings, prev.c_str())
-						   : obs_data_get_default_double(settings, k->key);
-				obs_data_set_double(changes, k->key, v);
-			} else {
-				if (cur != 0.0)
-					obs_data_set_double(changes, prev.c_str(), cur);
-				obs_data_set_double(changes, k->key, 0.0);
-			}
-		} else {
-			long long cur = obs_data_get_int(settings, k->key);
-			if (visible) {
-				long long v = obs_data_has_user_value(settings, prev.c_str())
-						      ? obs_data_get_int(settings, prev.c_str())
-						      : obs_data_get_default_int(settings, k->key);
-				obs_data_set_int(changes, k->key, v);
-			} else {
-				if (cur != 0)
-					obs_data_set_int(changes, prev.c_str(), cur);
-				obs_data_set_int(changes, k->key, 0);
-			}
-		}
-	}
-	obs_source_update(src, changes);
-}
 
 /* The dock always feeds its scopes from the ROI; these are handled elsewhere. */
 static bool skip_quick_property(const char *name)

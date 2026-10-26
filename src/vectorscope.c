@@ -84,6 +84,7 @@ struct vss_source
 	gs_texture_t *tex_ref;
 
 	float zoom;
+	int gain; // zoom set from the options or quick controls
 
 	struct cm_markers markers;
 };
@@ -169,6 +170,11 @@ static void vss_update(void *data, obs_data_t *settings)
 	struct vss_source *src = data;
 	cm_update(&src->cm, settings);
 	cm_markers_load(&src->markers, settings);
+	const int gain = (int)obs_data_get_int(settings, "gain");
+	if (gain >= 1 && gain != src->gain) {
+		src->gain = gain;
+		src->zoom = (float)gain;
+	}
 
 	src->intensity = (int)obs_data_get_int(settings, "intensity");
 	if (src->intensity < 1)

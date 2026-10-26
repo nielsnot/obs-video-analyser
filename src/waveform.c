@@ -75,6 +75,7 @@ struct wvs_source
 	float zoom, zoom_off;
 
 	struct cm_markers markers;
+	int gain; // zoom into the blacks, set from the options or quick controls
 
 	// snapshot reference, shown over the live trace while comparing
 	volatile bool want_snapshot;
@@ -153,6 +154,12 @@ static void wvs_update(void *data, obs_data_t *settings)
 	struct wvs_source *src = data;
 	cm_update(&src->cm, settings);
 	cm_markers_load(&src->markers, settings);
+	const int gain = (int)obs_data_get_int(settings, "gain");
+	if (gain >= 1 && gain != src->gain) {
+		src->gain = gain;
+		src->zoom = (float)gain;
+		src->zoom_off = gain > 1 ? WV_SIZE - WV_SIZE / (float)gain : 0.0f;
+	}
 
 	src->display = (int)obs_data_get_int(settings, "display");
 
