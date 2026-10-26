@@ -1087,7 +1087,9 @@ static void roi_send_range(struct roi_source *src)
 	int x0 = 0, y0 = 0, x1 = w, y1 = h;
 
 	pthread_mutex_lock(&src->shapes_mutex);
-	if (src->shapes.num && !src->pins.num && w > 0 && h > 0) {
+	// Following faces: the whole picture, so the detector keeps seeing it all and its boxes stay in
+	// picture coordinates; the face mask selects the pixels. Drawn shapes do not count then.
+	if (src->shapes.num && !src->pins.num && !src->face_follow && w > 0 && h > 0) {
 		float bx0 = 1.0f, by0 = 1.0f, bx1 = 0.0f, by1 = 0.0f;
 		for (size_t i = 0; i < src->shapes.num; i++) {
 			const struct roi_shape *s = src->shapes.array + i;
@@ -1132,8 +1134,8 @@ static void roi_tick(void *data, float unused)
 		src->cm.flags |= cm->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV);
 	}
 	pthread_mutex_unlock(&src->sources_mutex);
-	if (src->pins.num)
-		src->cm.flags |= CM_FLAG_CONVERT_RGB;
+	if (src->pins.num || src->face_follow)
+		src->cm.flags |= CM_FLAG_CONVERT_RGB; // the face detector looks at the colors
 
 	roi_send_range(src);
 }

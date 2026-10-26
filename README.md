@@ -31,7 +31,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | 2 | `+ Scope` | Adds a scope (see the list below). |
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
 | 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
-| 10 | `☺ Faces` | The selection follows every face found, so all scopes measure the faces. |
+| 10 | `☺ Faces (exp.)` | The selection follows every face found, so all scopes measure the faces. |
 | 10 | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
 | 10 | `⛶ Full` | Shows the dock full screen on the screen it is on; again, or Esc, to go back. |
 | 10 | `⊞ Arrange` | Drag scopes anywhere in the dock and resize them at their bottom right corner (free layout, saved per view). |
@@ -57,7 +57,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **Line plot** | One picture line | R, G, B and luma of the line you choose |
 | **3D color cube** | Every pixel in the RGB cube | Turns by itself; drag to turn, wheel to zoom |
 | **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term with maximum, integrated) against a target, a loudness timeline of 30 s to 1.5 h, phase correlation, goniometer for stereo and a room meter for 5.1 and 7.1 |
-| **Faces** | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
+| **Faces** *(experimental)* | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
 | **Info and timecode** | Time and format | One line per tile: time-of-day timecode, clock, date, video format or your own text (or all of them stacked) |
 
 ## Tools
@@ -75,7 +75,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 - **3D LUT.** In the ROI options, load a `.cube` LUT and apply it to the ROI view only or to everything the scopes
   measure, for example to check a log camera through its conversion LUT or an HLG to SDR conversion.
 - **Waveform colorize.** A luma waveform can draw its trace in the colors of the picture.
-- **Follow faces.** `☺ Faces` turns the selection into the faces found, and it moves with them.
+- **Follow faces (experimental).** `☺ Faces (exp.)` turns the selection into the faces found, and it moves with them.
 - **Free layout.** `⊞ Arrange` lets you drag and resize every scope; give scopes of one camera the same tile color.
 - **Quick controls.** Hover a scope for intensity, grid, color, gain, shape and full size without opening the options.
 

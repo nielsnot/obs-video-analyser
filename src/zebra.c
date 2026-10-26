@@ -506,6 +506,13 @@ static void zb_get_defaults(obs_data_t *settings)
 	}
 }
 
+/* The false color scope shows its key below the picture by default. */
+static void fc_source_get_defaults(obs_data_t *settings)
+{
+	zb_get_defaults(settings);
+	obs_data_set_default_int(settings, "show_key", show_key_below);
+}
+
 /* Shows the custom band settings only for the custom scheme, and only as many as are used. */
 static bool fc_scheme_props_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
@@ -1135,7 +1142,7 @@ const struct obs_source_info colormonitor_falsecolor = {
 	.create = fcs_create,
 	.destroy = zbs_destroy,
 	.update = zbs_update,
-	.get_defaults = zb_get_defaults,
+	.get_defaults = fc_source_get_defaults,
 	.get_properties = fcs_get_properties,
 	.get_width = zbs_get_width,
 	.get_height = zbs_get_height,

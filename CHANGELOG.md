@@ -18,6 +18,9 @@
   (130 % by default).
 - **Diamond:** trace color "Picture colors" shows each point in the colors of the pixels that land there, like
   the colored vectorscope; also with the Color quick control.
+- **☺ Faces follow:** the scopes now measure the faces also when shapes are drawn (the drawn shapes no longer
+  crop the analysis while following faces). Faces and ☺ Faces are marked experimental.
+- **False color** shows its key below the picture by default.
 - **Info:** a tile now shows one thing as a single line that fills it: timecode (default), clock, date, video
   format or your text; "All (stacked)" keeps the old tile. `+ Scope → Info and timecode` lets you pick which.
 

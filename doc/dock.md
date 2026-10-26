@@ -166,7 +166,7 @@ the Rec. 709 triangle; the diagram shows how much of that gamut the picture uses
 A vectorscope's `Part of the picture` option limits it to the dark, middle or bright third of the picture.
 Add three vectorscopes and set them to lows, mids and highs to see them side by side.
 
-## Following faces
+## Following faces (experimental)
 
 `☺ Faces` in the toolbar makes the selection follow every face found in the picture: the faces are outlined in
 cyan and every scope measures only them. The drawn shapes come back when you turn it off.
