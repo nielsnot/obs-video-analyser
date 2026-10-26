@@ -103,6 +103,11 @@ jobs:
           mkdir -p logs
           python -m unittest discover test-onsdriver/ 2>&1 | tee logs/test-output.txt
 
+      - name: 'Report face following'
+        if: always()
+        shell: bash
+        run: grep -rh "following faces" logs 2>/dev/null | tail -n 3 | sed 's/^/::notice::/' || true
+
       - name: 'Report OBS log problems'
         if: failure()
         shell: bash
@@ -301,6 +306,11 @@ jobs:
           mkdir -p logs
           python -m unittest discover test-onsdriver/ 2>&1 | tee logs/test-output.txt
 
+      - name: 'Report face following'
+        if: always()
+        shell: bash
+        run: grep -rh "following faces" logs 2>/dev/null | tail -n 3 | sed 's/^/::notice::/' || true
+
       - name: 'Report OBS log problems'
         if: ${{ failure() || steps.onsdriver.outcome == 'failure' }}
         shell: bash
@@ -398,6 +408,11 @@ jobs:
         run: |
           python -m pip install Pillow
           python -m unittest discover test-onsdriver/
+
+      - name: 'Report face following'
+        if: always()
+        shell: bash
+        run: grep -rh "following faces" logs 2>/dev/null | tail -n 3 | sed 's/^/::notice::/' || true
 
       - name: 'Report OBS log problems'
         if: failure()

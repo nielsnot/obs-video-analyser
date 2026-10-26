@@ -83,7 +83,7 @@ class FaceFollowTest(obstest.OBSTest):
                 time.sleep(0.1)
                 continue
             img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
-            lit = [any(sum(img.getpixel((x, y))) > 90 for y in range(0, img.height, 2))
+            lit = [any(sum(img.getpixel((x, y))) > 90 for y in range(img.height))
                    for x in range(0, img.width, 4)]
             share = sum(lit) / len(lit)
             # the faces are in the left half; the whole picture would light every column

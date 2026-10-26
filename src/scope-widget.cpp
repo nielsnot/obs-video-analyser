@@ -1119,12 +1119,23 @@ void ScopeWidget::removeScope(int tile)
 	release_entry(e);
 }
 
+/* A short explanation shown when hovering a scope in the + Scope menu ("Tip.<key>" in the locale). */
+static QString scope_tip(const char *key)
+{
+	const std::string k = std::string("Tip.") + key;
+	const char *text = obs_module_text(k.c_str());
+	return text && k != text ? QString::fromUtf8(text) : QString();
+}
+
 void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 {
+	menu->setToolTipsVisible(true);
 	for (int t = 0; t < N_TYPES; t++) {
 		if (!strcmp(scope_types[t].key, "info")) {
 			// one line per tile: timecode, clock, date, video format, text, or all of them stacked
 			QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+			sub->menuAction()->setToolTip(scope_tip(scope_types[t].key));
+			sub->setToolTipsVisible(true);
 			static const char *items[][2] = {
 				{"timecode", "Info.Prop.Timecode"}, {"clock", "Info.Prop.Clock"},
 				{"date", "Info.Prop.Date"},         {"video", "Info.Prop.Video"},
@@ -1142,6 +1153,7 @@ void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 			continue;
 		}
 		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+		act->setToolTip(scope_tip(scope_types[t].key));
 		connect(act, &QAction::triggered, this, [this, t]() { addScope(t); });
 	}
 }

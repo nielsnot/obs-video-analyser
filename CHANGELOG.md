@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4
+
+- **+ Scope:** hover a scope in the menu for a short explanation of what it shows.
+
 ## 0.7.3
 
 - **Vectorscope zoom:** the mouse wheel and Gain magnify only the trace; the graticule, color targets, hue ring,
