@@ -21,7 +21,23 @@
 #include "text-render.h"
 
 #define QC_W 480
-#define QC_H 400
+#define QC_H 400    // overview
+#define QC_TL_H 220 // timeline
+#define QC_HIST 480 // timeline buckets
+
+enum qc_display_e {
+	QC_DISPLAY_OVERVIEW = 0,
+	QC_DISPLAY_TIMELINE = 1,
+	QC_DISPLAY_BOTH = 2,
+};
+
+/* One stretch of the timeline. */
+struct qc_bucket
+{
+	float ymin, ymax, apl_sum, cll;
+	uint32_t n;
+	uint32_t flags; // checks in violation during the stretch
+};
 #define QC_LOG_MAX 64
 
 enum qc_check_e {
@@ -89,6 +105,13 @@ struct qc_source
 	bool lowpass;
 	char *log_file;
 	volatile bool want_reset;
+
+	// timeline
+	struct qc_bucket hist[QC_HIST];
+	int hist_head;         // the bucket being filled
+	uint64_t bucket_start; // ns
+	double window;         // seconds shown
+	int display;           // qc_display_e
 };
 
 static void qc_update(void *, obs_data_t *);
@@ -140,11 +163,19 @@ static void qc_update(void *data, obs_data_t *settings)
 	src->freeze_seconds = (float)obs_data_get_double(settings, "qc_freeze_seconds");
 	src->border_px = (int)obs_data_get_int(settings, "qc_border_px");
 	src->lowpass = obs_data_get_bool(settings, "qc_lowpass");
+	src->display = (int)obs_data_get_int(settings, "qc_display");
+	const double window = (double)obs_data_get_int(settings, "qc_window");
 
 	pthread_mutex_lock(&src->mutex);
 	bfree(src->log_file);
 	const char *f = obs_data_get_string(settings, "qc_log_file");
 	src->log_file = f && *f ? bstrdup(f) : NULL;
+	if (window != src->window) {
+		src->window = window > 0.0 ? window : 300.0;
+		memset(src->hist, 0, sizeof(src->hist));
+		src->hist_head = 0;
+		src->bucket_start = 0;
+	}
 	pthread_mutex_unlock(&src->mutex);
 }
 
@@ -164,6 +195,8 @@ static void qc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "qc_min_duration", 0.5);
 	obs_data_set_default_double(settings, "qc_freeze_seconds", 2.0);
 	obs_data_set_default_int(settings, "qc_border_px", 4);
+	obs_data_set_default_int(settings, "qc_display", QC_DISPLAY_BOTH);
+	obs_data_set_default_int(settings, "qc_window", 300);
 }
 
 static bool qc_reset_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -180,6 +213,19 @@ static obs_properties_t *qc_get_properties(void *data)
 	struct qc_source *src = data;
 	obs_properties_t *props = obs_properties_create();
 	cm_get_properties(&src->cm, props);
+
+	obs_property_t *disp = obs_properties_add_list(props, "qc_display", obs_module_text("QC.Display"),
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(disp, obs_module_text("QC.Display.Both"), QC_DISPLAY_BOTH);
+	obs_property_list_add_int(disp, obs_module_text("QC.Display.Overview"), QC_DISPLAY_OVERVIEW);
+	obs_property_list_add_int(disp, obs_module_text("QC.Display.Timeline"), QC_DISPLAY_TIMELINE);
+	obs_property_t *win = obs_properties_add_list(props, "qc_window", obs_module_text("QC.Window"),
+						      OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(win, "1 min", 60);
+	obs_property_list_add_int(win, "5 min", 300);
+	obs_property_list_add_int(win, "15 min", 900);
+	obs_property_list_add_int(win, "1 h", 3600);
+	obs_property_list_add_int(win, "4 h", 14400);
 
 	obs_properties_t *checks = obs_properties_create();
 	for (int i = 0; i < QC_N_CHECKS; i++)
@@ -212,7 +258,9 @@ static uint32_t qc_get_width(void *data)
 static uint32_t qc_get_height(void *data)
 {
 	struct qc_source *src = data;
-	return src->cm.bypass ? cm_bypass_get_height(&src->cm) : QC_H;
+	if (src->cm.bypass)
+		return cm_bypass_get_height(&src->cm);
+	return src->display == QC_DISPLAY_TIMELINE ? QC_TL_H : src->display == QC_DISPLAY_BOTH ? QC_H + QC_TL_H : QC_H;
 }
 
 /* ---------- measuring (pipeline thread) ---------- */
@@ -489,6 +537,34 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 	const double frozen = (now - src->hash_since) / 1e9;
 	snprintf(d, sizeof(d), "%.0f s unchanged", frozen);
 	update_check(src, QC_FREEZE, f.valid && frozen >= src->freeze_seconds, d, now);
+
+	// timeline: one bucket per window / QC_HIST
+	const uint64_t len = (uint64_t)(src->window / QC_HIST * 1e9);
+	if (!src->bucket_start)
+		src->bucket_start = now;
+	while (len && now - src->bucket_start >= len) {
+		src->bucket_start += len;
+		src->hist_head = (src->hist_head + 1) % QC_HIST;
+		memset(src->hist + src->hist_head, 0, sizeof(src->hist[0]));
+		if (now - src->bucket_start > len * QC_HIST)
+			src->bucket_start = now; // a long pause: start over
+	}
+	if (f.valid) {
+		struct qc_bucket *b = src->hist + src->hist_head;
+		if (!b->n) {
+			b->ymin = f.min[3];
+			b->ymax = f.max[3];
+		} else {
+			b->ymin = fminf(b->ymin, f.min[3]);
+			b->ymax = fmaxf(b->ymax, f.max[3]);
+		}
+		b->apl_sum += f.apl;
+		b->cll = fmaxf(b->cll, f.cll);
+		b->n++;
+		for (int i = 0; i < QC_N_CHECKS; i++)
+			if (src->active[i] && src->enabled[i])
+				b->flags |= 1u << i;
+	}
 	pthread_mutex_unlock(&src->mutex);
 }
 
@@ -508,11 +584,122 @@ static void fill_rect(float x0, float y0, float x1, float y1, uint32_t color)
 	}
 }
 
+/* A polyline in immediate-mode batches (at most 512 vertices each). */
+static void polyline(const float *xs, const float *ys, const bool *valid, int n, uint32_t color)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		int in_batch = 0;
+		bool open = false;
+		for (int i = 1; i < n; i++) {
+			if (!valid[i - 1] || !valid[i])
+				continue;
+			if (!open) {
+				gs_render_start(false);
+				open = true;
+				in_batch = 0;
+			}
+			gs_vertex2f(xs[i - 1], ys[i - 1]);
+			gs_vertex2f(xs[i], ys[i]);
+			if ((in_batch += 2) >= 500) {
+				gs_render_stop(GS_LINES);
+				open = false;
+			}
+		}
+		if (open)
+			gs_render_stop(GS_LINES);
+	}
+}
+
 #define COLOR_TEXT 0xFFE6E6EA
 #define COLOR_DIM 0xFF8D8D96
 #define COLOR_OK 0xFF6FCF86
 #define COLOR_BAD 0xFFFF5A50
 #define COLOR_WARN 0xFFFFC040
+
+/* Timeline: luma maximum, average (APL) and minimum over the chosen time, with the stretches
+ * where a check failed in red, and for HDR the brightest pixel (CLL) against 1000 nits. */
+static void render_timeline(struct qc_source *src, const struct text_scale *ts, const struct qc_bucket *hist, int head,
+			    double window, int colorspace, float top, float height)
+{
+	UNUSED_PARAMETER(src);
+	const float W = (float)QC_W;
+	const float px = 11.0f;
+	const float x0 = 40.0f * ts->ux, x1 = W - 8.0f * ts->ux;
+	const float y0 = top + 22.0f * ts->uy, y1 = top + height - 18.0f * ts->uy;
+	if (y1 <= y0 || x1 <= x0)
+		return;
+
+	fill_rect(8.0f * ts->ux, top, W - 8.0f * ts->ux, top + 1.0f * ts->uy, 0xFF303036);
+	char buf[48];
+	const int minutes = (int)(window / 60.0 + 0.5);
+	if (minutes >= 60)
+		snprintf(buf, sizeof(buf), "%s  %d h", obs_module_text("QC.Timeline"), minutes / 60);
+	else
+		snprintf(buf, sizeof(buf), "%s  %d min", obs_module_text("QC.Timeline"), minutes);
+	text_draw(ts, buf, 8.0f * ts->ux, top + 5.0f * ts->uy, px, COLOR_DIM, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	const bool hdr = cm_cs_is_hdr(colorspace);
+	text_draw(ts, hdr ? "max  APL  min  CLL" : "max  APL  min", W - 8.0f * ts->ux, top + 5.0f * ts->uy, px,
+		  COLOR_DIM, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+
+	fill_rect(x0, y0, x1, y1, 0xFF17171B);
+	for (int i = 0; i <= 4; i++) {
+		const float y = y1 - (y1 - y0) * i / 4.0f;
+		fill_rect(x0, y, x1, y + 1.0f * ts->uy, 0x30FFFFFF);
+		snprintf(buf, sizeof(buf), "%d%%", i * 25);
+		text_draw(ts, buf, x0 - 4.0f * ts->ux, y, px - 1.0f, COLOR_DIM, TEXT_ALIGN_RIGHT, TEXT_VALIGN_MIDDLE);
+	}
+
+	static float xs[QC_HIST], ymax[QC_HIST], ymin[QC_HIST], apl[QC_HIST], cll[QC_HIST];
+	static bool valid[QC_HIST];
+	const float bw = (x1 - x0) / QC_HIST;
+	int band_start = -1;
+	for (int i = 0; i < QC_HIST; i++) {
+		const struct qc_bucket *b = hist + (head + 1 + i) % QC_HIST;
+		xs[i] = x0 + bw * (i + 0.5f);
+		valid[i] = b->n > 0;
+		if (valid[i]) {
+			ymax[i] = y1 - (y1 - y0) * b->ymax;
+			ymin[i] = y1 - (y1 - y0) * b->ymin;
+			apl[i] = y1 - (y1 - y0) * (b->apl_sum / b->n);
+			cll[i] = y1 - (y1 - y0) * fminf(b->cll / 1000.0f, 1.0f);
+		}
+		// red bands where a check failed
+		const bool bad = b->flags != 0;
+		if (bad && band_start < 0)
+			band_start = i;
+		if ((!bad || i == QC_HIST - 1) && band_start >= 0) {
+			const int end = bad ? i + 1 : i;
+			fill_rect(x0 + bw * band_start, y0, x0 + bw * end, y1, 0x50FF3B30);
+			band_start = -1;
+		}
+	}
+	polyline(xs, ymin, valid, QC_HIST, 0xFF9A9AA2);
+	polyline(xs, apl, valid, QC_HIST, COLOR_OK);
+	polyline(xs, ymax, valid, QC_HIST, 0xFFF0F0F0);
+	if (hdr)
+		polyline(xs, cll, valid, QC_HIST, 0xFFFF9F40);
+
+	// time axis
+	for (int i = 0; i <= 4; i++) {
+		const float x = x0 + (x1 - x0) * i / 4.0f;
+		const double ago = window * (4 - i) / 4.0;
+		if (i == 4)
+			snprintf(buf, sizeof(buf), "%s", obs_module_text("QC.Now"));
+		else if (ago >= 3600.0)
+			snprintf(buf, sizeof(buf), "-%.1f h", ago / 3600.0);
+		else if (ago >= 60.0)
+			snprintf(buf, sizeof(buf), "-%.0f min", ago / 60.0);
+		else
+			snprintf(buf, sizeof(buf), "-%.0f s", ago);
+		text_draw(ts, buf, x, y1 + 3.0f * ts->uy, px - 1.0f, COLOR_DIM,
+			  i == 0   ? TEXT_ALIGN_LEFT
+			  : i == 4 ? TEXT_ALIGN_RIGHT
+				   : TEXT_ALIGN_CENTER,
+			  TEXT_VALIGN_TOP);
+	}
+}
 
 static void qc_render(void *data, gs_effect_t *effect)
 {
@@ -537,16 +724,28 @@ static void qc_render(void *data, gs_effect_t *effect)
 	memcpy(log, src->log, sizeof(log));
 	n_log = src->n_log;
 	i_log = src->i_log;
+	static struct qc_bucket hist[QC_HIST];
+	memcpy(hist, src->hist, sizeof(hist));
+	const int head = src->hist_head;
+	const double window = src->window;
 	pthread_mutex_unlock(&src->mutex);
 
-	const float W = (float)QC_W, H = (float)QC_H;
-	const struct text_scale ts = text_scale_from_viewport(W, H);
+	const int display = src->display;
+	const float W = (float)QC_W;
+	const float H_total = (float)qc_get_height(src);
+	const struct text_scale ts = text_scale_from_viewport(W, H_total);
+	fill_rect(0.0f, 0.0f, W, H_total, 0xFF101013);
+	if (display == QC_DISPLAY_TIMELINE) {
+		render_timeline(src, &ts, hist, head, window, f.colorspace, 0.0f, (float)QC_TL_H);
+		return;
+	}
+	if (display == QC_DISPLAY_BOTH)
+		render_timeline(src, &ts, hist, head, window, f.colorspace, (float)QC_H, (float)QC_TL_H);
+	const float H = (float)QC_H;
 	const float px = 12.0f;
 	const float lh = (px + 5.0f) * ts.uy; // line height
 	const float pad = 8.0f * ts.ux;
 	float y = 6.0f * ts.uy;
-
-	fill_rect(0.0f, 0.0f, W, H, 0xFF101013);
 
 	// header: overall status
 	int n_bad = 0;

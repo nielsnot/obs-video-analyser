@@ -122,6 +122,27 @@ struct src_rect_s
 	inline int x_from_widget(int x) const { return x1 > x0 ? (x - x0) * w / (x1 - x0) : 0; }
 	inline int y_from_widget(int y) const { return y1 > y0 ? (y - y0) * h / (y1 - y0) : 0; }
 	inline void clear() { *this = src_rect_s(); }
+
+	// the cell the tile was given; the scope is fitted inside it (free layout, arranging)
+	int cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+	inline bool cell_inside(int x, int y) const
+	{
+		return cx0 <= x && x <= cx1 && cy0 <= y && y <= cy1 && cx0 < cx1;
+	}
+};
+
+/* A tile's place in the free layout, as fractions of the dock; w <= 0 means not placed yet. */
+struct free_rect_s
+{
+	float x = 0.0f, y = 0.0f, w = -1.0f, h = -1.0f;
+};
+
+enum aspect_e {
+	ASPECT_AUTO = 0, // what suits the scope type
+	ASPECT_FILL = 1,
+	ASPECT_16_9 = 2,
+	ASPECT_4_3 = 3,
+	ASPECT_1_1 = 4,
 };
 
 struct scope_entry
@@ -138,6 +159,9 @@ struct scope_entry
 	// what the scope analyzes: the dock's ROI selection, or a source of its own
 	bool use_roi = true;
 	std::string target; // target_name when not using the ROI ("" is the program)
+
+	int aspect = ASPECT_AUTO;
+	free_rect_s free;
 };
 
 /* Tiles are numbered 0 for the ROI and 1..n for the added scopes. */
@@ -156,6 +180,15 @@ struct scope_widget_s
 
 	volatile int layout = 0; // scope_layout_e
 	volatile int solo = -1;  // maximized tile, or -1
+
+	// free layout
+	free_rect_s roi_free;
+	volatile bool arranging = false; // tiles are moved and resized with the mouse
+	int drag_tile = -1;
+	bool drag_resize = false;
+	int drag_x = 0, drag_y = 0;
+	free_rect_s drag_start;
+	int last_cx = 0, last_cy = 0;
 
 	// Views: only the active one has live sources; the others are kept as saved settings.
 	struct view_s
@@ -251,7 +284,44 @@ enum scope_layout_e {
 	SCOPE_LAYOUT_AUTO = 0,
 	SCOPE_LAYOUT_VERTICAL = 1,
 	SCOPE_LAYOUT_HORIZONTAL = 2,
+	SCOPE_LAYOUT_FREE = 3, // every tile where you put it
 };
+
+static inline free_rect_s *tile_free(scope_widget_s *data, int tile)
+{
+	if (tile == 0)
+		return &data->roi_free;
+	if (tile > 0 && tile <= (int)data->entries.size())
+		return &data->entries[tile - 1]->free;
+	return nullptr;
+}
+
+static void fit_source(int fit, bool actual_size, obs_source_t *s, int cell_w, int cell_h, int *w_out, int *h_out);
+
+/* Fits a tile into its cell: the scope's own fit, or the aspect chosen for it. */
+static void fit_tile(const scope_widget_s *data, int t, obs_source_t *s, int cell_w, int cell_h, int *w, int *h)
+{
+	const int aspect = t > 0 ? data->entries[t - 1]->aspect : ASPECT_AUTO;
+	if (aspect == ASPECT_FILL) {
+		*w = cell_w;
+		*h = cell_h;
+		return;
+	}
+	if (aspect == ASPECT_16_9 || aspect == ASPECT_4_3 || aspect == ASPECT_1_1) {
+		const double r = aspect == ASPECT_16_9 ? 16.0 / 9.0 : aspect == ASPECT_4_3 ? 4.0 / 3.0 : 1.0;
+		if ((double)cell_w / std::max(cell_h, 1) > r) {
+			*h = cell_h;
+			*w = (int)(cell_h * r);
+		} else {
+			*w = cell_w;
+			*h = (int)(cell_w / r);
+		}
+		return;
+	}
+	bool actual_size;
+	const int fit = tile_fit(data, t, &actual_size);
+	fit_source(fit, actual_size, s, cell_w, cell_h, w, h);
+}
 
 #define SCOPE_GAP 2
 
@@ -366,7 +436,10 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 
 	const int n = (int)tiles.size();
 	int cols = 1, rows = 1;
-	choose_grid(data, tiles, cx, cy, data->layout, &cols, &rows);
+	data->last_cx = cx;
+	data->last_cy = cy;
+	choose_grid(data, tiles, cx, cy, data->layout == SCOPE_LAYOUT_FREE ? SCOPE_LAYOUT_AUTO : data->layout, &cols,
+		    &rows);
 	const int cell_w = n ? (cx - SCOPE_GAP * (cols - 1)) / cols : 0;
 	const int cell_h = n ? (cy - SCOPE_GAP * (rows - 1)) / rows : 0;
 
@@ -387,15 +460,29 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		// Center a partly filled last row.
 		int x_cell = col * (cell_w + SCOPE_GAP) + (cols - cols_in_row) * (cell_w + SCOPE_GAP) / 2;
 		int y_cell = row * (cell_h + SCOPE_GAP);
+		int w_cell = cell_w, h_cell = cell_h;
 
-		bool actual_size;
-		int fit = tile_fit(data, t, &actual_size);
+		if (data->layout == SCOPE_LAYOUT_FREE && solo < 0) {
+			free_rect_s *f = tile_free(data, t);
+			if (f->w <= 0.0f || f->h <= 0.0f) {
+				// not placed yet: start where the grid would put it
+				f->x = (float)x_cell / cx;
+				f->y = (float)y_cell / cy;
+				f->w = (float)cell_w / cx;
+				f->h = (float)cell_h / cy;
+			}
+			x_cell = (int)(f->x * cx);
+			y_cell = (int)(f->y * cy);
+			w_cell = (int)(f->w * cx);
+			h_cell = (int)(f->h * cy);
+		}
+
 		int w, h;
-		fit_source(fit, actual_size, s, cell_w, cell_h, &w, &h);
+		fit_tile(data, t, s, w_cell, h_cell, &w, &h);
 		if (w <= 0 || h <= 0)
 			continue;
-		int x = x_cell + (cell_w - w) / 2;
-		int y = y_cell + (cell_h - h) / 2;
+		int x = x_cell + (w_cell - w) / 2;
+		int y = y_cell + (h_cell - h) / 2;
 
 		gs_projection_push();
 		gs_viewport_push();
@@ -407,6 +494,10 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		r->y0 = y;
 		r->x1 = x + w;
 		r->y1 = y + h;
+		r->cx0 = x_cell;
+		r->cy0 = y_cell;
+		r->cx1 = x_cell + w_cell;
+		r->cy1 = y_cell + h_cell;
 		r->w = w_src;
 		r->h = h_src;
 
@@ -436,6 +527,47 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		}
 
 		gs_viewport_pop();
+		gs_projection_pop();
+	}
+
+	// arranging: outline every cell with a resize handle at the bottom right
+	if (data->arranging && data->layout == SCOPE_LAYOUT_FREE && solo < 0) {
+		gs_projection_push();
+		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+		const struct text_scale ts = text_scale_from_viewport((float)cx, (float)cy);
+		for (int k = 0; k < n; k++) {
+			const src_rect_s *r = tile_rect(data, tiles[k]);
+			if (r->cx1 <= r->cx0)
+				continue;
+			const float x0 = (float)r->cx0, y0 = (float)r->cy0, x1 = (float)r->cx1 - 1.0f,
+				    y1 = (float)r->cy1 - 1.0f;
+			const bool active = tiles[k] == data->drag_tile;
+			gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"),
+					    active ? 0xFFFFFFFF : 0xFF6FCF86);
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				gs_vertex2f(x0, y0);
+				gs_vertex2f(x1, y0);
+				gs_vertex2f(x1, y0);
+				gs_vertex2f(x1, y1);
+				gs_vertex2f(x1, y1);
+				gs_vertex2f(x0, y1);
+				gs_vertex2f(x0, y1);
+				gs_vertex2f(x0, y0);
+				gs_render_stop(GS_LINES);
+				gs_render_start(false);
+				gs_vertex2f(x1 - 12.0f, y1 - 12.0f);
+				gs_vertex2f(x1, y1 - 12.0f);
+				gs_vertex2f(x1 - 12.0f, y1);
+				gs_vertex2f(x1, y1);
+				gs_render_stop(GS_TRISTRIP);
+			}
+			const int t = tiles[k];
+			const char *name = t == 0 ? obs_module_text("ROI") : data->entries[t - 1]->label.c_str();
+			text_draw(&ts, name, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 14.0f, 0xFFFFFFFF, TEXT_ALIGN_CENTER,
+				  TEXT_VALIGN_MIDDLE);
+		}
 		gs_projection_pop();
 	}
 
@@ -546,6 +678,13 @@ void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, 
 		if (obs_data_has_user_value(meta, "use_roi"))
 			e->use_roi = obs_data_get_bool(meta, "use_roi");
 		e->target = obs_data_get_string(meta, "target");
+		e->aspect = (int)obs_data_get_int(meta, "aspect");
+		if (obs_data_has_user_value(meta, "free-w")) {
+			e->free.x = (float)obs_data_get_double(meta, "free-x");
+			e->free.y = (float)obs_data_get_double(meta, "free-y");
+			e->free.w = (float)obs_data_get_double(meta, "free-w");
+			e->free.h = (float)obs_data_get_double(meta, "free-h");
+		}
 	}
 
 	OBSDataAutoRelease prop = settings ? obs_data_create_from_json(obs_data_get_json(settings)) : obs_data_create();
@@ -584,6 +723,13 @@ static void entry_meta(const scope_entry *e, obs_data_t *meta)
 	obs_data_set_bool(meta, "show_label", e->show_label);
 	obs_data_set_bool(meta, "use_roi", e->use_roi);
 	obs_data_set_string(meta, "target", e->target.c_str());
+	obs_data_set_int(meta, "aspect", e->aspect);
+	if (e->free.w > 0.0f) {
+		obs_data_set_double(meta, "free-x", e->free.x);
+		obs_data_set_double(meta, "free-y", e->free.y);
+		obs_data_set_double(meta, "free-w", e->free.w);
+		obs_data_set_double(meta, "free-h", e->free.h);
+	}
 }
 
 void ScopeWidget::duplicateScope(int tile)
@@ -637,28 +783,6 @@ void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
 		connect(act, &QAction::triggered, this, [this, t]() { addScope(t); });
 	}
-
-	menu->addSeparator();
-
-	// Three vectorscopes for the dark, middle and bright parts of the picture.
-	QAction *act = menu->addAction(QString::fromUtf8(obs_module_text("dock.preset.lmh")));
-	connect(act, &QAction::triggered, this, [this]() {
-		const struct
-		{
-			int range;
-			const char *label_key;
-		} parts[] = {{1, "VS.Label.Lows"}, {2, "VS.Label.Mids"}, {3, "VS.Label.Highs"}};
-		for (const auto &part : parts) {
-			OBSDataAutoRelease prop = obs_data_create();
-			obs_data_set_int(prop, "luma_range", part.range);
-			obs_data_set_bool(prop, "hue_ring", true);
-			obs_data_set_int(prop, "intensity", 50);
-			obs_data_set_int(prop, "color_type", 0); // white trace, the ring carries the color
-			OBSDataAutoRelease meta = obs_data_create();
-			obs_data_set_string(meta, "label", obs_module_text(part.label_key));
-			insertScope(TYPE_VECTORSCOPE, prop, meta, -1);
-		}
-	});
 }
 
 /* ---------- toolbar ---------- */
@@ -693,6 +817,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	btnPin = make_tool_button(toolbar, "dock.toolbar.pin", "dock.toolbar.pin.tip", true);
 	auto *btnSnap = make_tool_button(toolbar, "dock.toolbar.snapshot", "dock.toolbar.snapshot.tip", false);
 	btnCompare = make_tool_button(toolbar, "dock.toolbar.compare", "dock.toolbar.compare.tip", true);
+	btnArrange = make_tool_button(toolbar, "dock.toolbar.arrange", "dock.toolbar.arrange.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
 
@@ -725,6 +850,8 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addSpacing(8);
 	layout->addWidget(btnSnap);
 	layout->addWidget(btnCompare);
+	layout->addSpacing(8);
+	layout->addWidget(btnArrange);
 	layout->addStretch(1);
 
 	// The shape buttons behave like radio buttons that can also be switched off.
@@ -736,6 +863,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_PIN : ROI_DRAW_NONE); });
 	connect(btnSnap, &QToolButton::clicked, this, &ScopeWidget::takeSnapshot);
 	connect(btnCompare, &QToolButton::toggled, this, &ScopeWidget::setCompare);
+	connect(btnArrange, &QToolButton::toggled, this, &ScopeWidget::setArranging);
 	connect(btnUndo, &QToolButton::clicked, this, &ScopeWidget::undoShape);
 	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
 
@@ -815,6 +943,26 @@ void ScopeWidget::takeSnapshot()
 		btnCompare->setChecked(true); // show what was just taken
 }
 
+/* Arranging: tiles are moved by dragging and resized at their bottom right corner, in the free layout. */
+void ScopeWidget::setArranging(bool on)
+{
+	pthread_mutex_lock(&data->mutex);
+	data->arranging = on;
+	data->drag_tile = -1;
+	if (on) {
+		data->layout = SCOPE_LAYOUT_FREE;
+		data->solo = -1;
+	}
+	pthread_mutex_unlock(&data->mutex);
+	if (btnArrange && btnArrange->isChecked() != on) {
+		btnArrange->blockSignals(true);
+		btnArrange->setChecked(on);
+		btnArrange->blockSignals(false);
+	}
+	if (!on)
+		unsetCursor();
+}
+
 void ScopeWidget::setCompare(bool on)
 {
 	comparing = on;
@@ -850,7 +998,8 @@ static obs_source_t *get_source_from_mouse(struct scope_widget_s *data, int x, i
 	    (INTERACT_MOUSE_LEFT | INTERACT_MOUSE_MIDDLE | INTERACT_MOUSE_RIGHT | INTERACT_KEEP_SOURCE)) {
 		i_mouse = data->i_mouse_last;
 	} else {
-		for (int t = 0; t < total; t++) {
+		// the last drawn tile is on top when tiles overlap (free layout)
+		for (int t = total - 1; t >= 0; t--) {
 			if (tile_rect(data, t)->is_inside(x, y)) {
 				i_mouse = t;
 				break;
@@ -872,7 +1021,7 @@ static obs_source_t *get_source_from_mouse(struct scope_widget_s *data, int x, i
 static int tile_at(scope_widget_s *data, int x, int y)
 {
 	const int total = n_tiles(data);
-	for (int t = 0; t < total; t++)
+	for (int t = total - 1; t >= 0; t--)
 		if (tile_rect(data, t)->is_inside(x, y))
 			return t;
 	return -1;
@@ -959,6 +1108,29 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 		return true;
 	}
 
+	if (data->arranging && data->layout == SCOPE_LAYOUT_FREE && event->button() == Qt::LeftButton) {
+		pthread_mutex_lock(&data->mutex);
+		if (mouseUp) {
+			data->drag_tile = -1;
+		} else if (clickCount == 1) {
+			const int x = (int)qtPos.x(), y = (int)qtPos.y();
+			data->drag_tile = -1;
+			for (int t = n_tiles(data) - 1; t >= 0; t--) {
+				const src_rect_s *r = tile_rect(data, t);
+				if (!r->cell_inside(x, y))
+					continue;
+				data->drag_tile = t;
+				data->drag_resize = x >= r->cx1 - 16 && y >= r->cy1 - 16;
+				data->drag_x = x;
+				data->drag_y = y;
+				data->drag_start = *tile_free(data, t);
+				break;
+			}
+		}
+		pthread_mutex_unlock(&data->mutex);
+		return true;
+	}
+
 	if (clickCount == 2 && event->button() == Qt::LeftButton) {
 		int hit = tile_at(data, (int)qtPos.x(), (int)qtPos.y());
 		// The ROI uses clicks to draw shapes, so it is maximized from the menu instead.
@@ -1006,6 +1178,44 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 		mouseEvent.modifiers = TranslateQtMouseEventModifiers(event);
 
 	const QPointF qtPos = event_pos(this, event);
+
+	if (data->arranging && data->layout == SCOPE_LAYOUT_FREE) {
+		const int x = (int)qtPos.x(), y = (int)qtPos.y();
+		pthread_mutex_lock(&data->mutex);
+		const int t = data->drag_tile;
+		free_rect_s *f = t >= 0 ? tile_free(data, t) : nullptr;
+		if (f && !mouseLeave && data->last_cx > 0 && data->last_cy > 0) {
+			// snap to 1 % of the dock
+			auto snap = [](float v) { return std::round(v * 100.0f) / 100.0f; };
+			const float dx = (float)(x - data->drag_x) / data->last_cx;
+			const float dy = (float)(y - data->drag_y) / data->last_cy;
+			const free_rect_s &s0 = data->drag_start;
+			if (data->drag_resize) {
+				f->w = std::clamp(snap(s0.w + dx), 0.05f, 1.0f - s0.x);
+				f->h = std::clamp(snap(s0.h + dy), 0.05f, 1.0f - s0.y);
+			} else {
+				f->x = std::clamp(snap(s0.x + dx), 0.0f, 1.0f - s0.w);
+				f->y = std::clamp(snap(s0.y + dy), 0.0f, 1.0f - s0.h);
+			}
+		}
+		// cursor: resize over a handle, move over a tile
+		Qt::CursorShape shape = Qt::ArrowCursor;
+		if (t >= 0) {
+			shape = data->drag_resize ? Qt::SizeFDiagCursor : Qt::SizeAllCursor;
+		} else {
+			for (int k = n_tiles(data) - 1; k >= 0; k--) {
+				const src_rect_s *r = tile_rect(data, k);
+				if (r->cell_inside(x, y)) {
+					shape = x >= r->cx1 - 16 && y >= r->cy1 - 16 ? Qt::SizeFDiagCursor
+										     : Qt::SizeAllCursor;
+					break;
+				}
+			}
+		}
+		pthread_mutex_unlock(&data->mutex);
+		setCursor(shape);
+		return true;
+	}
 
 	mouseEvent.modifiers |= INTERACT_KEEP_SOURCE;
 	obs_source_t *src0 = get_source_from_mouse(data, qtPos.x(), qtPos.y(), &mouseEvent);
@@ -1347,12 +1557,17 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 		obs_module_text("dock.menu.layout.auto"),
 		obs_module_text("dock.menu.layout.vertical"),
 		obs_module_text("dock.menu.layout.horizontal"),
+		obs_module_text("dock.menu.layout.free"),
 	};
-	for (int l = 0; l < 3; l++) {
+	for (int l = 0; l < 4; l++) {
 		act = layoutMenu->addAction(QString::fromUtf8(layout_text[l]));
 		act->setCheckable(true);
 		act->setChecked(data->layout == l);
-		connect(act, &QAction::triggered, this, [this, l]() { data->layout = l; });
+		connect(act, &QAction::triggered, this, [this, l]() {
+			data->layout = l;
+			if (l != SCOPE_LAYOUT_FREE)
+				setArranging(false);
+		});
 	}
 
 	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.toolbar")));
@@ -2220,6 +2435,24 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 		vbox->addWidget(combo);
 	}
 
+	// shape of the tile: what suits the scope, fill, or a fixed aspect ratio
+	if (e) {
+		vbox->addWidget(section_label(panel, QString::fromUtf8(obs_module_text("Options.Aspect"))));
+		auto *combo = new QComboBox(panel);
+		combo->addItem(QString::fromUtf8(obs_module_text("Options.Aspect.Auto")), ASPECT_AUTO);
+		combo->addItem(QString::fromUtf8(obs_module_text("Options.Aspect.Fill")), ASPECT_FILL);
+		combo->addItem(QStringLiteral("16:9"), ASPECT_16_9);
+		combo->addItem(QStringLiteral("4:3"), ASPECT_4_3);
+		combo->addItem(QStringLiteral("1:1"), ASPECT_1_1);
+		combo->setCurrentIndex(std::clamp(e->aspect, 0, 4));
+		connect(combo, QOverload<int>::of(&QComboBox::activated), this, [this, e, combo](int idx) {
+			pthread_mutex_lock(&data->mutex);
+			e->aspect = combo->itemData(idx).toInt();
+			pthread_mutex_unlock(&data->mutex);
+		});
+		vbox->addWidget(combo);
+	}
+
 	vbox->addWidget(divider(panel));
 
 	// graticule switch and the scope's own options
@@ -2372,6 +2605,12 @@ static void serialize_active(scope_widget_s *data, obs_data_t *out)
 {
 	pthread_mutex_lock(&data->mutex);
 	obs_data_set_int(out, "layout", data->layout);
+	if (data->roi_free.w > 0.0f) {
+		obs_data_set_double(out, "roi-free-x", data->roi_free.x);
+		obs_data_set_double(out, "roi-free-y", data->roi_free.y);
+		obs_data_set_double(out, "roi-free-w", data->roi_free.w);
+		obs_data_set_double(out, "roi-free-h", data->roi_free.h);
+	}
 	obs_data_set_int(out, "solo", data->solo);
 	obs_data_set_bool(out, "roi-shown", data->roi_shown);
 
@@ -2435,8 +2674,15 @@ void ScopeWidget::loadActive(obs_data_t *state)
 
 	pthread_mutex_lock(&data->mutex);
 	data->layout = state ? (int)obs_data_get_int(state, "layout") : SCOPE_LAYOUT_AUTO;
-	if (data->layout < SCOPE_LAYOUT_AUTO || data->layout > SCOPE_LAYOUT_HORIZONTAL)
+	if (data->layout < SCOPE_LAYOUT_AUTO || data->layout > SCOPE_LAYOUT_FREE)
 		data->layout = SCOPE_LAYOUT_AUTO;
+	data->roi_free = free_rect_s();
+	if (state && obs_data_has_user_value(state, "roi-free-w")) {
+		data->roi_free.x = (float)obs_data_get_double(state, "roi-free-x");
+		data->roi_free.y = (float)obs_data_get_double(state, "roi-free-y");
+		data->roi_free.w = (float)obs_data_get_double(state, "roi-free-w");
+		data->roi_free.h = (float)obs_data_get_double(state, "roi-free-h");
+	}
 	data->roi_shown = state && obs_data_has_user_value(state, "roi-shown") ? obs_data_get_bool(state, "roi-shown")
 									       : true;
 	pthread_mutex_unlock(&data->mutex);

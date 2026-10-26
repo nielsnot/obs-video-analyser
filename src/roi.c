@@ -215,6 +215,7 @@ static void roi_update(void *data, obs_data_t *settings)
 	cm_update(&src->cm, settings);
 
 	src->n_interleave = (int)obs_data_get_int(settings, "interleave");
+	src->zoom_anchor = (int)obs_data_get_int(settings, "zoom_anchor");
 
 	shapes_load(src, settings);
 
@@ -256,6 +257,11 @@ static obs_properties_t *roi_get_properties(void *data)
 	cm_get_properties(&src->cm, props);
 
 	obs_properties_add_int(props, "interleave", obs_module_text("Interleave"), 0, 1, 1);
+	obs_property_t *za = obs_properties_add_list(props, "zoom_anchor", obs_module_text("ROI.ZoomAnchor"),
+						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Face"), ROI_ZOOM_FACE);
+	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Pointer"), ROI_ZOOM_POINTER);
+	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Center"), ROI_ZOOM_CENTER);
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
 
 	obs_properties_t *lp = obs_properties_create();
@@ -814,8 +820,15 @@ static void roi_mouse_wheel(void *data, const struct obs_mouse_event *event, int
 	if (!y_delta || !event)
 		return;
 
-	const float px = event->x / src->zoom + src->view_x;
-	const float py = event->y / src->zoom + src->view_y;
+	// the point that stays put while zooming: the pointer, the center, or face height
+	// (the middle of the width, a little above the middle of the height, where faces sit in a close-up)
+	float ax = (float)event->x, ay = (float)event->y;
+	if (src->zoom_anchor != ROI_ZOOM_POINTER) {
+		ax = roi_get_width(src) * 0.5f;
+		ay = roi_get_height(src) * (src->zoom_anchor == ROI_ZOOM_CENTER ? 0.5f : 0.38f);
+	}
+	const float px = ax / src->zoom + src->view_x;
+	const float py = ay / src->zoom + src->view_y;
 
 	float zoom = src->zoom * (y_delta > 0 ? 1.25f : 0.8f);
 	if (zoom < 1.05f)
@@ -824,8 +837,8 @@ static void roi_mouse_wheel(void *data, const struct obs_mouse_event *event, int
 		zoom = ROI_ZOOM_MAX;
 
 	src->zoom = zoom;
-	src->view_x = px - event->x / zoom;
-	src->view_y = py - event->y / zoom;
+	src->view_x = px - ax / zoom;
+	src->view_y = py - ay / zoom;
 	clamp_view(src);
 }
 

@@ -20,6 +20,7 @@ class ScopeWidget : public NorisQTDisplay {
 	class QToolButton *btnEllipse = nullptr;
 	class QToolButton *btnPin = nullptr;
 	class QToolButton *btnCompare = nullptr;
+	class QToolButton *btnArrange = nullptr;
 	bool comparing = false;
 	bool toolbarVisible = true;
 	int drawMode = 0;
@@ -50,6 +51,7 @@ private:
 	void rebuildTabs();
 	void openTabMenu(const QPoint &pos);
 	void openOptions(int tile, const QPoint &globalPos);
+	void setArranging(bool on);
 	void addMarkerControls(class QWidget *panel, class QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
 			       const std::function<void()> &reopen);
 	void insertScope(int type, obs_data_t *prop, obs_data_t *meta, int index);

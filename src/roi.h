@@ -21,6 +21,12 @@ enum roi_draw_mode_e {
 
 #define ROI_MAX_PINS 8
 
+enum roi_zoom_anchor_e {
+	ROI_ZOOM_FACE = 0,    // middle of the width, a little above the middle of the height
+	ROI_ZOOM_POINTER = 1, // around the mouse pointer
+	ROI_ZOOM_CENTER = 2,
+};
+
 /* A color picker pin; position normalized to the captured frame, color read each frame. */
 struct roi_pin
 {
@@ -65,6 +71,7 @@ struct roi_source
 
 	// view zoom: the picture is shown zoomed by `zoom` with view_x/view_y (picture pixels) at the top left
 	float zoom, view_x, view_y;
+	int zoom_anchor; // roi_zoom_anchor_e
 	volatile bool panning;
 	int pan_mouse_x, pan_mouse_y; // view coordinates where the pan started
 	float pan_view_x, pan_view_y;

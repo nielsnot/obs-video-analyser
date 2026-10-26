@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- **Free layout:** `⊞ Arrange` lets you drag scopes anywhere in the dock and resize them at their bottom right
+  corner; they may overlap. Also under Layout → Free. The places are saved per view.
+- **Shape per scope:** Auto, Fill, 16:9, 4:3 or 1:1, in the scope's options.
+- **Vectorscope:** the Lows / Mids / Highs preset is gone from `+ Scope`; every vectorscope has
+  "Part of the picture" (all, lows, mids or highs) in its options.
+- **ROI zoom** goes toward face height (the middle of the width, a little above the middle) by default;
+  or toward the pointer or the middle.
+- **QC timeline:** luma maximum, APL and minimum over 1 min to 4 h, with the stretches where a check failed in red,
+  and for HDR the brightest pixel against 1000 nits.
+
 ## 0.5.0
 
 - **Audio meter:** peak per channel with hold, EBU R128 loudness (momentary, short-term, integrated) against a
