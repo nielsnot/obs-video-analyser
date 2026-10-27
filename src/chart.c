@@ -74,6 +74,7 @@ struct chart_source
 	int layout;
 	int ref_kind;
 	bool advice;
+	unsigned out_flags; // rows outside their tolerance, with a little hysteresis (render thread)
 };
 
 static void chart_update(void *, obs_data_t *);
@@ -269,7 +270,16 @@ static void chart_surface_cb(void *data, struct cm_surface_data *sd)
 	}
 
 	pthread_mutex_lock(&src->mutex);
-	memcpy(src->live, live, sizeof(live));
+	// steady numbers: each patch follows the picture over a few frames instead of jumping
+	if (src->live_valid && sd->width == src->live_w && sd->height == src->live_h) {
+		for (int i = 0; i < N_PATCH; i++) {
+			for (int k = 0; k < 3; k++)
+				src->live[i].rgb[k] += (live[i].rgb[k] - src->live[i].rgb[k]) * 0.25f;
+			src->live[i].spread = live[i].spread;
+		}
+	} else {
+		memcpy(src->live, live, sizeof(live));
+	}
 	src->live_valid = true;
 	src->live_w = sd->width;
 	src->live_h = sd->height;
@@ -425,82 +435,39 @@ static float wrapped(const struct text_scale *ts, const char *text, float x, flo
 	return y;
 }
 
-/* The written comparison: facts, and remarks only when something is far off. */
-static void summary(const struct patch *live, const float (*ref)[3], const char *ref_name, bool advice, char *out,
-		    size_t size)
+/* A check mark in a box of size sz at (x, y). */
+static void draw_check(const struct text_scale *ts, float x, float y, float sz, uint32_t color)
 {
-	size_t n = 0;
-#define ADD(...)                                                       \
-	do {                                                           \
-		if (n < size)                                          \
-			n += snprintf(out + n, size - n, __VA_ARGS__); \
-	} while (0)
-
-	float de[N_PATCH], sum = 0.0f, worst = 0.0f;
-	int iw = 0;
-	for (int i = 0; i < N_PATCH; i++) {
-		de[i] = delta_e(live[i].rgb, ref[i]);
-		sum += de[i];
-		if (de[i] > worst) {
-			worst = de[i];
-			iw = i;
-		}
+	const float t = 2.0f * ts->uy;
+	const float ax = x + sz * 0.12f, ay = y + sz * 0.55f, bx = x + sz * 0.4f, by = y + sz * 0.82f;
+	const float cx = x + sz * 0.9f, cy = y + sz * 0.18f;
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(ax, ay - t);
+		gs_vertex2f(ax, ay + t);
+		gs_vertex2f(bx, by - t);
+		gs_vertex2f(bx, by + t);
+		gs_vertex2f(cx, cy - t);
+		gs_vertex2f(cx, cy + t);
+		gs_render_stop(GS_TRISTRIP);
 	}
-	ADD("Against the %s: average Delta E %.1f, largest %.1f (%s). ", ref_name, sum / N_PATCH, worst,
-	    patch_names[iw]);
+}
 
-	// exposure and white balance from the middle greys (Neutral 8 to 3.5), which do not clip
-	float l_live = 0, l_ref = 0, rg_live = 0, rg_ref = 0, bg_live = 0, bg_ref = 0;
-	for (int i = 19; i <= 22; i++) {
-		const float *a = live[i].rgb, *b = ref[i];
-		l_live += 0.2126f * a[0] + 0.7152f * a[1] + 0.0722f * a[2];
-		l_ref += 0.2126f * b[0] + 0.7152f * b[1] + 0.0722f * b[2];
-		rg_live += a[0] / fmaxf(a[1], 1.0f);
-		bg_live += a[2] / fmaxf(a[1], 1.0f);
-		rg_ref += b[0] / fmaxf(b[1], 1.0f);
-		bg_ref += b[2] / fmaxf(b[1], 1.0f);
-	}
-	const float dl = (l_live - l_ref) / 4.0f / 2.55f;
-	const float stops = l_live > 1.0f && l_ref > 1.0f ? 2.4f * log2f(l_live / l_ref) : 0.0f;
-	ADD("Greys: luma %+.1f%% (about %+.1f stop). ", dl, stops);
-	const float r_pct = (rg_live / fmaxf(rg_ref, 0.01f) - 1.0f) * 100.0f;
-	const float b_pct = (bg_live / fmaxf(bg_ref, 0.01f) - 1.0f) * 100.0f;
-	ADD("White balance on the greys: red %+.0f%%, blue %+.0f%% against green", r_pct, b_pct);
-	if (fabsf(r_pct) >= 2.0f || fabsf(b_pct) >= 2.0f)
-		ADD(" (to match: R gain %+.0f%%, B gain %+.0f%%). ", -r_pct, -b_pct);
-	else
-		ADD(". ");
+/* In or out of the tolerance, with a little hysteresis so a mark does not flicker. */
+static bool outside(unsigned *flags, int bit, float value, float tol)
+{
+	const bool was = (*flags >> bit) & 1;
+	const bool now = was ? fabsf(value) > tol * 0.8f : fabsf(value) > tol * 1.2f;
+	*flags = now ? *flags | 1u << bit : *flags & ~(1u << bit);
+	return now;
+}
 
-	// saturation over the 18 colored patches
-	float c_live = 0, c_ref = 0;
-	for (int i = 0; i < 18; i++) {
-		c_live += chroma(live[i].rgb);
-		c_ref += chroma(ref[i]);
-	}
-	const float sat_pct = (c_live / fmaxf(c_ref, 0.01f) - 1.0f) * 100.0f;
-	ADD("Saturation %+.0f%%. ", sat_pct);
-
-	// hue of the six primaries, those that moved more than 3 degrees
-	bool any = false;
-	for (int i = 12; i < 18; i++) {
-		const float dh = wrap180(hue_deg(live[i].rgb) - hue_deg(ref[i]));
-		if (fabsf(dh) > 3.0f) {
-			ADD("%s%s hue %+.0f\xc2\xb0", any ? ", " : "Hue: ", patch_names[i], dh);
-			any = true;
-		}
-	}
-	if (any)
-		ADD(". ");
-
-	if (advice) {
-		if (sum / N_PATCH > 6.0f)
-			ADD("Clearly different from the %s. ", ref_name);
-		if (fabsf(stops) > 0.7f)
-			ADD("Exposure is far off. ");
-		if (fabsf(r_pct) > 10.0f || fabsf(b_pct) > 10.0f)
-			ADD("White balance is far off. ");
-	}
-#undef ADD
+static const char *stops_words(float stops)
+{
+	const float a = fabsf(stops);
+	return a < 0.375f ? "a quarter stop" : a < 0.75f ? "half a stop" : a < 1.25f ? "a stop" : "more than a stop";
 }
 
 static void chart_render(void *data, gs_effect_t *effect)
@@ -514,7 +481,16 @@ static void chart_render(void *data, gs_effect_t *effect)
 	cm_render_target(&src->cm);
 
 	const float W = (float)CH_W, H = (float)CH_H;
-	const struct text_scale ts = text_scale_from_viewport(W, H);
+	struct text_scale ts = text_scale_from_viewport(W, H);
+	// never taller than the tile: with a large text size the text shrinks until the table fits
+	{
+		const float need = 19.0f * (12.5f + 7.0f) * ts.uy;
+		if (need > H) {
+			const float k = H / need;
+			ts.ux *= k;
+			ts.uy *= k;
+		}
+	}
 	fill(0.0f, 0.0f, W, H, 0xFF101013);
 
 	struct patch live[N_PATCH];
@@ -590,8 +566,156 @@ static void chart_render(void *data, gs_effect_t *effect)
 		wrapped(&ts, obs_module_text("Chart.Hint"), x, y, text_w, 13.0f, 0xFFD8D8DC, H - m);
 		return;
 	}
-	summary(live, (const float(*)[3])ref, ref_name, src->advice, buf, sizeof(buf));
-	y = wrapped(&ts, buf, x, y, text_w, 13.0f, 0xFFE6E6EA, H - m);
+	// the comparison as a table in fixed places: Reference | Difference | Live, a check per row
+	const float px = 12.5f, lh = (px + 7.0f) * ts.uy;
+	const uint32_t c_head = 0xFF8D8D96, c_val = 0xFFE6E6EA, c_dim = 0xFFB8B8C0;
+	const float lw = text_w * 0.26f, bar_w = text_w * 0.2f;
+	const float fcw = (text_w - lw - bar_w - 34.0f * ts.ux) / 3.0f;
+	const float col_ref = x + lw + fcw - 4.0f * ts.ux, col_diff = col_ref + fcw;
+	const float col_live = col_diff + 34.0f * ts.ux + bar_w + fcw;
+	text_draw(&ts, src->ref_kind == REF_PUBLISHED ? "Published" : "Reference", col_ref, y, px * 0.9f, c_head,
+		  TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	text_draw(&ts, "Difference", col_diff, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	text_draw(&ts, "Live", col_live, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	y += lh;
+
+	// the numbers
+	float de_sum = 0.0f, de_max = 0.0f;
+	for (int i = 0; i < N_PATCH; i++) {
+		const float d = delta_e(live[i].rgb, ref[i]);
+		de_sum += d;
+		de_max = fmaxf(de_max, d);
+	}
+	float gl = 0, gr = 0, rl = 0, rr = 0, bl = 0, br = 0;
+	for (int i = 19; i <= 22; i++) { // the middle greys, which do not clip
+		const float *a = live[i].rgb, *b = ref[i];
+		gl += (0.2126f * a[0] + 0.7152f * a[1] + 0.0722f * a[2]) / 2.55f / 4.0f;
+		gr += (0.2126f * b[0] + 0.7152f * b[1] + 0.0722f * b[2]) / 2.55f / 4.0f;
+		rl += a[0] / fmaxf(a[1], 1.0f) * 25.0f;
+		rr += b[0] / fmaxf(b[1], 1.0f) * 25.0f;
+		bl += a[2] / fmaxf(a[1], 1.0f) * 25.0f;
+		br += b[2] / fmaxf(b[1], 1.0f) * 25.0f;
+	}
+	float cl = 0, cr = 0;
+	for (int i = 0; i < 18; i++) {
+		cl += chroma(live[i].rgb) / 18.0f;
+		cr += chroma(ref[i]) / 18.0f;
+	}
+	const float stops = gl > 0.5f && gr > 0.5f ? 2.4f * log2f(gl / gr) : 0.0f;
+
+	struct row
+	{
+		const char *label;
+		bool has_values;
+		float ref, live, diff, tol;
+		const char *fmt_val, *fmt_diff;
+	} rows[13] = {
+		{"Delta E average", false, 0, 0, de_sum / N_PATCH, 3.0f, "", "%.1f"},
+		{"Delta E largest", false, 0, 0, de_max, 6.0f, "", "%.1f"},
+		{"Greys luma", true, gr, gl, gl - gr, 3.0f, "%.1f%%", "%+.1f%%"},
+		{"Red / green", true, rr, rl, rl - rr, 2.0f, "%.1f%%", "%+.1f%%"},
+		{"Blue / green", true, br, bl, bl - br, 2.0f, "%.1f%%", "%+.1f%%"},
+		{"Saturation", true, cr, cl, (cl / fmaxf(cr, 0.01f) - 1.0f) * 100.0f, 5.0f, "%.1f", "%+.0f%%"},
+	};
+	int nrows = 6;
+	for (int i = 12; i < 18; i++) {
+		const float hr = hue_deg(ref[i]), hl = hue_deg(live[i].rgb);
+		rows[nrows++] = (struct row){patch_names[i], true,           hr, hl, wrap180(hl - hr), 4.0f,
+					     "%.0f\xc2\xb0", "%+.1f\xc2\xb0"};
+	}
+	bool any_out = false;
+	bool out[13];
+	for (int k = 0; k < nrows; k++) {
+		const struct row *w = rows + k;
+		// Delta E has no sign: it is out above its limit
+		out[k] = outside(&src->out_flags, k, k < 2 ? fmaxf(w->diff, 0.0f) : w->diff, w->tol);
+		any_out |= out[k];
+		if (k % 2 == 0)
+			fill(x, y - 2.0f * ts.uy, x + text_w, y + lh - 3.0f * ts.uy, 0xFF17171B);
+		text_draw(&ts, w->label, x + 4.0f * ts.ux, y, px, c_dim, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		if (w->has_values) {
+			snprintf(buf, sizeof(buf), w->fmt_val, w->ref);
+			text_draw(&ts, buf, col_ref, y, px, c_val, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+			snprintf(buf, sizeof(buf), w->fmt_val, w->live);
+			text_draw(&ts, buf, col_live, y, px, c_val, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+		}
+		snprintf(buf, sizeof(buf), w->fmt_diff, w->diff);
+		text_draw(&ts, buf, col_diff, y, px, out[k] ? 0xFFFFA040 : 0xFF6FCF86, TEXT_ALIGN_RIGHT,
+			  TEXT_VALIGN_TOP);
+		const float box = px * ts.uy;
+		if (!out[k])
+			draw_check(&ts, col_diff + 10.0f * ts.ux, y + 1.0f * ts.uy, box, 0xFF6FCF86);
+		else
+			fill(col_diff + 14.0f * ts.ux, y + box * 0.35f, col_diff + 14.0f * ts.ux + box * 0.6f,
+			     y + box * 0.65f, 0xFFFFA040);
+		// the difference on a scale of three tolerances each side (Delta E from zero up)
+		const float bx0 = col_diff + 30.0f * ts.ux, bx1 = bx0 + bar_w, yc = y + box * 0.5f;
+		const bool one_sided = k < 2;
+		const float zero = one_sided ? bx0 : (bx0 + bx1) * 0.5f;
+		const float unit = one_sided ? (bx1 - bx0) / 3.0f : (bx1 - bx0) / 6.0f;
+		fill(bx0, yc - 1.0f * ts.uy, bx1, yc + 1.0f * ts.uy, 0xFF3A3A40);
+		fill(one_sided ? zero : zero - unit, yc - box * 0.3f, zero + unit, yc + box * 0.3f, 0xFF2F5A3A);
+		fill(zero - 0.75f * ts.ux, yc - box * 0.45f, zero + 0.75f * ts.ux, yc + box * 0.45f, 0xFF8D8D96);
+		const float v = fmaxf(one_sided ? 0.0f : -3.0f, fminf(3.0f, w->diff / w->tol));
+		const float mx = zero + v * unit;
+		fill(mx - 3.0f * ts.ux, yc - box * 0.45f, mx + 3.0f * ts.ux, yc + box * 0.45f,
+		     out[k] ? 0xFFFFA040 : 0xFF6FCF86);
+		y += lh;
+	}
+	y += 6.0f * ts.uy;
+
+	// the explanation: only for what is off, in words that do not change with every frame
+	size_t n = 0;
+	buf[0] = 0;
+#define ADD(...)                                                              \
+	do {                                                                  \
+		if (n < sizeof(buf))                                          \
+			n += snprintf(buf + n, sizeof(buf) - n, __VA_ARGS__); \
+	} while (0)
+	if (!any_out) {
+		draw_check(&ts, x, y, px * ts.uy, 0xFF6FCF86);
+		snprintf(buf, sizeof(buf), "Within tolerance of the %s", ref_name);
+		text_draw(&ts, buf, x + (px + 6.0f) * ts.ux, y, px, 0xFF6FCF86, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		y += lh;
+		buf[0] = 0;
+	} else {
+		if (out[2]) {
+			ADD("Exposure: the greys are %s than the %s", gl < gr ? "darker" : "brighter", ref_name);
+			if (!cm_cs_is_hdr(cm_get_colorspace(&src->cm)) && fabsf(stops) >= 0.1f)
+				ADD(", about %s", stops_words(stops));
+			ADD("; %s exposure (iris, gain or ND). ", gl < gr ? "raise" : "lower");
+		}
+		if (out[3] || out[4]) {
+			ADD("White balance: on the greys");
+			if (out[3])
+				ADD(" red is %s", rl > rr ? "higher" : "lower");
+			if (out[3] && out[4])
+				ADD(" and");
+			if (out[4])
+				ADD(" blue is %s", bl > br ? "higher" : "lower");
+			ADD("; %s%s%s. ", out[3] ? (rl > rr ? "lower the R gain" : "raise the R gain") : "",
+			    out[3] && out[4] ? ", " : "",
+			    out[4] ? (bl > br ? "lower the B gain" : "raise the B gain") : "");
+		}
+		if (out[5])
+			ADD("Saturation: the colors are %s saturated than the %s. ", cl < cr ? "less" : "more",
+			    ref_name);
+		bool hue_head = false;
+		for (int k = 6; k < nrows; k++) {
+			if (!out[k])
+				continue;
+			ADD("%s%s toward %s", hue_head ? ", " : "Hue: ", rows[k].label,
+			    rows[k].diff > 0.0f ? "the next color counter-clockwise" : "the next color clockwise");
+			hue_head = true;
+		}
+		if (hue_head)
+			ADD(" on the vectorscope. ");
+		if (src->advice && (de_sum / N_PATCH > 6.0f || fabsf(stops) > 0.7f))
+			ADD("Clearly different from the %s. ", ref_name);
+	}
+#undef ADD
+	if (buf[0])
+		y = wrapped(&ts, buf, x, y, text_w, 12.0f, 0xFFFFC890, H - m);
 	if (cm_cs_is_hdr(cm_get_colorspace(&src->cm)))
 		wrapped(&ts, obs_module_text("Chart.HdrNote"), x, y + 6.0f * ts.uy, text_w, 11.0f, 0xFF8D8D96, H - m);
 }

@@ -2,6 +2,10 @@
 
 ## 0.7.11
 
+- **Color chart** shows its comparison as a steady table: Reference, Difference and Live for the greys' luma, red
+  and blue against green, saturation and the hue of the six primaries, plus the average and largest Delta E, each
+  with a check or an orange mark and the difference on a tolerance scale. The patches are smoothed over a few
+  frames, the marks have a little hysteresis, and the explanation below appears only for what is off.
 - **3D cube:** turning it with the mouse no longer jumps: a short "leave" from the display window in the middle of
   a drag no longer ends the drag.
 - **Faces** shows its numbers in tables that stay in place: the scene (median, P10, P90, P99, near black, near
