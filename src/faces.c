@@ -718,7 +718,7 @@ static void faces_render(void *data, gs_effect_t *effect)
 		const float bx = tx + size + m;
 		// after a restart only the measurements are kept: the panel shows the skin color then
 		const uint8_t *c = src->base.skin_rgb;
-		const uint32_t skin = 0xFF000000 | (uint32_t)c[2] << 16 | (uint32_t)c[1] << 8 | c[0];
+		const uint32_t skin = 0xFF000000 | (uint32_t)c[0] << 16 | (uint32_t)c[1] << 8 | c[2]; // 0xAARRGGBB
 		face_panel(&ts, src->base_tex, 0, 0, src->base_tex ? gs_texture_get_width(src->base_tex) : 0,
 			   src->base_tex ? gs_texture_get_height(src->base_tex) : 0, bx, py, size,
 			   obs_module_text("Faces.Base"), 0xFFFFC040, tk, src->base_tex ? 0xFF000000 : skin);

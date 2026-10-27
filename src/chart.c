@@ -381,12 +381,12 @@ static void fill(float x0, float y0, float x1, float y1, uint32_t color)
 	}
 }
 
-static uint32_t abgr(const float rgb[3])
+static uint32_t argb(const float rgb[3])
 {
 	const uint32_t r = (uint32_t)fminf(fmaxf(rgb[0], 0.0f), 255.0f);
 	const uint32_t g = (uint32_t)fminf(fmaxf(rgb[1], 0.0f), 255.0f);
 	const uint32_t b = (uint32_t)fminf(fmaxf(rgb[2], 0.0f), 255.0f);
-	return 0xFF000000 | b << 16 | g << 8 | r;
+	return 0xFF000000 | r << 16 | g << 8 | b; // colors here are 0xAARRGGBB
 }
 
 static float wrapped(const struct text_scale *ts, const char *text, float x, float y, float width, float px,
@@ -551,16 +551,16 @@ static void chart_render(void *data, gs_effect_t *effect)
 		const float x1 = x0 + cw - 4.0f, y1 = y0 + chh - 4.0f;
 		const float ym = (y0 + y1) * 0.5f;
 		if (have_ref)
-			fill(x0, y0, x1, ym, abgr(ref[i]));
+			fill(x0, y0, x1, ym, argb(ref[i]));
 		else
 			fill(x0, y0, x1, ym, 0xFF26262B);
 		if (have_live)
-			fill(x0, have_ref ? ym : y0, x1, y1, abgr(live[i].rgb));
+			fill(x0, have_ref ? ym : y0, x1, y1, argb(live[i].rgb));
 		if (have_live && have_ref) {
 			const float d = delta_e(live[i].rgb, ref[i]);
 			char buf[16];
 			snprintf(buf, sizeof(buf), "%.1f", d);
-			const uint32_t c = d < 3.0f ? 0xFF6FCF86 : d < 6.0f ? 0xFF40C0FF : 0xFF5A5AFF;
+			const uint32_t c = d < 3.0f ? 0xFF6FCF86 : d < 6.0f ? 0xFFFFA040 : 0xFFFF5A5A;
 			const float tw = text_width(&ts, buf, 12.0f);
 			fill((x0 + x1) * 0.5f - tw * 0.5f - 3.0f * ts.ux, ym - 8.0f * ts.uy,
 			     (x0 + x1) * 0.5f + tw * 0.5f + 3.0f * ts.ux, ym + 8.0f * ts.uy, 0xC0000000);
@@ -583,7 +583,7 @@ static void chart_render(void *data, gs_effect_t *effect)
 	for (int i = 0; i < N_PATCH; i++)
 		busy += live[i].spread > 12.0f;
 	if (busy > 4) {
-		y = wrapped(&ts, obs_module_text("Chart.Misaligned"), x, y, text_w, 12.0f, 0xFF40C0FF, H - m);
+		y = wrapped(&ts, obs_module_text("Chart.Misaligned"), x, y, text_w, 12.0f, 0xFFFFC040, H - m);
 		y += 6.0f * ts.uy;
 	}
 	if (!have_ref) {
