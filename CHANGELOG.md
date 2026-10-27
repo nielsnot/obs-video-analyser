@@ -2,6 +2,8 @@
 
 ## 0.7.11
 
+- **3D cube:** turning it with the mouse no longer jumps: a short "leave" from the display window in the middle of
+  a drag no longer ends the drag.
 - **Faces** shows its numbers in tables that stay in place: the scene (median, P10, P90, P99, near black, near
   clipping) and the face (luma, hue, saturation, distance to the skin tone line). With a reference or snapshot the
   table reads Reference, Difference, Live from left to right (the reference face also sits left of the live one), a green check per value within tolerance and an orange mark

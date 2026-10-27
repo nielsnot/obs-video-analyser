@@ -301,12 +301,23 @@ static void cb_mouse_click(void *data, const struct obs_mouse_event *event, int3
 static void cb_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
 {
 	struct cb_source *src = data;
-	if (mouse_leave) {
-		src->dragging = false;
+	// The dock's display window can report a short "leave" in the middle of a drag; the drag only ends
+	// when the button is let go, so the cube does not jump.
+	const bool held = (event->modifiers & INTERACT_MOUSE_LEFT) != 0;
+	if (!held) {
+		if (mouse_leave)
+			src->dragging = false;
 		return;
 	}
-	if (!src->dragging)
+	if (!src->dragging) {
+		// the button came back into the tile still held: carry on from here
+		src->dragging = true;
+		src->drag_x = event->x;
+		src->drag_y = event->y;
+		src->drag_yaw = src->yaw;
+		src->drag_pitch = src->pitch;
 		return;
+	}
 	src->yaw = src->drag_yaw + (event->x - src->drag_x) * 0.5f;
 	float pitch = src->drag_pitch + (event->y - src->drag_y) * 0.5f;
 	src->pitch = pitch < -89.0f ? -89.0f : pitch > 89.0f ? 89.0f : pitch;
