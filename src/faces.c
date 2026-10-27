@@ -25,6 +25,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#define CROP_BASE 0
+#define CROP_SNAP 1
 #define CROP_PX 96 // the reference face is kept at this size, BGRA
 #define FC_W 1200
 #define FC_H 450
@@ -57,10 +59,11 @@ struct probe_source
 	struct face_stats stats;
 	volatile int want_id; // the face to measure; 0 for the largest
 
-	// a small copy of the face for the reference look, taken on request (pipeline thread)
-	volatile bool want_crop, crop_ready;
-	float crop[4]; // x, y, w, h normalized to the picture
-	uint8_t crop_buf[CROP_PX * CROP_PX * 4];
+	// small copies of the face for the reference look [CROP_BASE] and the snapshot [CROP_SNAP], taken on
+	// request (pipeline thread) to keep with the settings
+	volatile bool want_crop[2], crop_ready[2];
+	float crop[2][4]; // x, y, w, h normalized to the picture
+	uint8_t crop_buf[2][CROP_PX * CROP_PX * 4];
 };
 
 static const char *probe_get_name(void *unused)
@@ -131,22 +134,24 @@ static void probe_surface_cb(void *data, struct cm_surface_data *sd)
 
 	face_detector_submit(p->fd, sd->rgb_data, sd->width, sd->height, sd->linesize);
 
-	if (p->want_crop) {
+	for (int c = 0; c < 2; c++) {
+		if (!p->want_crop[c])
+			continue;
 		// the face for the reference look: CROP_PX x CROP_PX, nearest pixel
 		for (int y = 0; y < CROP_PX; y++) {
-			float v = p->crop[1] + p->crop[3] * (y + 0.5f) / CROP_PX;
+			float v = p->crop[c][1] + p->crop[c][3] * (y + 0.5f) / CROP_PX;
 			v = v < 0.0f ? 0.0f : v > 0.999f ? 0.999f : v;
 			const uint8_t *row = sd->rgb_data + (size_t)sd->linesize * (uint32_t)(v * sd->height);
 			for (int x = 0; x < CROP_PX; x++) {
-				float u = p->crop[0] + p->crop[2] * (x + 0.5f) / CROP_PX;
+				float u = p->crop[c][0] + p->crop[c][2] * (x + 0.5f) / CROP_PX;
 				u = u < 0.0f ? 0.0f : u > 0.999f ? 0.999f : u;
 				const uint8_t *px = row + (uint32_t)(u * sd->width) * 4;
-				uint8_t *d = p->crop_buf + (y * CROP_PX + x) * 4;
+				uint8_t *d = p->crop_buf[c] + (y * CROP_PX + x) * 4;
 				d[0] = px[0], d[1] = px[1], d[2] = px[2], d[3] = 255;
 			}
 		}
-		p->want_crop = false;
-		p->crop_ready = true;
+		p->want_crop[c] = false;
+		p->crop_ready[c] = true;
 	}
 
 	struct face_stats st = {0};
@@ -262,6 +267,8 @@ struct faces_source
 	struct face_stats ref;
 	bool have_ref;
 	gs_texture_t *ref_tex;
+	uint8_t *snap_pixels; // the stored snapshot face (CROP_PX square, BGRA), to make ref_tex from after a reload
+	volatile bool snap_pixels_new;
 
 	// reference look ("this is how it should look"): kept with the settings, compared with all the time
 	volatile bool want_base, want_clear_base;
@@ -331,6 +338,18 @@ static bool faces_clear_base_clicked(obs_properties_t *props, obs_property_t *p,
 	return false;
 }
 
+static void request_crop(struct probe_source *p, int which, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t cw,
+			 uint32_t ch)
+{
+	if (!p)
+		return;
+	p->crop[which][0] = (float)x / cw;
+	p->crop[which][1] = (float)y / ch;
+	p->crop[which][2] = (float)w / cw;
+	p->crop[which][3] = (float)h / ch;
+	p->want_crop[which] = true;
+}
+
 static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static char *b64_encode(const uint8_t *data, size_t len)
@@ -380,6 +399,22 @@ static void faces_update(void *data, obs_data_t *settings)
 			src->base_pixels = bmalloc(CROP_PX * CROP_PX * 4);
 		if (b64_decode(img, src->base_pixels, CROP_PX * CROP_PX * 4) == CROP_PX * CROP_PX * 4)
 			src->base_pixels_new = true;
+	}
+	// the snapshot, as stored: the measurements and the face
+	const char *sst = obs_data_get_string(settings, "snap_stats");
+	const char *simg = obs_data_get_string(settings, "snap_img");
+	if (sst && *sst && !src->have_ref) {
+		struct face_stats st;
+		if (b64_decode(sst, (uint8_t *)&st, sizeof(st)) == sizeof(st) && st.skin_valid) {
+			src->ref = st;
+			src->have_ref = true;
+		}
+	}
+	if (simg && *simg) {
+		if (!src->snap_pixels)
+			src->snap_pixels = bmalloc(CROP_PX * CROP_PX * 4);
+		if (b64_decode(simg, src->snap_pixels, CROP_PX * CROP_PX * 4) == CROP_PX * CROP_PX * 4)
+			src->snap_pixels_new = true;
 	}
 	// the reference look, as stored
 	if (obs_data_get_bool(settings, "base_valid")) {
@@ -442,6 +477,7 @@ static void faces_destroy(void *data)
 	gs_texture_destroy(src->base_tex);
 	obs_leave_graphics();
 	bfree(src->base_pixels);
+	bfree(src->snap_pixels);
 	bfree(src->name);
 	bfree(src);
 }
@@ -504,12 +540,19 @@ static void faces_tick(void *data, float seconds)
 		obs_data_release(d);
 	}
 	struct probe_source *p = src->probe ? obs_obj_get_data(src->probe) : NULL;
-	if (p && p->crop_ready) {
-		// keep the reference face with the settings too, so it is there after a view switch or restart
-		p->crop_ready = false;
-		char *enc = b64_encode(p->crop_buf, sizeof(p->crop_buf));
+	for (int c = 0; p && c < 2; c++) {
+		if (!p->crop_ready[c])
+			continue;
+		// keep the face with the settings too, so it is there after a view switch or restart
+		p->crop_ready[c] = false;
+		char *enc = b64_encode(p->crop_buf[c], sizeof(p->crop_buf[c]));
 		obs_data_t *d = obs_data_create();
-		obs_data_set_string(d, "base_img", enc);
+		obs_data_set_string(d, c == CROP_BASE ? "base_img" : "snap_img", enc);
+		if (c == CROP_SNAP) {
+			char *st = b64_encode((const uint8_t *)&src->ref, sizeof(src->ref));
+			obs_data_set_string(d, "snap_stats", st);
+			bfree(st);
+		}
 		obs_source_update(src->self, d);
 		obs_data_release(d);
 		bfree(enc);
@@ -764,6 +807,8 @@ static void faces_render(void *data, gs_effect_t *effect)
 				gs_copy_texture_region(src->ref_tex, 0, 0, tex, fx, fy, fw, fh);
 			src->ref = st;
 			src->have_ref = src->ref_tex != NULL;
+			src->snap_pixels_new = false;
+			request_crop(p, CROP_SNAP, fx, fy, fw, fh, cw, ch);
 		}
 	}
 	// reference look: set from the face now, or cleared
@@ -777,13 +822,7 @@ static void faces_render(void *data, gs_effect_t *effect)
 			src->base = st;
 			src->have_base = true;
 			src->store_base = true;
-			if (p) {
-				p->crop[0] = (float)fx / cw;
-				p->crop[1] = (float)fy / ch;
-				p->crop[2] = (float)fw / cw;
-				p->crop[3] = (float)fh / ch;
-				p->want_crop = true;
-			}
+			request_crop(p, CROP_BASE, fx, fy, fw, fh, cw, ch);
 		}
 	}
 	if (src->base_pixels_new && !src->base_tex && src->have_base) {
@@ -791,6 +830,11 @@ static void faces_render(void *data, gs_effect_t *effect)
 		src->base_pixels_new = false;
 		const uint8_t *px = src->base_pixels;
 		src->base_tex = gs_texture_create(CROP_PX, CROP_PX, GS_BGRA, 1, &px, 0);
+	}
+	if (src->snap_pixels_new && !src->ref_tex && src->have_ref) {
+		src->snap_pixels_new = false;
+		const uint8_t *px = src->snap_pixels;
+		src->ref_tex = gs_texture_create(CROP_PX, CROP_PX, GS_BGRA, 1, &px, 0);
 	}
 	if (src->want_clear_base) {
 		src->want_clear_base = false;
@@ -836,9 +880,9 @@ static void faces_render(void *data, gs_effect_t *effect)
 	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, live_x, py, size, label, 0xFF6FCF86, tk, 0xFF000000);
 	src->live_x0 = live_x, src->live_y0 = py, src->live_size = size;
 	if (show_snap) {
-		face_panel(&ts, src->ref_tex, 0, 0, gs_texture_get_width(src->ref_tex),
-			   gs_texture_get_height(src->ref_tex), tx, py, size, obs_module_text("Faces.Snapshot"),
-			   0xFFFF59D9, tk, 0xFF000000);
+		face_panel(&ts, src->ref_tex, 0, 0, src->ref_tex ? gs_texture_get_width(src->ref_tex) : 0,
+			   src->ref_tex ? gs_texture_get_height(src->ref_tex) : 0, tx, py, size,
+			   obs_module_text("Faces.Snapshot"), 0xFFFF59D9, tk, 0xFF000000);
 	} else if (show_ref) {
 		const float bx = tx;
 		// after a restart only the measurements are kept: the panel shows the skin color then

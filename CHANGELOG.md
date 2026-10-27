@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.13
+
+- **Faces:** the snapshot (the face and its measurements) is kept with the settings as well, so comparing with it
+  still works after switching views or restarting OBS.
+
 ## 0.7.12
 
 - **Faces:** the picture of the reference face ("Set as reference") is kept with the settings, so it is still
