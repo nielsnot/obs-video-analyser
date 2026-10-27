@@ -246,6 +246,12 @@ struct faces_source
 	bool have_base;
 	gs_texture_t *base_tex; // the face as it was; not kept over a restart
 
+	// steady numbers: the values shown are smoothed, and a value leaves or enters the tolerance only
+	// a little past its edge, so the table does not flicker
+	struct face_stats disp;
+	bool disp_valid;
+	unsigned out_flags; // bit 0 luma, 1 hue, 2 saturation: outside the tolerance
+
 	// which face: 0 follows the largest, otherwise the tracker id clicked or stepped to
 	int sel_id;
 	int text_pct;
@@ -539,62 +545,6 @@ static void draw_tex_region(gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t 
 	gs_matrix_pop();
 }
 
-/* Facts only: the measured values, and the differences to the snapshot. A remark is added only when a value
- * is far outside what is normal for a face (with Advice on); taste, such as a warm or cool look, is left alone. */
-static void assessment(const struct face_stats *s, const struct face_stats *ref, const char *ref_name, bool advice,
-		       char *out, size_t size)
-{
-	size_t n = 0;
-#define ADD(...)                                                       \
-	do {                                                           \
-		if (n < size)                                          \
-			n += snprintf(out + n, size - n, __VA_ARGS__); \
-	} while (0)
-
-	if (!s->skin_valid) {
-		ADD("%s", obs_module_text("Faces.NoFace"));
-		return;
-	}
-	const float dev = s->skin_hue - SKIN_LINE_DEG;
-	ADD("Face: luma %.1f%%, hue %.0f\xc2\xb0 (%+.0f\xc2\xb0 from the skin tone line), saturation %.0f%%. ",
-	    s->skin_luma, s->skin_hue, dev, s->skin_sat);
-
-	if (ref && ref->skin_valid) {
-		const float dl = s->skin_luma - ref->skin_luma;
-		const float dh = s->skin_hue - ref->skin_hue;
-		const float ds = s->skin_sat - ref->skin_sat;
-		// about 2.4 stops per doubling of the signal for SDR video
-		const float stops = s->skin_luma > 0.5f && ref->skin_luma > 0.5f
-					    ? 2.4f * log2f(ref->skin_luma / s->skin_luma)
-					    : 0.0f;
-		ADD("%s difference: luma %+.1f%%", ref_name, dl);
-		if (fabsf(stops) >= 0.1f && s->colorspace < CM_CS_2100_HLG)
-			ADD(" (about %+.1f stop)", -stops);
-		ADD(", hue %+.0f\xc2\xb0, saturation %+.0f%%. ", dh, ds);
-		if (fabsf(dl) <= 3.0f && fabsf(dh) <= 4.0f && fabsf(ds) <= 5.0f)
-			ADD("Within tolerance of the %s. ", ref_name[0] == 'S' ? "snapshot" : "reference");
-		else if (advice && (fabsf(dl) > 10.0f || fabsf(dh) > 12.0f || fabsf(ds) > 15.0f))
-			ADD("Clearly different from the %s. ", ref_name[0] == 'S' ? "snapshot" : "reference");
-	}
-
-	if (advice) {
-		// only what is far out of proportion
-		float lo, hi;
-		face_range(s->colorspace, &lo, &hi);
-		if (s->skin_luma < lo - 15.0f)
-			ADD("Very dark for a face (usual %.0f-%.0f%%). ", lo, hi);
-		else if (s->skin_luma > hi + 12.0f)
-			ADD("Very bright for a face (usual %.0f-%.0f%%). ", lo, hi);
-		if (fabsf(dev) > 20.0f)
-			ADD("Hue is far from the skin tone line; check white balance. ");
-		if (s->skin_sat > 65.0f)
-			ADD("Very saturated for a face. ");
-		else if (s->skin_sat < 4.0f)
-			ADD("Almost no color in the face. ");
-	}
-#undef ADD
-}
-
 static void face_panel(const struct text_scale *ts, gs_texture_t *tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 		       float px, float py, float size, const char *label, uint32_t color, float tk, uint32_t bg)
 {
@@ -606,6 +556,79 @@ static void face_panel(const struct text_scale *ts, gs_texture_t *tex, uint32_t 
 	fill(px, py + size - lh * ts->uy, px + size, py + size, 0xA0000000);
 	text_draw(ts, label, px + size * 0.5f, py + size - 3.0f * ts->uy, 11.0f * tk, color, TEXT_ALIGN_CENTER,
 		  TEXT_VALIGN_BOTTOM);
+}
+
+/* A check mark in a box of size s at (x, y). */
+static void draw_check(const struct text_scale *ts, float x, float y, float s, uint32_t color)
+{
+	const float t = 2.0f * ts->uy; // stroke
+	const float ax = x + s * 0.12f, ay = y + s * 0.55f, bx = x + s * 0.4f, by = y + s * 0.82f;
+	const float cx = x + s * 0.9f, cy = y + s * 0.18f;
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(ax, ay - t);
+		gs_vertex2f(ax, ay + t);
+		gs_vertex2f(bx, by - t);
+		gs_vertex2f(bx, by + t);
+		gs_vertex2f(cx, cy - t);
+		gs_vertex2f(cx, cy + t);
+		gs_render_stop(GS_TRISTRIP);
+	}
+}
+
+/* Smooths the values shown, so the numbers do not dance from frame to frame. */
+static void smooth(struct faces_source *src, const struct face_stats *st)
+{
+	struct face_stats *d = &src->disp;
+	if (!src->disp_valid || !st->skin_valid != !d->skin_valid) {
+		*d = *st;
+		src->disp_valid = true;
+		return;
+	}
+	const float a = 0.15f;
+#define SM(f) d->f += (st->f - d->f) * a
+	SM(median);
+	SM(p10);
+	SM(p90);
+	SM(p99);
+	SM(near_black);
+	SM(near_clip);
+	if (st->skin_valid) {
+		SM(skin_luma);
+		SM(skin_sat);
+		// hue wraps around
+		float dh = st->skin_hue - d->skin_hue;
+		if (dh > 180.0f)
+			dh -= 360.0f;
+		else if (dh < -180.0f)
+			dh += 360.0f;
+		d->skin_hue += dh * a;
+		if (d->skin_hue < 0.0f)
+			d->skin_hue += 360.0f;
+		else if (d->skin_hue >= 360.0f)
+			d->skin_hue -= 360.0f;
+	}
+#undef SM
+	d->valid = st->valid;
+	d->colorspace = st->colorspace;
+	d->n_faces = st->n_faces;
+}
+
+/* In or out of the tolerance, with a little hysteresis. */
+static bool outside(unsigned *flags, int bit, float diff, float tol)
+{
+	const bool was = (*flags >> bit) & 1;
+	const bool now = was ? fabsf(diff) > tol * 0.8f : fabsf(diff) > tol * 1.2f;
+	*flags = now ? *flags | 1u << bit : *flags & ~(1u << bit);
+	return now;
+}
+
+static const char *stops_words(float stops)
+{
+	const float a = fabsf(stops);
+	return a < 0.375f ? "a quarter stop" : a < 0.75f ? "half a stop" : a < 1.25f ? "a stop" : "more than a stop";
 }
 
 static void faces_render(void *data, gs_effect_t *effect)
@@ -724,7 +747,7 @@ static void faces_render(void *data, gs_effect_t *effect)
 			   obs_module_text("Faces.Base"), 0xFFFFC040, tk, src->base_tex ? 0xFF000000 : skin);
 	}
 
-	// right: the text
+	// right: the text, as tables in fixed places so nothing moves while the values change
 	const float x = tx + tw + 2.0f * m;
 	const float text_w = W - x - m;
 	const float y1 = H - m;
@@ -739,16 +762,155 @@ static void faces_render(void *data, gs_effect_t *effect)
 		text_draw(&ts, buf, x, ty, 14.0f * tk, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 		return;
 	}
+	smooth(src, &st);
+	const struct face_stats *d = &src->disp;
+	const float px = 12.5f * tk, lh = (px + 7.0f) * ts.uy;
+	const uint32_t c_head = 0xFF8D8D96, c_val = 0xFFE6E6EA, c_dim = 0xFFB8B8C0;
+
 	snprintf(buf, sizeof(buf), "%s  \xe2\x80\xa2  %d %s", name, st.n_faces,
 		 st.n_faces == 1 ? obs_module_text("Faces.FaceFound") : obs_module_text("Faces.FacesFound"));
-	float y = wrapped(&ts, buf, x, ty, text_w, 14.0f * tk, 0xFFF0F0F2, y1);
-	y += 2.0f * ts.uy;
-	snprintf(buf, sizeof(buf),
-		 "Scene luma: median %.1f%%, P10-P90 %.1f-%.1f, P99 %.0f; near black %.0f%%, near clipping %.0f%%.",
-		 st.median, st.p10, st.p90, st.p99, st.near_black, st.near_clip);
-	y = wrapped(&ts, buf, x, y, text_w, 12.0f * tk, 0xFFD8D8DC, y1);
-	assessment(&st, show_ref ? cmp : NULL, show_snap ? "Snapshot" : "Reference", src->advice, buf, sizeof(buf));
-	y = wrapped(&ts, buf, x, y + 4.0f * ts.uy, text_w, 12.0f * tk, 0xFFD8D8DC, y1);
+	text_draw(&ts, buf, x, ty, 14.0f * tk, 0xFFF0F0F2, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	float y = ty + (14.0f * tk + 10.0f) * ts.uy;
+
+	// scene: one row, six columns, numbers right-aligned
+	{
+		static const char *heads[6] = {"Median", "P10", "P90", "P99", "Black", "Clip"};
+		const float vals[6] = {d->median, d->p10, d->p90, d->p99, d->near_black, d->near_clip};
+		const float lw = text_w * 0.16f, scw = (text_w - lw) / 6.0f;
+		text_draw(&ts, "Scene", x, y + lh, px, c_dim, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		for (int k = 0; k < 6; k++) {
+			const float cx = x + lw + scw * (k + 1) - 4.0f * ts.ux;
+			text_draw(&ts, heads[k], cx, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+			snprintf(buf, sizeof(buf), "%.1f%%", vals[k]);
+			text_draw(&ts, buf, cx, y + lh, px, c_val, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+		}
+		y += lh * 2.0f + 8.0f * ts.uy;
+	}
+
+	if (!st.skin_valid) {
+		wrapped(&ts, obs_module_text("Faces.NoFace"), x, y, text_w, px, c_dim, y1);
+		return;
+	}
+
+	// face: Live, and with a reference: Reference, Difference and a check per row
+	const struct face_stats *r = show_ref && cmp->skin_valid ? cmp : NULL;
+	const char *rname = show_snap ? "Snapshot" : "Reference";
+	const float lw = text_w * 0.24f;
+	const float fcw = r ? (text_w - lw - 30.0f * ts.ux) / 3.0f : text_w * 0.25f;
+	const float col_live = x + lw + fcw - 4.0f * ts.ux, col_ref = col_live + fcw, col_diff = col_ref + fcw;
+	text_draw(&ts, "Live", col_live, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	if (r) {
+		text_draw(&ts, rname, col_ref, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+		text_draw(&ts, "Difference", col_diff, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	}
+	y += lh;
+
+	float dl = 0.0f, dh = 0.0f, ds = 0.0f;
+	if (r) {
+		dl = d->skin_luma - r->skin_luma;
+		dh = d->skin_hue - r->skin_hue;
+		if (dh > 180.0f)
+			dh -= 360.0f;
+		else if (dh < -180.0f)
+			dh += 360.0f;
+		ds = d->skin_sat - r->skin_sat;
+	}
+	const bool out_l = r && outside(&src->out_flags, 0, dl, 3.0f);
+	const bool out_h = r && outside(&src->out_flags, 1, dh, 4.0f);
+	const bool out_s = r && outside(&src->out_flags, 2, ds, 5.0f);
+	struct row
+	{
+		const char *label;
+		float live, ref, diff;
+		const char *unit;
+		bool out;
+	} rows[4] = {
+		{"Luma", d->skin_luma, r ? r->skin_luma : 0.0f, dl, "%", out_l},
+		{"Hue", d->skin_hue, r ? r->skin_hue : 0.0f, dh, "\xc2\xb0", out_h},
+		{"Saturation", d->skin_sat, r ? r->skin_sat : 0.0f, ds, "%", out_s},
+		{"Skin tone line", d->skin_hue - SKIN_LINE_DEG, r ? r->skin_hue - SKIN_LINE_DEG : 0.0f, dh, "\xc2\xb0",
+		 out_h},
+	};
+	for (int k = 0; k < 4; k++) {
+		const struct row *w = rows + k;
+		if (k % 2 == 0)
+			fill(x, y - 2.0f * ts.uy, x + text_w, y + lh - 3.0f * ts.uy, 0xFF17171B);
+		text_draw(&ts, w->label, x + 4.0f * ts.ux, y, px, c_dim, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		const bool sign = k == 3;
+		snprintf(buf, sizeof(buf), sign ? "%+.1f%s" : "%.1f%s", w->live, w->unit);
+		text_draw(&ts, buf, col_live, y, px, c_val, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+		if (!r) {
+			y += lh;
+			continue;
+		}
+		snprintf(buf, sizeof(buf), sign ? "%+.1f%s" : "%.1f%s", w->ref, w->unit);
+		text_draw(&ts, buf, col_ref, y, px, c_val, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+		if (k == 3) {
+			y += lh;
+			continue; // the same difference as Hue
+		}
+		snprintf(buf, sizeof(buf), "%+.1f%s", w->diff, w->unit);
+		text_draw(&ts, buf, col_diff, y, px, w->out ? 0xFFFFA040 : 0xFF6FCF86, TEXT_ALIGN_RIGHT,
+			  TEXT_VALIGN_TOP);
+		const float box = px * ts.uy;
+		if (!w->out)
+			draw_check(&ts, col_diff + 10.0f * ts.ux, y + 1.0f * ts.uy, box, 0xFF6FCF86);
+		else
+			fill(col_diff + 14.0f * ts.ux, y + box * 0.35f, col_diff + 14.0f * ts.ux + box * 0.6f,
+			     y + box * 0.65f, 0xFFFFA040);
+		y += lh;
+	}
+	y += 6.0f * ts.uy;
+
+	// the explanation: only when something is off, in words that do not change with every frame
+	size_t n = 0;
+	buf[0] = 0;
+#define ADD(...)                                                              \
+	do {                                                                  \
+		if (n < sizeof(buf))                                          \
+			n += snprintf(buf + n, sizeof(buf) - n, __VA_ARGS__); \
+	} while (0)
+	if (r && !out_l && !out_h && !out_s) {
+		draw_check(&ts, x, y, px * ts.uy, 0xFF6FCF86);
+		text_draw(&ts, show_snap ? "Within tolerance of the snapshot" : "Within tolerance of the reference",
+			  x + (px + 6.0f) * ts.ux, y, px, 0xFF6FCF86, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		y += lh;
+	} else if (r) {
+		const char *rl = show_snap ? "snapshot" : "reference";
+		if (out_l) {
+			const float stops = d->skin_luma > 0.5f && r->skin_luma > 0.5f
+						    ? 2.4f * log2f(d->skin_luma / r->skin_luma)
+						    : 0.0f;
+			ADD("Luma: the face is %s than the %s", dl < 0.0f ? "darker" : "brighter", rl);
+			if (d->colorspace < CM_CS_2100_HLG && fabsf(stops) >= 0.1f)
+				ADD(", about %s", stops_words(stops));
+			ADD("; %s exposure (iris, gain or ND) on this camera. ", dl < 0.0f ? "raise" : "lower");
+		}
+		if (out_h)
+			ADD("Hue: the skin is more toward %s than the %s; check white balance or tint. ",
+			    dh < 0.0f ? "red / magenta" : "yellow / green", rl);
+		if (out_s)
+			ADD("Saturation: the skin is %s saturated than the %s; check the saturation or chroma level. ",
+			    ds < 0.0f ? "less" : "more", rl);
+	}
+	if (src->advice) {
+		// far out of proportion, with or without a reference
+		float lo, hi;
+		face_range(d->colorspace, &lo, &hi);
+		if (d->skin_luma < lo - 15.0f)
+			ADD("Very dark for a face (usual %.0f-%.0f%%). ", lo, hi);
+		else if (d->skin_luma > hi + 12.0f)
+			ADD("Very bright for a face (usual %.0f-%.0f%%). ", lo, hi);
+		if (fabsf(d->skin_hue - SKIN_LINE_DEG) > 20.0f)
+			ADD("Hue is far from the skin tone line; check white balance. ");
+		if (d->skin_sat > 65.0f)
+			ADD("Very saturated for a face. ");
+		else if (d->skin_sat < 4.0f)
+			ADD("Almost no color in the face. ");
+	}
+#undef ADD
+	if (buf[0])
+		y = wrapped(&ts, buf, x, y, text_w, px * 0.95f, 0xFFFFC890, y1);
 	if (!src->have_ref && !src->have_base)
 		y = wrapped(&ts, obs_module_text("Faces.SnapshotHint"), x, y + 4.0f * ts.uy, text_w, 11.0f * tk,
 			    0xFF8D8D96, y1);
