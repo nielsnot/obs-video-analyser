@@ -90,6 +90,10 @@ class ChartTest(obstest.OBSTest):
         if img:
             os.makedirs('screenshots', exist_ok=True)
             img.save('screenshots/chart.png')
+        if img:
+            samples = [img.getpixel((int(8 + (i % 6) * 100 + 48), int(8 + (i // 6) * 100 + y)))
+                       for i in (0, 18, 23) for y in (24, 80)]
+            notice(f'chart: patches 1, 19, 24 (reference, live): {samples}; size {img.size}')
         notice(f'chart: largest patch difference {worst} code values')
         self.assertLessEqual(worst, 8, 'the patches are not measured as drawn')
 

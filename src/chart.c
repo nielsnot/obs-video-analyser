@@ -224,6 +224,15 @@ static void patch_cell(int layout, int i, int *col, int *row, int *cols, int *ro
 static void chart_surface_cb(void *data, struct cm_surface_data *sd)
 {
 	struct chart_source *src = data;
+	{
+		static uint64_t last_log;
+		const uint64_t now = os_gettime_ns();
+		if (now - last_log > 3000000000ULL) {
+			last_log = now;
+			blog(LOG_INFO, "[" PLUGIN_NAME "] chart input %ux%u rgb %s", sd->width, sd->height,
+			     sd->rgb_data ? "yes" : "no");
+		}
+	}
 	if (!sd->rgb_data || sd->width < 12 || sd->height < 12)
 		return;
 
