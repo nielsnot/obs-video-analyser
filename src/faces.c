@@ -796,7 +796,8 @@ static void faces_render(void *data, gs_effect_t *effect)
 	const struct face_stats *r = show_ref && cmp->skin_valid ? cmp : NULL;
 	const char *rname = show_snap ? "Snapshot" : "Reference";
 	const float lw = text_w * 0.24f;
-	const float fcw = r ? (text_w - lw - 30.0f * ts.ux) / 3.0f : text_w * 0.25f;
+	const float bar_w = r ? text_w * 0.24f : 0.0f; // the difference drawn on a scale
+	const float fcw = r ? (text_w - lw - bar_w - 34.0f * ts.ux) / 3.0f : text_w * 0.25f;
 	const float col_live = x + lw + fcw - 4.0f * ts.ux, col_ref = col_live + fcw, col_diff = col_ref + fcw;
 	text_draw(&ts, "Live", col_live, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
 	if (r) {
@@ -858,6 +859,22 @@ static void faces_render(void *data, gs_effect_t *effect)
 		else
 			fill(col_diff + 14.0f * ts.ux, y + box * 0.35f, col_diff + 14.0f * ts.ux + box * 0.6f,
 			     y + box * 0.65f, 0xFFFFA040);
+		{
+			// the difference on a scale of three tolerances each side: the green band is the tolerance,
+			// the marker the live value against the reference (it stops at the ends)
+			static const float tol[3] = {3.0f, 4.0f, 5.0f};
+			const float bx0 = col_diff + 30.0f * ts.ux, bx1 = bx0 + bar_w;
+			const float bc = (bx0 + bx1) * 0.5f, half = (bx1 - bx0) * 0.5f;
+			const float yc = y + box * 0.5f;
+			fill(bx0, yc - 1.0f * ts.uy, bx1, yc + 1.0f * ts.uy, 0xFF3A3A40);
+			const float tw3 = half / 3.0f; // one tolerance
+			fill(bc - tw3, yc - box * 0.3f, bc + tw3, yc + box * 0.3f, 0xFF2F5A3A);
+			fill(bc - 0.75f * ts.ux, yc - box * 0.45f, bc + 0.75f * ts.ux, yc + box * 0.45f, 0xFF8D8D96);
+			const float v = fmaxf(-3.0f, fminf(3.0f, w->diff / tol[k]));
+			const float mx = bc + v * tw3;
+			fill(mx - 3.0f * ts.ux, yc - box * 0.45f, mx + 3.0f * ts.ux, yc + box * 0.45f,
+			     w->out ? 0xFFFFA040 : 0xFF6FCF86);
+		}
 		y += lh;
 	}
 	y += 6.0f * ts.uy;
