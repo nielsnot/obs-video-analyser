@@ -731,14 +731,16 @@ static void faces_render(void *data, gs_effect_t *effect)
 		snprintf(label, sizeof(label), "%s %d/%d", obs_module_text("Faces.Live"), sel + 1, st.n_faces);
 	else
 		snprintf(label, sizeof(label), "%s", obs_module_text("Faces.Live"));
-	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, tx, py, size, label, 0xFF6FCF86, tk, 0xFF000000);
-	src->live_x0 = tx, src->live_y0 = py, src->live_size = size;
+	// with a reference: the reference on the left, live on the right, as in the table
+	const float live_x = show_ref ? tx + size + m : tx;
+	face_panel(&ts, face ? tex : NULL, fx, fy, fw, fh, live_x, py, size, label, 0xFF6FCF86, tk, 0xFF000000);
+	src->live_x0 = live_x, src->live_y0 = py, src->live_size = size;
 	if (show_snap) {
 		face_panel(&ts, src->ref_tex, 0, 0, gs_texture_get_width(src->ref_tex),
-			   gs_texture_get_height(src->ref_tex), tx + size + m, py, size,
-			   obs_module_text("Faces.Snapshot"), 0xFFFF59D9, tk, 0xFF000000);
+			   gs_texture_get_height(src->ref_tex), tx, py, size, obs_module_text("Faces.Snapshot"),
+			   0xFFFF59D9, tk, 0xFF000000);
 	} else if (show_ref) {
-		const float bx = tx + size + m;
+		const float bx = tx;
 		// after a restart only the measurements are kept: the panel shows the skin color then
 		const uint8_t *c = src->base.skin_rgb;
 		const uint32_t skin = 0xFF000000 | (uint32_t)c[0] << 16 | (uint32_t)c[1] << 8 | c[2]; // 0xAARRGGBB
@@ -798,7 +800,9 @@ static void faces_render(void *data, gs_effect_t *effect)
 	const float lw = text_w * 0.24f;
 	const float bar_w = r ? text_w * 0.24f : 0.0f; // the difference drawn on a scale
 	const float fcw = r ? (text_w - lw - bar_w - 34.0f * ts.ux) / 3.0f : text_w * 0.25f;
-	const float col_live = x + lw + fcw - 4.0f * ts.ux, col_ref = col_live + fcw, col_diff = col_ref + fcw;
+	// Reference | Difference (number, check, scale) | Live: the difference sits between the two values
+	const float col_ref = x + lw + fcw - 4.0f * ts.ux, col_diff = col_ref + fcw;
+	const float col_live = r ? col_diff + 34.0f * ts.ux + bar_w + fcw : x + lw + fcw - 4.0f * ts.ux;
 	text_draw(&ts, "Live", col_live, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
 	if (r) {
 		text_draw(&ts, rname, col_ref, y, px * 0.9f, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);

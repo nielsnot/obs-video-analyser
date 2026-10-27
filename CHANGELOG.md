@@ -4,7 +4,7 @@
 
 - **Faces** shows its numbers in tables that stay in place: the scene (median, P10, P90, P99, near black, near
   clipping) and the face (luma, hue, saturation, distance to the skin tone line). With a reference or snapshot the
-  table has Live, Reference and Difference columns, a green check per value within tolerance and an orange mark
+  table reads Reference, Difference, Live from left to right (the reference face also sits left of the live one), a green check per value within tolerance and an orange mark
   when not. The values are smoothed and the tolerance has a little hysteresis, so nothing flickers. Below the table
   a short explanation appears only for what is off, in words that do not change with every frame.
 - **Faces** draws each difference on a scale: a green band for the tolerance and a marker for the live value
