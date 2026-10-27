@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.12
+
+- **Faces:** the picture of the reference face ("Set as reference") is kept with the settings, so it is still
+  there after switching views or restarting OBS. Before, only the numbers were kept and the picture became a
+  plain skin-colored patch.
+
 ## 0.7.11
 
 - **Color chart** shows its comparison as a steady table: Reference, Difference and Live for the greys' luma, red

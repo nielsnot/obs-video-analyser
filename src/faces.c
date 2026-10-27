@@ -25,6 +25,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#define CROP_PX 96 // the reference face is kept at this size, BGRA
 #define FC_W 1200
 #define FC_H 450
 #define SKIN_LINE_DEG 123.0f // the skin tone (I) line on the vectorscope
@@ -55,6 +56,11 @@ struct probe_source
 	pthread_mutex_t mutex;
 	struct face_stats stats;
 	volatile int want_id; // the face to measure; 0 for the largest
+
+	// a small copy of the face for the reference look, taken on request (pipeline thread)
+	volatile bool want_crop, crop_ready;
+	float crop[4]; // x, y, w, h normalized to the picture
+	uint8_t crop_buf[CROP_PX * CROP_PX * 4];
 };
 
 static const char *probe_get_name(void *unused)
@@ -124,6 +130,24 @@ static void probe_surface_cb(void *data, struct cm_surface_data *sd)
 		return;
 
 	face_detector_submit(p->fd, sd->rgb_data, sd->width, sd->height, sd->linesize);
+
+	if (p->want_crop) {
+		// the face for the reference look: CROP_PX x CROP_PX, nearest pixel
+		for (int y = 0; y < CROP_PX; y++) {
+			float v = p->crop[1] + p->crop[3] * (y + 0.5f) / CROP_PX;
+			v = v < 0.0f ? 0.0f : v > 0.999f ? 0.999f : v;
+			const uint8_t *row = sd->rgb_data + (size_t)sd->linesize * (uint32_t)(v * sd->height);
+			for (int x = 0; x < CROP_PX; x++) {
+				float u = p->crop[0] + p->crop[2] * (x + 0.5f) / CROP_PX;
+				u = u < 0.0f ? 0.0f : u > 0.999f ? 0.999f : u;
+				const uint8_t *px = row + (uint32_t)(u * sd->width) * 4;
+				uint8_t *d = p->crop_buf + (y * CROP_PX + x) * 4;
+				d[0] = px[0], d[1] = px[1], d[2] = px[2], d[3] = 255;
+			}
+		}
+		p->want_crop = false;
+		p->crop_ready = true;
+	}
 
 	struct face_stats st = {0};
 	st.colorspace = sd->colorspace;
@@ -244,7 +268,9 @@ struct faces_source
 	volatile bool store_base; // write the reference into the settings on the next tick
 	struct face_stats base;
 	bool have_base;
-	gs_texture_t *base_tex; // the face as it was; not kept over a restart
+	gs_texture_t *base_tex; // the face as it was
+	uint8_t *base_pixels;   // the stored face (CROP_PX square, BGRA), to make base_tex from after a reload
+	volatile bool base_pixels_new;
 
 	// steady numbers: the values shown are smoothed, and a value leaves or enters the tolerance only
 	// a little past its edge, so the table does not flicker
@@ -305,9 +331,56 @@ static bool faces_clear_base_clicked(obs_properties_t *props, obs_property_t *p,
 	return false;
 }
 
+static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static char *b64_encode(const uint8_t *data, size_t len)
+{
+	char *out = bmalloc((len + 2) / 3 * 4 + 1);
+	size_t o = 0;
+	for (size_t i = 0; i < len; i += 3) {
+		const uint32_t v = (uint32_t)data[i] << 16 | (i + 1 < len ? (uint32_t)data[i + 1] << 8 : 0) |
+				   (i + 2 < len ? data[i + 2] : 0);
+		out[o++] = b64[v >> 18 & 63];
+		out[o++] = b64[v >> 12 & 63];
+		out[o++] = i + 1 < len ? b64[v >> 6 & 63] : '=';
+		out[o++] = i + 2 < len ? b64[v & 63] : '=';
+	}
+	out[o] = 0;
+	return out;
+}
+
+/* Decodes into out (size bytes); returns the number of bytes written. */
+static size_t b64_decode(const char *s, uint8_t *out, size_t size)
+{
+	uint32_t v = 0;
+	int bits = 0;
+	size_t n = 0;
+	for (; *s && *s != '='; s++) {
+		const char *c = strchr(b64, *s);
+		if (!c)
+			continue;
+		v = v << 6 | (uint32_t)(c - b64);
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			if (n < size)
+				out[n++] = (uint8_t)(v >> bits);
+		}
+	}
+	return n;
+}
+
 static void faces_update(void *data, obs_data_t *settings)
 {
 	struct faces_source *src = data;
+	// the stored face of the reference look
+	const char *img = obs_data_get_string(settings, "base_img");
+	if (obs_data_get_bool(settings, "base_valid") && img && *img) {
+		if (!src->base_pixels)
+			src->base_pixels = bmalloc(CROP_PX * CROP_PX * 4);
+		if (b64_decode(img, src->base_pixels, CROP_PX * CROP_PX * 4) == CROP_PX * CROP_PX * 4)
+			src->base_pixels_new = true;
+	}
 	// the reference look, as stored
 	if (obs_data_get_bool(settings, "base_valid")) {
 		src->base.skin_valid = true;
@@ -368,6 +441,7 @@ static void faces_destroy(void *data)
 	gs_texture_destroy(src->ref_tex);
 	gs_texture_destroy(src->base_tex);
 	obs_leave_graphics();
+	bfree(src->base_pixels);
 	bfree(src->name);
 	bfree(src);
 }
@@ -415,6 +489,8 @@ static void faces_tick(void *data, float seconds)
 		src->store_base = false;
 		obs_data_t *d = obs_data_create();
 		obs_data_set_bool(d, "base_valid", src->have_base);
+		if (!src->have_base)
+			obs_data_set_string(d, "base_img", "");
 		if (src->have_base) {
 			obs_data_set_int(d, "base_cs", src->base.colorspace);
 			obs_data_set_double(d, "base_luma", src->base.skin_luma);
@@ -427,8 +503,19 @@ static void faces_tick(void *data, float seconds)
 		obs_source_update(src->self, d);
 		obs_data_release(d);
 	}
+	struct probe_source *p = src->probe ? obs_obj_get_data(src->probe) : NULL;
+	if (p && p->crop_ready) {
+		// keep the reference face with the settings too, so it is there after a view switch or restart
+		p->crop_ready = false;
+		char *enc = b64_encode(p->crop_buf, sizeof(p->crop_buf));
+		obs_data_t *d = obs_data_create();
+		obs_data_set_string(d, "base_img", enc);
+		obs_source_update(src->self, d);
+		obs_data_release(d);
+		bfree(enc);
+	}
 	if (src->probe)
-		probe_tick(obs_obj_get_data(src->probe), seconds);
+		probe_tick(p, seconds);
 }
 
 static void fill(float x0, float y0, float x1, float y1, uint32_t color)
@@ -690,7 +777,20 @@ static void faces_render(void *data, gs_effect_t *effect)
 			src->base = st;
 			src->have_base = true;
 			src->store_base = true;
+			if (p) {
+				p->crop[0] = (float)fx / cw;
+				p->crop[1] = (float)fy / ch;
+				p->crop[2] = (float)fw / cw;
+				p->crop[3] = (float)fh / ch;
+				p->want_crop = true;
+			}
 		}
+	}
+	if (src->base_pixels_new && !src->base_tex && src->have_base) {
+		// the stored face, after a view switch or a restart
+		src->base_pixels_new = false;
+		const uint8_t *px = src->base_pixels;
+		src->base_tex = gs_texture_create(CROP_PX, CROP_PX, GS_BGRA, 1, &px, 0);
 	}
 	if (src->want_clear_base) {
 		src->want_clear_base = false;
