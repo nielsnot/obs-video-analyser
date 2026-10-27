@@ -88,6 +88,7 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "audio_source", "audio", "Audio", FIT_ASPECT},
 	{ID_PREFIX "cube_source", "cube", "Cube", FIT_SQUARE},
 	{ID_PREFIX "faces_source", "faces", "Faces", FIT_ASPECT},
+	{ID_PREFIX "chart_source", "chart", "Chart", FIT_ASPECT},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -935,7 +936,8 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 			add(QB_MK_DEL, 40);
 		}
 	}
-	if (e->type >= 0 && e->type < N_TYPES && !strcmp(scope_types[e->type].key, "faces")) {
+	if (e->type >= 0 && e->type < N_TYPES &&
+	    (!strcmp(scope_types[e->type].key, "faces") || !strcmp(scope_types[e->type].key, "chart"))) {
 		add(QB_FACE_BASE, 40);
 		add(QB_FACE_CLEAR, 40);
 	}

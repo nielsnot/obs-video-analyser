@@ -1,1 +1,2 @@
 face.png: crop of images/cnnresult.png from libfacedetection (BSD 3-clause, see deps/libfacedetection/LICENSE)
+chart.png: 24 flat patches in the published sRGB values of a ColorChecker Classic, drawn by the test suite.

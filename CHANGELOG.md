@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.10
+
+- **Color chart:** a new scope for a 24-patch chart (ColorChecker Classic layout). Draw a rectangle around the
+  patches in the ROI view; "Set reference" keeps the chart as one camera sees it, and every other camera pointed
+  at the same chart is compared with it, or with the chart's published values. Per patch the reference and live
+  color with the Delta E; below that the average and largest Delta E, exposure and white balance from the greys
+  (with the R and B gain change to match), saturation, and the hue of the six primaries. The chart may be upside
+  down or turned a quarter (an option), and a warning shows when the rectangle does not sit on the patches.
+
 ## 0.7.9
 
 - **Faces: reference look.** "Set reference" (quick controls or options) keeps the face as it is now as the look you

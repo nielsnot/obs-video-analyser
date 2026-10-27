@@ -58,6 +58,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **3D color cube** | Every pixel in the RGB cube | Turns by itself; drag to turn, wheel to zoom |
 | **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term with maximum, integrated) against a target, a loudness timeline of 30 s to 1.5 h, phase correlation, goniometer for stereo and a room meter for 5.1 and 7.1 |
 | **Faces** *(experimental)* | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
+| **Color chart** | A 24-patch chart | Compares a color chart with a reference camera or the published values: Delta E per patch, exposure and white balance from the greys (with the gain change to match), saturation and the hue of the primaries |
 | **Info and timecode** | Time and format | One line per tile: time-of-day timecode, clock, date, video format or your own text (or all of them stacked) |
 
 ## Tools

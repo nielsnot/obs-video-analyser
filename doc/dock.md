@@ -195,6 +195,15 @@ want. From then on every shot is compared with it, with the differences in luma,
 `◉ Snapshot` also keeps the face. Switch to another camera or angle and, with `Compare` on, the kept face appears
 next to the live one with the differences (luma and about how many stops, hue, saturation) and whether it matches.
 
+## Color chart
+
+Point a camera at a 24-patch chart (ColorChecker Classic layout) and draw a rectangle around the patches in the ROI
+view, just inside the chart's black border. The `Color chart` scope samples the middle of every patch. When the
+chart looks right, press `Set reference` (quick controls or options); then point another camera at the same chart
+and the scope shows every patch as reference over live with the Delta E, plus exposure and white balance from the
+greys (with the R and B gain change that would match them), saturation and the hue of the six primaries. `Compare
+with` can also be the chart's published values. If the chart is upside down or turned, set `Chart in the selection`.
+
 ## Hue and saturation histograms
 
 Set a histogram's components to `Hue` or `Saturation`. Drag across it to set the ROI qualifier to that range;
