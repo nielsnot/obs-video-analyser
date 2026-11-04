@@ -1,11 +1,11 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
 uniform float intensity;
-// parade and stack colors: clear red, green and blue (blue a little lifted so it reads on black)
+// parade and stack colors: a soft red, green and blue (blue a little lifted so it reads on black)
 uniform float4x4 color = {
-	1.00, 0.14, 0.12, 0.0,
-	0.12, 0.95, 0.22, 0.0,
-	0.16, 0.40, 1.00, 0.0,
+	0.86, 0.20, 0.17, 0.0,
+	0.20, 0.72, 0.26, 0.0,
+	0.24, 0.40, 0.92, 0.0,
 	0.00, 0.00, 0.00, 1.0
 };
 
@@ -56,7 +56,7 @@ float4 trace(float3 c, float r)
 {
 	if (r > 1.0)
 		r = 1.0;
-	float hot = r * r * r * 0.35;
+	float hot = r * r * r * 0.18;
 	return float4(c * r + (float3(1.0, 1.0, 1.0) - c) * hot, 1.0);
 }
 
@@ -107,7 +107,7 @@ float4 yrgb_column(float4 s, int i)
 	float3 c;
 	if (i == 0) {
 		r = s.w;
-		c = float3(0.9, 0.9, 0.9);
+		c = float3(0.80, 0.80, 0.78);
 	} else {
 		r = s[i - 1];
 		c = color[i - 1].xyz;

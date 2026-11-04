@@ -95,6 +95,9 @@ public:
 	void save_properties(obs_data_t *);
 	void load_properties(obs_data_t *);
 
+	bool helpTipShown = false;
+	void showHelp(int type);
+
 	friend class ScopeWidgetProperties;
 	friend class ScopeWidgetInteractiveEventFilter;
 };

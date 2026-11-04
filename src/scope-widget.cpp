@@ -46,6 +46,11 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QColor>
+#include <QToolTip>
+#include <QTextBrowser>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QCursor>
 #include <memory>
 #include "plugin-macros.generated.h"
 #include "scope-widget.hpp"
@@ -806,6 +811,7 @@ enum qb_kind_e {
 	QB_MK_DEL,     // delete the selected marker
 	QB_FACE_BASE,  // faces: this face is the reference look
 	QB_FACE_CLEAR, // faces: no reference look
+	QB_HELP,       // an explanation of the scope
 };
 
 struct qb_item
@@ -872,6 +878,8 @@ static std::string qb_label(const scope_widget_s *data, const scope_entry *e, in
 		return "Set reference";
 	case QB_FACE_CLEAR:
 		return "Clear reference";
+	case QB_HELP:
+		return "i";
 	default:
 		return "Int";
 	}
@@ -921,6 +929,7 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 		*bar_y0 = std::min(*bar_y0, row_y1 - px(QB_HEIGHT));
 		x += w + px(4);
 	};
+	add(QB_HELP, 30);
 	if (type_has_intensity(e->type))
 		add(QB_INTENSITY, 120);
 	if (grid_keys_for(e->type))
@@ -1016,7 +1025,8 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 			break;
 		}
 		label = qb_label(data, e, it.kind);
-		qb_fill(x0, (float)y0 + 3.0f * k, x1, (float)y1 - 3.0f * k, on ? 0xFF3D5C45 : 0xFF2A2A2F);
+		const uint32_t bg = it.kind == QB_HELP ? 0xFF2D4C73 : on ? 0xFF3D5C45 : 0xFF2A2A2F;
+		qb_fill(x0, (float)y0 + 3.0f * k, x1, (float)y1 - 3.0f * k, bg);
 		text_draw(&ts, label.c_str(), (x0 + x1) * 0.5f, ym, px, 0xFFF4F4F6, TEXT_ALIGN_CENTER,
 			  TEXT_VALIGN_MIDDLE);
 	}
@@ -1603,6 +1613,38 @@ void ScopeWidget::exportScreenshot()
 		blog(LOG_WARNING, "Could not save the screenshot to '%s'", file.toUtf8().constData());
 }
 
+/* A window with the explanation of a scope type ("Help.<key>" in the locale, HTML). */
+void ScopeWidget::showHelp(int type)
+{
+	if (type < 0 || type >= N_TYPES)
+		return;
+	const std::string key = std::string("Help.") + scope_types[type].key;
+	const char *text = obs_module_text(key.c_str());
+	QString html = text && key != text ? QString::fromUtf8(text) : scope_tip(scope_types[type].key);
+	const QString name = QString::fromUtf8(obs_module_text(scope_types[type].name_key));
+
+	QDialog *dlg = new QDialog(window());
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->setWindowTitle(QString::fromUtf8(obs_module_text("Help.Title")).arg(name));
+	auto *layout = new QVBoxLayout(dlg);
+	auto *browser = new QTextBrowser(dlg);
+	browser->setOpenExternalLinks(true);
+	browser->document()->setDefaultStyleSheet(
+		QStringLiteral("h2 { margin-bottom: 6px; } h3 { margin-top: 14px; margin-bottom: 4px; } "
+			       "li { margin-bottom: 4px; } p { margin-bottom: 6px; }"));
+	browser->setHtml(html);
+	QFont f = browser->font();
+	f.setPointSizeF(f.pointSizeF() * 1.15);
+	browser->setFont(f);
+	layout->addWidget(browser);
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+	connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::close);
+	layout->addWidget(buttons);
+	dlg->resize(QSize(560, 640));
+	dlg->show();
+	dlg->raise();
+}
+
 /* A click on one of the quick controls of a scope tile. */
 void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 {
@@ -1640,6 +1682,9 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 		return;
 	case QB_MAX:
 		toggleSolo(data->solo >= 0 ? -1 : tile);
+		return;
+	case QB_HELP:
+		showHelp(e->type);
 		return;
 	case QB_FACE_BASE:
 	case QB_FACE_CLEAR: {
@@ -2046,6 +2091,33 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 		}
 		if (prev != data->hover_tile)
 			update();
+		// the i button: a short explanation while hovering it
+		bool over_help = false;
+		int help_type = -1;
+		if (over > 0 && !data->arranging) {
+			int by0 = 0, by1 = 0;
+			pthread_mutex_lock(&data->mutex);
+			const std::vector<qb_item> items = qb_layout(data, over, &by0, &by1);
+			for (const qb_item &it : items)
+				if (it.kind == QB_HELP && y >= it.y0 && y <= it.y1 && x >= it.x0 && x <= it.x1)
+					over_help = true;
+			if (over_help)
+				help_type = data->entries[over - 1]->type;
+			pthread_mutex_unlock(&data->mutex);
+		}
+		if (over_help && help_type >= 0 && help_type < N_TYPES) {
+			if (!helpTipShown) {
+				QString tip = scope_tip(scope_types[help_type].key);
+				if (!tip.isEmpty())
+					tip += QStringLiteral("\n\n");
+				tip += QString::fromUtf8(obs_module_text("Help.Button.tip"));
+				QToolTip::showText(QCursor::pos(), tip, this);
+				helpTipShown = true;
+			}
+		} else if (helpTipShown) {
+			QToolTip::hideText();
+			helpTipShown = false;
+		}
 	}
 
 	mouseEvent.modifiers |= INTERACT_KEEP_SOURCE;

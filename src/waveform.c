@@ -205,7 +205,7 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "target_scale", 2);
 	obs_data_set_default_int(settings, "intensity", 51);
 	obs_data_set_default_int(settings, "components", COMP_RGB);
-	obs_data_set_default_int(settings, "graticule_lines", 5);
+	obs_data_set_default_int(settings, "graticule_lines", 4);
 	obs_data_set_default_int(settings, "scale_labels", SCALE_PERCENT);
 	obs_data_set_default_bool(settings, "out_highlight", true);
 	obs_data_set_default_double(settings, "out_hi", 100.0);
@@ -495,7 +495,7 @@ static void create_graticule_vbuf(struct wvs_source *src)
 static void wvs_render_graticule(struct wvs_source *src)
 {
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), 0x80FFBF00); // amber
+	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), 0x30FFFFFF); // quiet grey lines
 	while (gs_effect_loop(effect, "Solid")) {
 		bool stack = src->display == DISP_STACK;
 		bool parade = src->display == DISP_PARADE;
@@ -515,6 +515,20 @@ static void wvs_render_graticule(struct wvs_source *src)
 			gs_load_vertexbuffer(src->graticule_line_vbuf);
 			gs_draw(GS_LINES, stack && i ? 2 : 0, 0);
 			gs_matrix_pop();
+		}
+	}
+	// a thin line between the parts of a parade
+	const int n_par = src->display == DISP_PARADE ? (int)n_components(src) : 1;
+	const float w = (float)src->tex_buf_width[src->r_tex_buf];
+	if (n_par > 1 && w > 0.0f) {
+		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), 0x50FFFFFF);
+		while (gs_effect_loop(effect, "Solid")) {
+			gs_render_start(false);
+			for (int i = 1; i < n_par; i++) {
+				gs_vertex2f(w * i, 0.0f);
+				gs_vertex2f(w * i, (float)WV_SIZE);
+			}
+			gs_render_stop(GS_LINES);
 		}
 	}
 }
@@ -659,41 +673,45 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 	const int n_stack = stack ? (int)n_components(src) : 1;
 	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
 	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
-	const float px = 11.0f;
+	const float px = 9.5f;
 	const float pad = 3.0f * ts.ux;
+	// in a parade every part has its own labels
+	const int n_par = src->display == DISP_PARADE ? (int)n_components(src) : 1;
 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	for (int k = 0; k < n_stack; k++) {
-		const float base = (float)(WV_SIZE * k);
-		for (int i = 0; i <= src->graticule_lines; i++) {
-			const float level = 1.0f - (float)i / src->graticule_lines; // top line is white
-			const float y = base + (WV_SIZE * (float)i / src->graticule_lines - off) * zoom;
-			if (y < base - 1.0f || y > base + WV_SIZE + 1.0f)
-				continue; // outside the zoomed view
-			char buf[16];
-			scale_label(src->scale_labels, cm_get_colorspace(&src->cm), level, buf, sizeof(buf));
-			const float tw = text_width(&ts, buf, px);
-			// keep labels inside the trace area
-			int valign = TEXT_VALIGN_MIDDLE;
-			if (y - px * 0.5f * ts.uy < base)
-				valign = TEXT_VALIGN_TOP;
-			else if (y + px * 0.5f * ts.uy > base + WV_SIZE)
-				valign = TEXT_VALIGN_BOTTOM;
-			const float y0 = valign == TEXT_VALIGN_TOP      ? y
-					 : valign == TEXT_VALIGN_BOTTOM ? y - px * ts.uy
-									: y - px * 0.5f * ts.uy;
-			gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xA0000000);
-			while (gs_effect_loop(solid, "Solid")) {
-				gs_render_start(false);
-				gs_vertex2f(0.0f, y0);
-				gs_vertex2f(tw + pad * 2.0f, y0);
-				gs_vertex2f(0.0f, y0 + px * ts.uy);
-				gs_vertex2f(tw + pad * 2.0f, y0 + px * ts.uy);
-				gs_render_stop(GS_TRISTRIP);
+	for (int pi = 0; pi < n_par; pi++)
+		for (int k = 0; k < n_stack; k++) {
+			const float xo = width * pi / n_par;
+			const float base = (float)(WV_SIZE * k);
+			for (int i = 0; i <= src->graticule_lines; i++) {
+				const float level = 1.0f - (float)i / src->graticule_lines; // top line is white
+				const float y = base + (WV_SIZE * (float)i / src->graticule_lines - off) * zoom;
+				if (y < base - 1.0f || y > base + WV_SIZE + 1.0f)
+					continue; // outside the zoomed view
+				char buf[16];
+				scale_label(src->scale_labels, cm_get_colorspace(&src->cm), level, buf, sizeof(buf));
+				const float tw = text_width(&ts, buf, px);
+				// keep labels inside the trace area
+				int valign = TEXT_VALIGN_MIDDLE;
+				if (y - px * 0.5f * ts.uy < base)
+					valign = TEXT_VALIGN_TOP;
+				else if (y + px * 0.5f * ts.uy > base + WV_SIZE)
+					valign = TEXT_VALIGN_BOTTOM;
+				const float y0 = valign == TEXT_VALIGN_TOP      ? y
+						 : valign == TEXT_VALIGN_BOTTOM ? y - px * ts.uy
+										: y - px * 0.5f * ts.uy;
+				gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x70000000);
+				while (gs_effect_loop(solid, "Solid")) {
+					gs_render_start(false);
+					gs_vertex2f(xo, y0);
+					gs_vertex2f(xo + tw + pad * 2.0f, y0);
+					gs_vertex2f(xo, y0 + px * ts.uy);
+					gs_vertex2f(xo + tw + pad * 2.0f, y0 + px * ts.uy);
+					gs_render_stop(GS_TRISTRIP);
+				}
+				text_draw(&ts, buf, xo + pad, y, px, 0xA0E8E8E8, TEXT_ALIGN_LEFT, valign);
 			}
-			text_draw(&ts, buf, pad, y, px, 0xE0FFD060, TEXT_ALIGN_LEFT, valign);
 		}
-	}
 
 	if (zoom_active(src)) {
 		char buf[16];

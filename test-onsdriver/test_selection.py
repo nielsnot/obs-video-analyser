@@ -32,7 +32,7 @@ def dock_data():
         {
             'type': 'vectorscope',
             'label': 'VS', 'show_label': False, 'use_roi': True, 'target': '',
-            'prop': {'graticule': 0, 'ring_scale': False, 'hue_ring': False,
+            'prop': {'graticule': 0, 'ring_scale': False, 'hue_ring': False, 'vs_style': 0,
                      'intensity': 255, 'color_type': 0, 'target_scale': 2},
         },
         {
@@ -45,7 +45,7 @@ def dock_data():
         {
             'type': 'vectorscope',
             'label': 'Ring', 'show_label': True, 'use_roi': True, 'target': '',
-            'prop': {'hue_ring': True, 'ring_scale': True, 'target_scale': 2},
+            'prop': {'hue_ring': True, 'ring_scale': True, 'vs_style': 0, 'target_scale': 2},
         },
         {
             'type': 'falsecolor',

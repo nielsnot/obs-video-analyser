@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.14
+
+- **Help on every scope:** an **i** button in the hover bar of a scope. Hovering it shows a short explanation;
+  clicking it opens a window with how to read the scope, what you use it for and what its controls do.
+- **Vectorscope, new look** (the default; the classic amber or green graticule is still under *Look*): a dark disc
+  tinted with the hue of each direction, grey rings at 25, 50, 75 and 100 % with their percentages, a cross through
+  the middle, the skin tone line, and the 75 % color targets as small squares with their letter in their own color.
+  The trace is added over the disc.
+- **Waveform, softer look:** softer red, green and blue and a less glaring glow, quiet grey graticule lines at
+  25 % steps (new scopes), small grey level labels in every part of a parade, and a thin line between the parts.
+
 ## 0.7.13
 
 - **Faces:** the snapshot (the face and its measurements) is kept with the settings as well, so comparing with it

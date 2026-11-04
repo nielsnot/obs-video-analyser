@@ -23,6 +23,8 @@ static const char *prof_draw_graticule_name = "graticule";
 #endif // ! ENABLE_PROFILE
 
 #define VS_SIZE 256
+#define VS_STYLE_CLASSIC 0
+#define VS_STYLE_MODERN 1 // tinted disc, grey rings with percentages, colored targets
 #define N_GRATICULES 18
 #define GRATICULES_IQ 256
 #define GRATICULES_COLOR_MASK 3
@@ -74,6 +76,7 @@ struct vss_source
 	bool update_graticule;
 	bool ring_scale;
 	bool hue_ring;
+	int style;               // VS_STYLE_*
 	volatile int luma_range; // luma_range_e
 
 	// snapshot reference, shown over the live trace while comparing
@@ -207,6 +210,7 @@ static void vss_update(void *data, obs_data_t *settings)
 
 	src->ring_scale = obs_data_get_bool(settings, "ring_scale");
 	src->hue_ring = obs_data_get_bool(settings, "hue_ring");
+	src->style = (int)obs_data_get_int(settings, "vs_style");
 	src->luma_range = (int)obs_data_get_int(settings, "luma_range");
 
 	int graticule_skintone_color = (int)obs_data_get_int(settings, "graticule_skintone_color") & 0xFFFFFF;
@@ -229,6 +233,7 @@ static void vss_get_defaults(obs_data_t *settings)
 	vss_get_defaults_v1(settings);
 	obs_data_set_default_int(settings, "color_type", (long long)color_type_uv);
 	obs_data_set_default_bool(settings, "hue_ring", true);
+	obs_data_set_default_int(settings, "vs_style", VS_STYLE_MODERN);
 }
 
 static obs_properties_t *vss_get_properties(void *data)
@@ -261,6 +266,11 @@ static obs_properties_t *vss_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Lows"), luma_range_lows);
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Mids"), luma_range_mids);
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Highs"), luma_range_highs);
+
+	prop = obs_properties_add_list(props, "vs_style", obs_module_text("VS.Prop.Style"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Style.Modern"), VS_STYLE_MODERN);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Style.Classic"), VS_STYLE_CLASSIC);
 
 	obs_properties_add_bool(props, "ring_scale", obs_module_text("VS.Prop.RingScale"));
 	obs_properties_add_bool(props, "hue_ring", obs_module_text("VS.Prop.HueRing"));
@@ -577,6 +587,129 @@ static void draw_hue_ring(int colorspace)
 	}
 }
 
+/* The hue at angle a (radians, counter-clockwise from +U) as full-strength R'G'B' for the matrix in use. */
+static void hue_rgb(int colorspace, float a, float *r, float *g, float *b)
+{
+	const bool bt2020 = cm_cs_is_hdr(colorspace);
+	const float kr_v = colorspace == 1 ? 1.402f : bt2020 ? 1.4746f : 1.5748f;
+	const float kg_u = colorspace == 1 ? 0.3441f : bt2020 ? 0.16455f : 0.1873f;
+	const float kg_v = colorspace == 1 ? 0.7141f : bt2020 ? 0.57135f : 0.4681f;
+	const float kb_u = colorspace == 1 ? 1.772f : bt2020 ? 1.8814f : 1.8556f;
+	const float u = 0.3f * cosf(a), v = 0.3f * sinf(a);
+	float rr = 0.5f + kr_v * v, gg = 0.5f - kg_u * u - kg_v * v, bb = 0.5f + kb_u * u;
+	const float mn = fminf(rr, fminf(gg, bb)), mx = fmaxf(rr, fmaxf(gg, bb));
+	*r = (rr - mn) / (mx - mn);
+	*g = (gg - mn) / (mx - mn);
+	*b = (bb - mn) / (mx - mn);
+}
+
+static uint32_t abgr(float r, float g, float b, uint32_t alpha)
+{
+	return alpha << 24 | (uint32_t)(b * 255.0f) << 16 | (uint32_t)(g * 255.0f) << 8 | (uint32_t)(r * 255.0f);
+}
+
+/* Modern look, under the trace: a dark disc tinted with the hue of each direction, black in the middle. */
+static void draw_modern_disc(int colorspace)
+{
+	const float cx = 127.5f, cy = 127.5f, rr = 127.5f;
+	const int n_seg = 120; // 360 vertices
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF);
+	while (gs_effect_loop(solid, "SolidColored")) {
+		gs_render_start(false);
+		for (int i = 0; i < n_seg; i++) {
+			const float a0 = (float)i * 2.0f * (float)M_PI / n_seg;
+			const float a1 = (float)(i + 1) * 2.0f * (float)M_PI / n_seg;
+			float r, g, b;
+			gs_color(0xFF060607);
+			gs_vertex2f(cx, cy);
+			hue_rgb(colorspace, a0, &r, &g, &b);
+			gs_color(abgr(0.03f + r * 0.2f, 0.03f + g * 0.2f, 0.03f + b * 0.2f, 0xFF));
+			gs_vertex2f(cx + rr * cosf(a0), cy - rr * sinf(a0));
+			hue_rgb(colorspace, a1, &r, &g, &b);
+			gs_color(abgr(0.03f + r * 0.2f, 0.03f + g * 0.2f, 0.03f + b * 0.2f, 0xFF));
+			gs_vertex2f(cx + rr * cosf(a1), cy - rr * sinf(a1));
+		}
+		gs_render_stop(GS_TRIS);
+	}
+}
+
+/* Modern look, over the trace: grey rings at 25 to 100 % with their percentages, a cross through the
+ * middle, the skin tone line and the 75 % color targets as small squares in their own color. */
+static void draw_modern_graticule(struct vss_source *src, int colorspace)
+{
+	const float cx = 127.5f, cy = 127.5f, r_outer = 127.0f;
+	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_eparam_t *col = gs_effect_get_param_by_name(solid, "color");
+
+	gs_effect_set_color(col, 0x40FFFFFF);
+	while (gs_effect_loop(solid, "Solid")) {
+		for (int r = 1; r <= 3; r++)
+			draw_circle(cx, cy, r_outer * r / 4.0f, 120);
+		gs_render_start(false);
+		gs_vertex2f(cx - r_outer, cy);
+		gs_vertex2f(cx + r_outer, cy);
+		gs_vertex2f(cx, cy - r_outer);
+		gs_vertex2f(cx, cy + r_outer);
+		gs_render_stop(GS_LINES);
+	}
+	gs_effect_set_color(col, 0x70FFFFFF);
+	while (gs_effect_loop(solid, "Solid"))
+		draw_circle(cx, cy, r_outer, 120);
+
+	// skin tone line, from the middle to the outer ring
+	{
+		const int c = src->graticule_skintone_color;
+		float u, v;
+		rgb_to_uv8(colorspace, (c & 0xFF) / 255.0f, (c >> 8 & 0xFF) / 255.0f, (c >> 16 & 0xFF) / 255.0f, &u,
+			   &v);
+		const float du = u - 128.0f, dv = v - 128.0f, n = hypotf(du, dv);
+		if (n > 1.0f) {
+			gs_effect_set_color(col, 0x80FFFFFF);
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				gs_vertex2f(cx, cy);
+				gs_vertex2f(cx + du / n * r_outer, cy - dv / n * r_outer);
+				gs_render_stop(GS_LINES);
+			}
+		}
+	}
+
+	// percentages, just right of the vertical line at the top of every ring
+	for (int r = 1; r <= 4; r++) {
+		char buf[8];
+		snprintf(buf, sizeof(buf), "%d%%", r * 25);
+		text_draw(&ts, buf, cx + 3.0f * ts.ux, cy - r_outer * r / 4.0f + 1.0f * ts.uy, 9.0f, 0x90FFFFFF,
+			  TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	}
+
+	// 75 % color targets
+	static const char *names[6] = {"R", "Y", "G", "C", "B", "M"};
+	static const float bars[6][3] = {{1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}, {1, 0, 1}};
+	for (int i = 0; i < 6; i++) {
+		float u, v;
+		rgb_to_uv8(colorspace, bars[i][0] * 0.75f, bars[i][1] * 0.75f, bars[i][2] * 0.75f, &u, &v);
+		const float x = u, y = 256.0f - v;
+		const uint32_t argb = 0xFF000000 | (uint32_t)(bars[i][0] * 200 + 55) << 16 |
+				      (uint32_t)(bars[i][1] * 200 + 55) << 8 | (uint32_t)(bars[i][2] * 200 + 55);
+		gs_effect_set_color(col, argb);
+		const float h = 3.5f;
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			gs_vertex2f(x - h, y - h), gs_vertex2f(x + h, y - h);
+			gs_vertex2f(x + h, y - h), gs_vertex2f(x + h, y + h);
+			gs_vertex2f(x + h, y + h), gs_vertex2f(x - h, y + h);
+			gs_vertex2f(x - h, y + h), gs_vertex2f(x - h, y - h);
+			gs_render_stop(GS_LINES);
+		}
+		// the letter beside the box, away from the middle
+		const float dx = x - cx, dy = y - cy, n = fmaxf(hypotf(dx, dy), 1.0f);
+		const float lx = x + dx / n * 9.0f * ts.ux, ly = y + dy / n * 9.0f * ts.uy;
+		text_draw(&ts, names[i], lx, ly, 10.0f, argb, TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+	}
+}
+
 /* User markers: points at a hue and saturation, or lines from the center towards a hue.
  * They stay put when the trace is magnified, like the graticule. */
 static void vss_render_markers(struct vss_source *src)
@@ -643,6 +776,10 @@ static void vss_render(void *data, gs_effect_t *effect)
 
 	cm_render_target(&src->cm);
 
+	const bool modern = src->style == VS_STYLE_MODERN;
+	if (modern)
+		draw_modern_disc(src->tex_cs[src->w_tex_buf ^ 1]);
+
 	const bool b_zoom = src->zoom > 1.01f;
 	if (b_zoom) {
 		float zoom = src->zoom;
@@ -705,9 +842,14 @@ static void vss_render(void *data, gs_effect_t *effect)
 			gs_effect_set_default(gs_effect_get_param_by_name(effect, "color"));
 		}
 
+		// over the tinted disc the trace is added, so the disc shows where there is no trace
+		gs_blend_state_push();
+		if (modern)
+			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
 		while (gs_effect_loop(effect, "Draw")) {
 			gs_draw_sprite(src->tex_vs, 0, VS_SIZE, VS_SIZE);
 		}
+		gs_blend_state_pop();
 	}
 	if (src->compare && src->ref_buf && src->effect) {
 		const uint8_t *buf = src->ref_buf;
@@ -733,7 +875,9 @@ static void vss_render(void *data, gs_effect_t *effect)
 		gs_matrix_pop();
 
 	PROFILE_START(prof_draw_graticule_name);
-	if (src->graticule_img.loaded && src->graticule && src->effect) {
+	if (modern && src->graticule)
+		draw_modern_graticule(src, src->tex_cs[r_tex_buf]);
+	if (!modern && src->graticule_img.loaded && src->graticule && src->effect) {
 		create_graticule_vbuf(src, src->tex_cs[r_tex_buf]);
 		gs_effect_t *effect = src->effect;
 		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), src->graticule_color);
@@ -741,7 +885,7 @@ static void vss_render(void *data, gs_effect_t *effect)
 				N_GRATICULES * 2);
 	}
 
-	if (src->graticule && src->graticule_line_vbuf) {
+	if (!modern && src->graticule && src->graticule_line_vbuf) {
 		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), src->graticule_color);
 		gs_load_vertexbuffer(src->graticule_line_vbuf);
@@ -749,9 +893,9 @@ static void vss_render(void *data, gs_effect_t *effect)
 			gs_draw(GS_LINES, 0, 0);
 		}
 	}
-	if (src->hue_ring)
+	if (!modern && src->hue_ring)
 		draw_hue_ring(src->tex_cs[r_tex_buf]);
-	if (src->ring_scale)
+	if (!modern && src->ring_scale)
 		draw_ring_scale(src->graticule ? (uint32_t)src->graticule_color : 0x80FFBF00);
 	PROFILE_END(prof_draw_graticule_name);
 
