@@ -109,6 +109,15 @@ struct wvs_source
 	// the highest and lowest level of the trace, as lines with their value
 	bool minmax;
 	volatile int top_row, bottom_row; // rows of the trace buffer (0 is the top), -1 when empty
+	int ch_top[4], ch_bottom[4];      // the same per channel of the trace buffer (B, G, R, A)
+	// peak hold: the highest and lowest level since the last reset, per channel (levels, 0..1)
+	bool peak_hold;
+	float hold_hi[4], hold_lo[4];
+	bool hold_valid[4];
+	volatile bool want_hold_reset;
+	uint32_t hold_components;
+	bool hdr_ref;    // HDR: lines at 26, 203 and 1000 nits
+	bool ext_guides; // raw signal: dashed lines at -5 % and 105 % (EBU R103), a line at 109 % (SDI)
 };
 
 /* Where a level (0..1 of the signal) sits, as a share of the height from the bottom. */
@@ -145,6 +154,16 @@ static void wvs_compare_cb(void *data, calldata_t *cd)
 	((struct wvs_source *)data)->compare = calldata_bool(cd, "on");
 }
 
+static void wvs_waveform_proc(void *data, calldata_t *cd);
+
+static bool hold_reset_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	((struct wvs_source *)data)->want_hold_reset = true;
+	return false;
+}
+
 static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct wvs_source *src = bzalloc(sizeof(struct wvs_source));
@@ -162,6 +181,7 @@ static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 	proc_handler_add(ph, "void va_snapshot()", wvs_snapshot_cb, src);
 	proc_handler_add(ph, "void va_set_compare(in bool on)", wvs_compare_cb, src);
 	proc_handler_add(ph, "void va_markers(in string cmd)", wvs_markers_proc, src);
+	proc_handler_add(ph, "void va_waveform(in string cmd)", wvs_waveform_proc, src);
 
 	obs_enter_graphics();
 	src->effect = create_effect_from_module_file("waveform.effect");
@@ -203,6 +223,9 @@ static void wvs_update(void *data, obs_data_t *settings)
 	src->side_histogram = obs_data_get_bool(settings, "side_histogram");
 	src->x_axis = obs_data_get_bool(settings, "x_axis");
 	src->minmax = obs_data_get_bool(settings, "minmax");
+	src->peak_hold = obs_data_get_bool(settings, "peak_hold");
+	src->ext_guides = obs_data_get_bool(settings, "ext_guides");
+	src->hdr_ref = obs_data_get_bool(settings, "hdr_ref");
 	const int gain = (int)obs_data_get_int(settings, "gain");
 	if (gain >= 1 && gain != src->gain) {
 		src->gain = gain;
@@ -239,6 +262,9 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "side_histogram", false);
 	obs_data_set_default_bool(settings, "x_axis", false);
 	obs_data_set_default_bool(settings, "minmax", true);
+	obs_data_set_default_bool(settings, "peak_hold", false);
+	obs_data_set_default_bool(settings, "ext_guides", true);
+	obs_data_set_default_bool(settings, "hdr_ref", true);
 }
 
 static bool components_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
@@ -305,6 +331,11 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_properties_add_bool(props, "x_axis", obs_module_text("WV.Prop.XAxis"));
 	obs_properties_add_bool(props, "out_highlight", obs_module_text("WV.Prop.OutHighlight"));
 	obs_properties_add_bool(props, "minmax", obs_module_text("WV.Prop.MinMax"));
+	obs_properties_add_bool(props, "peak_hold", obs_module_text("WV.Prop.PeakHold"));
+	obs_properties_add_button2(props, "hold_reset", obs_module_text("WV.Prop.PeakHoldReset"), hold_reset_clicked,
+				   data);
+	obs_properties_add_bool(props, "ext_guides", obs_module_text("WV.Prop.ExtGuides"));
+	obs_properties_add_bool(props, "hdr_ref", obs_module_text("Prop.HdrRef"));
 	obs_properties_add_float_slider(props, "out_hi", obs_module_text("WV.Prop.OutHi"), 80.0, 100.0, 0.5);
 	obs_properties_add_float_slider(props, "out_lo", obs_module_text("WV.Prop.OutLo"), 0.0, 20.0, 0.5);
 
@@ -537,15 +568,52 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		const uint8_t *buf = src->tex_buf[src->w_tex_buf];
 		const size_t row = (size_t)surface_data->width * 4;
 		const bool use_a = is_yrgb(src->components) || src->colorize;
+		int ct[4] = {-1, -1, -1, -1}, cb[4] = {-1, -1, -1, -1};
+		for (int c = 0; c < 4; c++) {
+			if (c == 3 ? !use_a : src->colorize)
+				continue; // colorize keeps colors in B, G, R and the count in A
+			for (int r = 0; r < WV_SIZE && ct[c] < 0; r++)
+				for (size_t i = c; i < row; i += 4)
+					if (buf[r * row + i]) {
+						ct[c] = r;
+						break;
+					}
+			for (int r = WV_SIZE - 1; r >= 0 && cb[c] < 0 && ct[c] >= 0; r--)
+				for (size_t i = c; i < row; i += 4)
+					if (buf[r * row + i]) {
+						cb[c] = r;
+						break;
+					}
+		}
 		int top = -1, bottom = -1;
-		for (int r = 0; r < WV_SIZE && top < 0; r++)
-			for (size_t i = 0; i < row && top < 0; i++)
-				if (buf[r * row + i] && ((i & 3) != 3 || use_a))
-					top = r;
-		for (int r = WV_SIZE - 1; r >= 0 && bottom < 0 && top >= 0; r--)
-			for (size_t i = 0; i < row && bottom < 0; i++)
-				if (buf[r * row + i] && ((i & 3) != 3 || use_a))
-					bottom = r;
+		for (int c = 0; c < 4; c++) {
+			if (ct[c] >= 0 && (top < 0 || ct[c] < top))
+				top = ct[c];
+			if (cb[c] >= 0 && cb[c] > bottom)
+				bottom = cb[c];
+			src->ch_top[c] = ct[c];
+			src->ch_bottom[c] = cb[c];
+		}
+		// peak hold, per channel, in levels so it survives a change of scale
+		if (src->want_hold_reset || src->hold_components != src->components) {
+			src->want_hold_reset = false;
+			src->hold_components = src->components;
+			memset(src->hold_valid, 0, sizeof(src->hold_valid));
+		}
+		for (int c = 0; c < 4; c++) {
+			if (ct[c] < 0)
+				continue;
+			const float hi = lvl_inv(src, (WV_SIZE - 1 - ct[c]) / (float)(WV_SIZE - 1));
+			const float lo = lvl_inv(src, (WV_SIZE - 1 - cb[c]) / (float)(WV_SIZE - 1));
+			if (!src->hold_valid[c]) {
+				src->hold_hi[c] = hi;
+				src->hold_lo[c] = lo;
+				src->hold_valid[c] = true;
+			} else {
+				src->hold_hi[c] = fmaxf(src->hold_hi[c], hi);
+				src->hold_lo[c] = fminf(src->hold_lo[c], lo);
+			}
+		}
 		src->top_row = top;
 		src->bottom_row = bottom;
 	}
@@ -825,11 +893,24 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 	}
 }
 
-/* HLG: a line at 75 %, the reference white level of BT.2408 (203 nits). */
+/* HDR reference levels of BT.2408, as signal levels (HLG for a 1000 nits display, PQ absolute): 18 % grey
+ * (26 nits), reference white (203 nits) and 1000 nits. */
+static const struct hdr_ref_s
+{
+	float hlg, pq;
+	const char *label;
+	uint32_t color;
+} hdr_refs[3] = {
+	{0.3786f, 0.3800f, "26 nits (18% grey)", 0xB0A0A0FF},
+	{0.7499f, 0.5807f, "203 nits (ref white)", 0xB040E0F0},
+	{1.0000f, 0.7518f, "1000 nits", 0xB0FFB040},
+};
+
+/* HDR: dashed lines at 26, 203 and 1000 nits (BT.2408). */
 static void wvs_render_hlg_reference(struct wvs_source *src, float width, float height)
 {
 	const int cs = cm_get_colorspace(&src->cm);
-	if (!cm_cs_is_hdr(cs) || src->graticule_lines <= 0)
+	if (!cm_cs_is_hdr(cs) || !src->hdr_ref)
 		return;
 
 	const struct text_scale ts = text_scale_from_viewport(width, height);
@@ -842,25 +923,29 @@ static void wvs_render_hlg_reference(struct wvs_source *src, float width, float 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	for (int k = 0; k < n_stack; k++) {
 		const float base = (float)(WV_SIZE * k);
-		// 203 nits: 75 % in HLG, 58 % in PQ
-		const float ref = cs == CM_CS_2100_PQ ? 0.58f : 0.75f;
-		const float y = base + (WV_SIZE * (1.0f - lvl(src, ref)) - off) * zoom;
-		if (y < base || y > base + WV_SIZE)
-			continue;
-		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xB040E0F0);
-		while (gs_effect_loop(solid, "Solid")) {
-			// dashed
-			gs_render_start(false);
-			// at most 200 dashes: an immediate batch holds 512 vertices
-			const float step = fmaxf(12.0f * ts.ux, width / 200.0f);
-			for (float x = 0.0f; x < width; x += step) {
-				gs_vertex2f(x, y);
-				gs_vertex2f(fminf(x + step * 0.6f, width), y);
+		for (int r = 0; r < 3; r++) {
+			const float ref = cs == CM_CS_2100_PQ ? hdr_refs[r].pq : hdr_refs[r].hlg;
+			const float y = base + (WV_SIZE * (1.0f - lvl(src, ref)) - off) * zoom;
+			if (y < base || y > base + WV_SIZE)
+				continue;
+			gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), hdr_refs[r].color);
+			while (gs_effect_loop(solid, "Solid")) {
+				// dashed; at most 200 dashes: an immediate batch holds 512 vertices
+				gs_render_start(false);
+				const float step = fmaxf(12.0f * ts.ux, width / 200.0f);
+				for (float x = 0.0f; x < width; x += step) {
+					gs_vertex2f(x, y);
+					gs_vertex2f(fminf(x + step * 0.6f, width), y);
+				}
+				gs_render_stop(GS_LINES);
 			}
-			gs_render_stop(GS_LINES);
+			char buf[48];
+			snprintf(buf, sizeof(buf), "%s %.0f%%", hdr_refs[r].label, ref * 100.0f);
+			const bool below = y - (px + 2.0f) * ts.uy < base;
+			text_draw(&ts, buf, width - 3.0f * ts.ux, below ? y + 1.0f * ts.uy : y - 1.0f * ts.uy, px,
+				  hdr_refs[r].color | 0xFF000000, TEXT_ALIGN_RIGHT,
+				  below ? TEXT_VALIGN_TOP : TEXT_VALIGN_BOTTOM);
 		}
-		text_draw(&ts, cs == CM_CS_2100_PQ ? "58% ref white" : "75% ref white", width - 3.0f * ts.ux,
-			  y - 1.0f * ts.uy, px, 0xE040E0F0, TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
 	}
 }
 
@@ -1087,7 +1172,41 @@ static void wvs_render_markers(struct wvs_source *src, float width, float height
 	}
 }
 
-/* Lines at the highest and lowest level of the trace with their value, and what the raw signal is. */
+/* A horizontal line from x0 to x1 at y, solid or dashed (at most 200 dashes). */
+static void hline(float x0, float x1, float y, uint32_t color, bool dashed, float ux)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		if (!dashed) {
+			gs_vertex2f(x0, y);
+			gs_vertex2f(x1, y);
+		} else {
+			const float step = fmaxf(10.0f * ux, (x1 - x0) / 200.0f);
+			for (float x = x0; x < x1; x += step) {
+				gs_vertex2f(x, y);
+				gs_vertex2f(fminf(x + step * 0.55f, x1), y);
+			}
+		}
+		gs_render_stop(GS_LINES);
+	}
+}
+
+/* The channel of the trace buffer (B, G, R, A) shown in part p of a parade, or -1 for all channels. */
+static int parade_channel(const struct wvs_source *src, int p)
+{
+	if (src->display != DISP_PARADE)
+		return -1;
+	if (is_yrgb(src->components))
+		return p == 0 ? 3 : 3 - p; // Y, R, G, B
+	if ((src->components & COMP_RGB) == COMP_RGB && !(src->components & COMP_YUV))
+		return 2 - p; // R, G, B
+	return -1;
+}
+
+/* Lines at the highest and lowest level of the trace with their value (per channel in a parade), the held peaks,
+ * the limits of the raw signal, and what the raw signal is. */
 static void wvs_render_minmax(struct wvs_source *src, float width, float height)
 {
 	const struct text_scale ts = text_scale_from_viewport(width, height);
@@ -1097,31 +1216,76 @@ static void wvs_render_minmax(struct wvs_source *src, float width, float height)
 	if (src->ext && src->ext_desc[0])
 		text_draw(&ts, src->ext_desc, width - 4.0f * ts.ux, height - 3.0f * ts.uy, px, 0xC0F0D060,
 			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
-	const int top = src->top_row, bottom = src->bottom_row;
-	if (!src->minmax || src->display == DISP_STACK || top < 0 || bottom < 0)
+	if (src->display == DISP_STACK)
 		return;
-	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	for (int k = 0; k < 2; k++) {
-		// row r holds the code WV_SIZE - 1 - r
-		const int r = k == 0 ? top : bottom;
-		const float f = (WV_SIZE - 1 - r) / (float)(WV_SIZE - 1);
-		const float level = lvl_inv(src, f);
-		const float y = (WV_SIZE * (1.0f - f) - off) * zoom;
-		if (y < 0.0f || y > WV_SIZE)
-			continue;
-		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x90B8D860);
-		while (gs_effect_loop(solid, "Solid")) {
-			gs_render_start(false);
-			gs_vertex2f(0.0f, y);
-			gs_vertex2f(width, y);
-			gs_render_stop(GS_LINES);
+#define LEVEL_Y(level) ((WV_SIZE * (1.0f - lvl(src, (level))) - off) * zoom)
+
+	// raw signal: the preferred range of EBU R103 (-5 % to 105 %) dashed, the SDI limit (109 %) solid
+	if (src->ext && src->ext_guides) {
+		const float lv[3] = {-0.05f, 1.05f, 1.09f};
+		const char *names[3] = {"-5", "105", "109"};
+		for (int k = 0; k < 3; k++) {
+			const float y = LEVEL_Y(lv[k]);
+			if (y < 0.0f || y > WV_SIZE)
+				continue;
+			hline(0.0f, width, y, k == 2 ? 0x90FF5050 : 0x90FF9040, k < 2, ts.ux);
+			text_draw(&ts, names[k], 3.0f * ts.ux, y + (k == 0 ? -1.0f : 1.0f) * ts.uy, px - 1.0f,
+				  k == 2 ? 0xC0FF7070 : 0xC0FFA060, TEXT_ALIGN_LEFT,
+				  k == 0 ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
 		}
-		char buf[16];
-		snprintf(buf, sizeof(buf), "%.0f", level * 100.0f);
-		const bool above = k == 0 ? y - (px + 2.0f) * ts.uy > 0.0f : y + (px + 2.0f) * ts.uy > WV_SIZE;
-		text_draw(&ts, buf, width - 8.0f * ts.ux, above ? y - 2.0f * ts.uy : y + 2.0f * ts.uy, px, 0xE0C8E070,
-			  TEXT_ALIGN_RIGHT, above ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
 	}
+
+	if (!src->minmax && !src->peak_hold)
+		return;
+	const int n_par = src->display == DISP_PARADE ? (int)n_components(src) : 1;
+	const bool per_channel = parade_channel(src, 0) >= 0;
+	for (int p = 0; p < (per_channel ? n_par : 1); p++) {
+		const int c = per_channel ? parade_channel(src, p) : -1;
+		const float x0 = per_channel ? width * p / n_par : 0.0f;
+		const float x1 = per_channel ? width * (p + 1) / n_par : width;
+		const int top = c >= 0 ? src->ch_top[c] : src->top_row;
+		const int bottom = c >= 0 ? src->ch_bottom[c] : src->bottom_row;
+		for (int k = 0; src->minmax && top >= 0 && bottom >= 0 && k < 2; k++) {
+			// row r holds the code WV_SIZE - 1 - r
+			const int r = k == 0 ? top : bottom;
+			const float f = (WV_SIZE - 1 - r) / (float)(WV_SIZE - 1);
+			const float level = lvl_inv(src, f);
+			const float y = (WV_SIZE * (1.0f - f) - off) * zoom;
+			if (y < 0.0f || y > WV_SIZE)
+				continue;
+			hline(x0, x1, y, 0x90B8D860, false, ts.ux);
+			char buf[16];
+			snprintf(buf, sizeof(buf), "%.0f", level * 100.0f);
+			const bool above = k == 0 ? y - (px + 2.0f) * ts.uy > 0.0f : y + (px + 2.0f) * ts.uy > WV_SIZE;
+			text_draw(&ts, buf, x1 - 8.0f * ts.ux, above ? y - 2.0f * ts.uy : y + 2.0f * ts.uy, px,
+				  0xE0C8E070, TEXT_ALIGN_RIGHT, above ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
+		}
+		if (!src->peak_hold)
+			continue;
+		// held peaks: of this channel, or of all channels together
+		float hi = -1.0f, lo = 2.0f;
+		bool any = false;
+		for (int ch = 0; ch < 4; ch++) {
+			if ((c >= 0 && ch != c) || !src->hold_valid[ch])
+				continue;
+			hi = fmaxf(hi, src->hold_hi[ch]);
+			lo = fminf(lo, src->hold_lo[ch]);
+			any = true;
+		}
+		for (int k = 0; any && k < 2; k++) {
+			const float level = k == 0 ? hi : lo;
+			const float y = LEVEL_Y(level);
+			if (y < 0.0f || y > WV_SIZE)
+				continue;
+			hline(x0, x1, y, 0xB0FF70D0, true, ts.ux);
+			char buf[24];
+			snprintf(buf, sizeof(buf), "HOLD %.0f", level * 100.0f);
+			const bool above = k == 0 ? y - (px + 2.0f) * ts.uy > 0.0f : y + (px + 2.0f) * ts.uy > WV_SIZE;
+			text_draw(&ts, buf, x0 + 26.0f * ts.ux, above ? y - 2.0f * ts.uy : y + 2.0f * ts.uy, px,
+				  0xE0FF90E0, TEXT_ALIGN_LEFT, above ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
+		}
+	}
+#undef LEVEL_Y
 }
 
 static void wvs_render(void *data, gs_effect_t *effect)
@@ -1265,6 +1429,45 @@ static void wvs_markers_proc(void *data, calldata_t *cd)
 	} else if (!strcmp(cmd, "delete")) {
 		cm_markers_delete(src->cm.self, src->marker_sel >= 0 ? src->marker_sel : src->markers.n - 1);
 		src->marker_sel = -1;
+	}
+}
+
+/* Commands from the dock and the hotkeys: zoom_blacks and zoom_whites step through 5x, 7.5x, 10x and back to 1x
+ * (0-20 %, 0-15 %, 0-10 % from black, or the same from the top), zoom_reset, peaks (min/max lines on or off),
+ * hold (peak hold on or off) and hold_reset. */
+static void wvs_waveform_proc(void *data, calldata_t *cd)
+{
+	struct wvs_source *src = data;
+	const char *cmd = calldata_string(cd, "cmd");
+	if (!cmd || src->display == DISP_STACK)
+		return;
+	const float h = (float)WV_SIZE;
+	if (!strcmp(cmd, "zoom_blacks") || !strcmp(cmd, "zoom_whites")) {
+		const bool blacks = cmd[5] == 'b';
+		static const float steps[] = {5.0f, 7.5f, 10.0f, 1.0f};
+		// the next step after the current zoom, if the view is already at that end
+		const bool at_end = blacks ? src->zoom_off >= h - h / src->zoom - 0.5f : src->zoom_off < 0.5f;
+		int k = 0;
+		if (at_end && src->zoom > 1.01f)
+			for (int i = 0; i < 4; i++)
+				if (fabsf(src->zoom - steps[i]) < 0.01f)
+					k = (i + 1) % 4;
+		src->zoom = steps[k];
+		src->zoom_off = src->zoom > 1.001f ? (blacks ? h - h / src->zoom : 0.0f) : 0.0f;
+	} else if (!strcmp(cmd, "zoom_reset")) {
+		src->zoom = 1.0f;
+		src->zoom_off = 0.0f;
+	} else if (!strcmp(cmd, "peaks") || !strcmp(cmd, "hold")) {
+		const char *key = cmd[0] == 'p' ? "minmax" : "peak_hold";
+		obs_data_t *s = obs_source_get_settings(src->cm.self);
+		const bool on = !obs_data_get_bool(s, key);
+		obs_data_release(s);
+		obs_data_t *d = obs_data_create();
+		obs_data_set_bool(d, key, on);
+		obs_source_update(src->cm.self, d);
+		obs_data_release(d);
+	} else if (!strcmp(cmd, "hold_reset")) {
+		src->want_hold_reset = true;
 	}
 }
 

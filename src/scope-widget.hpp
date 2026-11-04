@@ -93,6 +93,8 @@ public:
 	QWidget *createToolbar(QWidget *parent);
 	static void default_properties(obs_data_t *);
 	void save_properties(obs_data_t *);
+	/* Calls proc(cmd) on every scope of the dock that has it, for example va_waveform("zoom_blacks"). */
+	void sendCommand(const char *proc, const char *cmd);
 	void load_properties(obs_data_t *);
 
 	bool helpTipShown = false;

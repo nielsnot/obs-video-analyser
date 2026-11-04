@@ -87,6 +87,9 @@ static void close_all_docks()
 	}
 }
 
+static void hotkeys_save(obs_data_t *props);
+static void hotkeys_load(obs_data_t *props);
+
 static void save_load_scope_docks(obs_data_t *save_data, bool saving, void *)
 {
 	blog(LOG_INFO, "save_load_scope_docks saving=%d", (int)saving);
@@ -105,6 +108,7 @@ static void save_load_scope_docks(obs_data_t *save_data, bool saving, void *)
 			obs_data_release(obj);
 		}
 		obs_data_set_array(props, "docks", array);
+		hotkeys_save(props);
 		obs_data_set_obj(save_data, SAVE_DATA_NAME, props);
 		obs_data_array_release(array);
 		obs_data_release(props);
@@ -119,6 +123,7 @@ static void save_load_scope_docks(obs_data_t *save_data, bool saving, void *)
 			props = obs_data_create();
 		}
 
+		hotkeys_load(props);
 		obs_data_array_t *array = obs_data_get_array(props, "docks");
 		size_t count = obs_data_array_count(array);
 		blog(LOG_INFO, "save_load_scope_docks: loading %d docks", (int)count);
@@ -137,6 +142,78 @@ static void save_load_scope_docks(obs_data_t *save_data, bool saving, void *)
 }
 
 static void scope_docks_release();
+
+/* ---------- hotkeys: they act on the scopes of every dock (also from a Stream Deck through OBS) ---------- */
+
+struct va_hotkey
+{
+	const char *name, *desc_key, *proc, *cmd;
+	obs_hotkey_id id;
+};
+
+static va_hotkey hotkeys[] = {
+	{"VideoAnalyser.ZoomBlacks", "Hotkey.ZoomBlacks", "va_waveform", "zoom_blacks", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.ZoomWhites", "Hotkey.ZoomWhites", "va_waveform", "zoom_whites", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.ZoomReset", "Hotkey.ZoomReset", "va_waveform", "zoom_reset", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.Peaks", "Hotkey.Peaks", "va_waveform", "peaks", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.PeakHold", "Hotkey.PeakHold", "va_waveform", "hold", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.PeakHoldReset", "Hotkey.PeakHoldReset", "va_waveform", "hold_reset", OBS_INVALID_HOTKEY_ID},
+};
+
+static void hotkey_pressed(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed)
+		return;
+	// the docks live on the UI thread
+	obs_queue_task(
+		OBS_TASK_UI,
+		[](void *param) {
+			const va_hotkey *h = static_cast<const va_hotkey *>(param);
+			if (!docks)
+				return;
+			for (ScopeWidget *w : *docks)
+				w->sendCommand(h->proc, h->cmd);
+		},
+		data, false);
+}
+
+static void hotkeys_register()
+{
+	for (va_hotkey &h : hotkeys)
+		h.id = obs_hotkey_register_frontend(h.name, obs_module_text(h.desc_key), hotkey_pressed, &h);
+}
+
+static void hotkeys_unregister()
+{
+	for (va_hotkey &h : hotkeys) {
+		if (h.id != OBS_INVALID_HOTKEY_ID)
+			obs_hotkey_unregister(h.id);
+		h.id = OBS_INVALID_HOTKEY_ID;
+	}
+}
+
+static void hotkeys_save(obs_data_t *props)
+{
+	obs_data_t *keys = obs_data_create();
+	for (va_hotkey &h : hotkeys) {
+		obs_data_array_t *a = obs_hotkey_save(h.id);
+		obs_data_set_array(keys, h.name, a);
+		obs_data_array_release(a);
+	}
+	obs_data_set_obj(props, "hotkeys", keys);
+	obs_data_release(keys);
+}
+
+static void hotkeys_load(obs_data_t *props)
+{
+	obs_data_t *keys = obs_data_get_obj(props, "hotkeys");
+	for (va_hotkey &h : hotkeys) {
+		obs_data_array_t *a = keys ? obs_data_get_array(keys, h.name) : NULL;
+		obs_hotkey_load(h.id, a);
+		obs_data_array_release(a);
+	}
+	obs_data_release(keys);
+}
 
 static void frontend_event(enum obs_frontend_event event, void *)
 {
@@ -157,6 +234,7 @@ static void frontend_event(enum obs_frontend_event event, void *)
 void scope_docks_init()
 {
 	docks = new std::vector<ScopeWidget *>;
+	hotkeys_register();
 	obs_frontend_add_save_callback(save_load_scope_docks, NULL);
 	obs_frontend_add_event_callback(frontend_event, nullptr);
 
@@ -175,6 +253,7 @@ void scope_docks_init()
 
 void scope_docks_release()
 {
+	hotkeys_unregister();
 	delete docks;
 	docks = NULL;
 

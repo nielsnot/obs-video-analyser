@@ -1613,6 +1613,20 @@ void ScopeWidget::exportScreenshot()
 		blog(LOG_WARNING, "Could not save the screenshot to '%s'", file.toUtf8().constData());
 }
 
+void ScopeWidget::sendCommand(const char *proc, const char *cmd)
+{
+	pthread_mutex_lock(&data->mutex);
+	for (scope_entry *e : data->entries) {
+		if (!e->src)
+			continue;
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "cmd", cmd);
+		proc_handler_call(obs_source_get_proc_handler(e->src), proc, &cd);
+		calldata_free(&cd);
+	}
+	pthread_mutex_unlock(&data->mutex);
+}
+
 /* A window with the explanation of a scope type ("Help.<key>" in the locale, HTML). */
 void ScopeWidget::showHelp(int type)
 {
@@ -2396,6 +2410,28 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 			if (l != SCOPE_LAYOUT_FREE)
 				setArranging(false);
 		});
+	}
+
+	// guides over the ROI view, each on or off
+	if (data->roi) {
+		QMenu *guides = popup.addMenu(QString::fromUtf8(obs_module_text("ROI.Guides")));
+		OBSDataAutoRelease rs = obs_source_get_settings(data->roi);
+		static const char *const keys[][2] = {{"guide_title", "ROI.Guide.Title"},
+						      {"guide_action", "ROI.Guide.Action"},
+						      {"guide_thirds", "ROI.Guide.Thirds"},
+						      {"guide_center", "ROI.Guide.Center"}};
+		for (const auto &k : keys) {
+			act = guides->addAction(QString::fromUtf8(obs_module_text(k[1])));
+			act->setCheckable(true);
+			act->setChecked(obs_data_get_bool(rs, k[0]));
+			const std::string key = k[0];
+			obs_source_t *roi = data->roi;
+			connect(act, &QAction::toggled, this, [roi, key](bool on) {
+				OBSDataAutoRelease d = obs_data_create();
+				obs_data_set_bool(d, key.c_str(), on);
+				obs_source_update(roi, d);
+			});
+		}
 	}
 
 	QMenu *textMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.textsize")));

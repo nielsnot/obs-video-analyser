@@ -77,6 +77,11 @@ struct vss_source
 	bool ring_scale;
 	bool hue_ring;
 	int style;               // VS_STYLE_*
+	int skin_band;           // degrees each side of the skin tone line, 0 for none
+	bool targets_100;        // the 100 % color targets too (modern look)
+	int sat_alert;           // saturation in % of the outer ring that sets off the alert ring, 0 for none
+	bool sat_max_ring;       // a ring at the highest saturation in the picture
+	volatile float max_sat;  // highest saturation of the last picture, 0..1 of the outer ring
 	volatile int luma_range; // luma_range_e
 
 	// snapshot reference, shown over the live trace while comparing
@@ -211,6 +216,10 @@ static void vss_update(void *data, obs_data_t *settings)
 	src->ring_scale = obs_data_get_bool(settings, "ring_scale");
 	src->hue_ring = obs_data_get_bool(settings, "hue_ring");
 	src->style = (int)obs_data_get_int(settings, "vs_style");
+	src->skin_band = (int)obs_data_get_int(settings, "skin_band");
+	src->targets_100 = obs_data_get_bool(settings, "targets_100");
+	src->sat_alert = (int)obs_data_get_int(settings, "sat_alert");
+	src->sat_max_ring = obs_data_get_bool(settings, "sat_max_ring");
 	src->luma_range = (int)obs_data_get_int(settings, "luma_range");
 
 	int graticule_skintone_color = (int)obs_data_get_int(settings, "graticule_skintone_color") & 0xFFFFFF;
@@ -234,6 +243,10 @@ static void vss_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "color_type", (long long)color_type_uv);
 	obs_data_set_default_bool(settings, "hue_ring", true);
 	obs_data_set_default_int(settings, "vs_style", VS_STYLE_MODERN);
+	obs_data_set_default_int(settings, "skin_band", 0);
+	obs_data_set_default_bool(settings, "targets_100", true);
+	obs_data_set_default_int(settings, "sat_alert", 0);
+	obs_data_set_default_bool(settings, "sat_max_ring", false);
 }
 
 static obs_properties_t *vss_get_properties(void *data)
@@ -267,6 +280,17 @@ static obs_properties_t *vss_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Mids"), luma_range_mids);
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.LumaRange.Highs"), luma_range_highs);
 
+	prop = obs_properties_add_list(props, "skin_band", obs_module_text("VS.Prop.SkinBand"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("None"), 0);
+	for (int d = 5; d <= 30; d += 5) {
+		char buf[16];
+		snprintf(buf, sizeof(buf), "\xc2\xb1%d\xc2\xb0", d);
+		obs_property_list_add_int(prop, buf, d);
+	}
+	obs_properties_add_bool(props, "targets_100", obs_module_text("VS.Prop.Targets100"));
+	obs_properties_add_int_slider(props, "sat_alert", obs_module_text("VS.Prop.SatAlert"), 0, 100, 1);
+	obs_properties_add_bool(props, "sat_max_ring", obs_module_text("VS.Prop.SatMaxRing"));
 	prop = obs_properties_add_list(props, "vs_style", obs_module_text("VS.Prop.Style"), OBS_COMBO_TYPE_LIST,
 				       OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Style.Modern"), VS_STYLE_MODERN);
@@ -299,8 +323,9 @@ static uint32_t vss_get_height(void *data)
 	return src->cm.bypass ? cm_bypass_get_height(&src->cm) : VS_SIZE;
 }
 
-static inline void vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *surface_data, int luma_range)
+static inline float vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *surface_data, int luma_range)
 {
+	int max_d2 = 0;
 	for (int i = 0; i < VS_SIZE * VS_SIZE; i++)
 		dbuf[i] = 0;
 
@@ -323,9 +348,13 @@ static inline void vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *s
 			uint8_t *c = dbuf + (u + VS_SIZE * (255 - v));
 			if (*c < 255)
 				++*c;
+			const int du = u - 128, dv = v - 128;
+			if (du * du + dv * dv > max_d2)
+				max_d2 = du * du + dv * dv;
 		}
 		vd += vd_add;
 	}
+	return sqrtf((float)max_d2) / 127.0f;
 }
 
 static void vss_set_image(struct vss_source *src, const uint8_t *tex_buf)
@@ -347,7 +376,7 @@ static void vss_surface_cb(void *data, struct cm_surface_data *surface_data)
 		src->tex_buf[src->w_tex_buf] = bzalloc(VS_SIZE * VS_SIZE);
 
 	PROFILE_START(prof_draw_vectorscope_name);
-	vss_draw_vectorscope(src->tex_buf[src->w_tex_buf], surface_data, src->luma_range);
+	src->max_sat = vss_draw_vectorscope(src->tex_buf[src->w_tex_buf], surface_data, src->luma_range);
 	PROFILE_END(prof_draw_vectorscope_name);
 
 	src->tex_cs[src->w_tex_buf] = surface_data->colorspace;
@@ -707,6 +736,105 @@ static void draw_modern_graticule(struct vss_source *src, int colorspace)
 		const float dx = x - cx, dy = y - cy, n = fmaxf(hypotf(dx, dy), 1.0f);
 		const float lx = x + dx / n * 9.0f * ts.ux, ly = y + dy / n * 9.0f * ts.uy;
 		text_draw(&ts, names[i], lx, ly, 10.0f, argb, TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+		// the 100 % target: a smaller, dimmer box further out
+		if (src->targets_100) {
+			float u1, v1;
+			rgb_to_uv8(colorspace, bars[i][0], bars[i][1], bars[i][2], &u1, &v1);
+			const float x1 = u1, y1 = 256.0f - v1, h1 = 2.5f;
+			gs_effect_set_color(col, (argb & 0x00FFFFFF) | 0x90000000);
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				gs_vertex2f(x1 - h1, y1 - h1), gs_vertex2f(x1 + h1, y1 - h1);
+				gs_vertex2f(x1 + h1, y1 - h1), gs_vertex2f(x1 + h1, y1 + h1);
+				gs_vertex2f(x1 + h1, y1 + h1), gs_vertex2f(x1 - h1, y1 + h1);
+				gs_vertex2f(x1 - h1, y1 + h1), gs_vertex2f(x1 - h1, y1 - h1);
+				gs_render_stop(GS_LINES);
+			}
+		}
+	}
+}
+
+/* The skin tone line's direction (radians) from its color, or a negative value when it has none. */
+static float skin_angle(const struct vss_source *src, int colorspace)
+{
+	const int c = src->graticule_skintone_color;
+	float u, v;
+	rgb_to_uv8(colorspace, (c & 0xFF) / 255.0f, (c >> 8 & 0xFF) / 255.0f, (c >> 16 & 0xFF) / 255.0f, &u, &v);
+	if (hypotf(u - 128.0f, v - 128.0f) < 1.0f)
+		return -1.0f;
+	float a = atan2f(v - 128.0f, u - 128.0f);
+	return a < 0.0f ? a + 2.0f * (float)M_PI : a;
+}
+
+/* A shaded wedge of +-skin_band degrees around the skin tone line. */
+static void draw_skin_band(const struct vss_source *src, int colorspace)
+{
+	const float a = skin_angle(src, colorspace);
+	if (src->skin_band <= 0 || a < 0.0f)
+		return;
+	const float cx = 127.5f, cy = 127.5f, r = 127.0f;
+	const float half = src->skin_band * (float)M_PI / 180.0f;
+	const int n = 24;
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x30F0A878);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		for (int i = 0; i < n; i++) {
+			const float a0 = a - half + 2.0f * half * i / n, a1 = a - half + 2.0f * half * (i + 1) / n;
+			gs_vertex2f(cx, cy);
+			gs_vertex2f(cx + r * cosf(a0), cy - r * sinf(a0));
+			gs_vertex2f(cx + r * cosf(a1), cy - r * sinf(a1));
+		}
+		gs_render_stop(GS_TRIS);
+	}
+	// its edges
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x70F0A878);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		for (int k = -1; k <= 1; k += 2) {
+			gs_vertex2f(cx, cy);
+			gs_vertex2f(cx + r * cosf(a + k * half), cy - r * sinf(a + k * half));
+		}
+		gs_render_stop(GS_LINES);
+	}
+}
+
+/* The saturation alert ring (red when the picture goes beyond it) and the ring at the highest saturation, in the
+ * scale of the trace (they follow the gain). */
+static void draw_sat_rings(const struct vss_source *src, float zoom)
+{
+	const float cx = 127.5f, cy = 127.5f, r_outer = 127.0f;
+	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_eparam_t *col = gs_effect_get_param_by_name(solid, "color");
+	const float max_sat = src->max_sat;
+	if (src->sat_alert > 0) {
+		const float k = src->sat_alert / 100.0f;
+		const bool over = max_sat > k;
+		const float r = r_outer * k * zoom;
+		if (r < r_outer * 1.42f) {
+			gs_effect_set_color(col, over ? 0xFFFF4040 : 0xB0FFB040);
+			while (gs_effect_loop(solid, "Solid")) {
+				draw_circle(cx, cy, r, 120);
+				draw_circle(cx, cy, r + 0.6f, 120);
+			}
+			char buf[24];
+			snprintf(buf, sizeof(buf), "%s %d%%", over ? "OVER" : "alert", src->sat_alert);
+			text_draw(&ts, buf, cx - 3.0f * ts.ux, cy - r - 1.0f * ts.uy, 9.0f,
+				  over ? 0xFFFF6060 : 0xC0FFC060, TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+		}
+	}
+	if (src->sat_max_ring && max_sat > 0.01f) {
+		const float r = r_outer * max_sat * zoom;
+		if (r < r_outer * 1.42f) {
+			gs_effect_set_color(col, 0xA0E0E0FF);
+			while (gs_effect_loop(solid, "Solid"))
+				draw_circle(cx, cy, r, 120);
+			char buf[24];
+			snprintf(buf, sizeof(buf), "max %.0f%%", max_sat * 100.0f);
+			text_draw(&ts, buf, cx + r * 0.7071f + 2.0f * ts.ux, cy + r * 0.7071f + 1.0f * ts.uy, 9.0f,
+				  0xD0E0E0FF, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		}
 	}
 }
 
@@ -895,6 +1023,8 @@ static void vss_render(void *data, gs_effect_t *effect)
 	}
 	if (!modern && src->hue_ring)
 		draw_hue_ring(src->tex_cs[r_tex_buf]);
+	draw_skin_band(src, src->tex_cs[r_tex_buf]);
+	draw_sat_rings(src, b_zoom ? src->zoom : 1.0f);
 	if (!modern && src->ring_scale)
 		draw_ring_scale(src->graticule ? (uint32_t)src->graticule_color : 0x80FFBF00);
 	PROFILE_END(prof_draw_graticule_name);

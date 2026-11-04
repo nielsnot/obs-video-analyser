@@ -219,6 +219,12 @@ static void roi_update(void *data, obs_data_t *settings)
 
 	src->n_interleave = (int)obs_data_get_int(settings, "interleave");
 	src->zoom_anchor = (int)obs_data_get_int(settings, "zoom_anchor");
+	src->guide_title = obs_data_get_bool(settings, "guide_title");
+	src->guide_action = obs_data_get_bool(settings, "guide_action");
+	src->guide_thirds = obs_data_get_bool(settings, "guide_thirds");
+	src->guide_center = obs_data_get_bool(settings, "guide_center");
+	src->guide_title_pct = (float)obs_data_get_double(settings, "guide_title_pct") / 100.0f;
+	src->guide_action_pct = (float)obs_data_get_double(settings, "guide_action_pct") / 100.0f;
 	const bool follow = obs_data_get_bool(settings, "face_follow");
 	if (follow && !src->fd)
 		src->fd = face_detector_create();
@@ -257,6 +263,8 @@ static void roi_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "qual_sat_max", 100);
 	obs_data_set_default_int(settings, "qual_luma_min", 0);
 	obs_data_set_default_int(settings, "qual_luma_max", 100);
+	obs_data_set_default_double(settings, "guide_title_pct", 90.0);
+	obs_data_set_default_double(settings, "guide_action_pct", 95.0);
 }
 
 static obs_properties_t *roi_get_properties(void *data)
@@ -273,6 +281,16 @@ static obs_properties_t *roi_get_properties(void *data)
 	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Pointer"), ROI_ZOOM_POINTER);
 	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Center"), ROI_ZOOM_CENTER);
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
+
+	obs_properties_t *gp = obs_properties_create();
+	obs_properties_add_bool(gp, "guide_title", obs_module_text("ROI.Guide.Title"));
+	obs_properties_add_float_slider(gp, "guide_title_pct", obs_module_text("ROI.Guide.TitlePct"), 50.0, 100.0, 0.5);
+	obs_properties_add_bool(gp, "guide_action", obs_module_text("ROI.Guide.Action"));
+	obs_properties_add_float_slider(gp, "guide_action_pct", obs_module_text("ROI.Guide.ActionPct"), 50.0, 100.0,
+					0.5);
+	obs_properties_add_bool(gp, "guide_thirds", obs_module_text("ROI.Guide.Thirds"));
+	obs_properties_add_bool(gp, "guide_center", obs_module_text("ROI.Guide.Center"));
+	obs_properties_add_group(props, "guides", obs_module_text("ROI.Guides"), OBS_GROUP_NORMAL, gp);
 
 	obs_properties_t *lp = obs_properties_create();
 	obs_property_t *mode = obs_properties_add_list(lp, "lut_mode", obs_module_text("LUT.Mode"), OBS_COMBO_TYPE_LIST,
@@ -553,6 +571,36 @@ static void fill_quad(float x0, float y0, float x1, float y1, uint32_t color)
 	}
 }
 
+/* A rectangle outline of share k of the picture, centered; lines of t picture pixels. */
+static void guide_rect(float w, float h, float k, float t, uint32_t color)
+{
+	const float x0 = w * (1.0f - k) * 0.5f, x1 = w - x0, y0 = h * (1.0f - k) * 0.5f, y1 = h - y0;
+	fill_quad(x0, y0, x1, y0 + t, color);
+	fill_quad(x0, y1 - t, x1, y1, color);
+	fill_quad(x0, y0, x0 + t, y1, color);
+	fill_quad(x1 - t, y0, x1, y1, color);
+}
+
+/* Title and action safe, thirds and the center cross, in picture coordinates. */
+static void draw_guides(const struct roi_source *src, float w, float h, float t)
+{
+	if (src->guide_action)
+		guide_rect(w, h, src->guide_action_pct, t, 0xA0FFFFFF);
+	if (src->guide_title)
+		guide_rect(w, h, src->guide_title_pct, t, 0xB0FFD040);
+	if (src->guide_thirds) {
+		for (int i = 1; i <= 2; i++) {
+			fill_quad(w * i / 3.0f - t * 0.5f, 0.0f, w * i / 3.0f + t * 0.5f, h, 0x70FFFFFF);
+			fill_quad(0.0f, h * i / 3.0f - t * 0.5f, w, h * i / 3.0f + t * 0.5f, 0x70FFFFFF);
+		}
+	}
+	if (src->guide_center) {
+		const float c = fminf(w, h) * 0.04f;
+		fill_quad(w * 0.5f - c, h * 0.5f - t * 0.5f, w * 0.5f + c, h * 0.5f + t * 0.5f, 0xC0FFFFFF);
+		fill_quad(w * 0.5f - t * 0.5f, h * 0.5f - c, w * 0.5f + t * 0.5f, h * 0.5f + c, 0xC0FFFFFF);
+	}
+}
+
 /* Each pin: a cross, a swatch of the color read and its values (RGB, luma %, HSL). */
 static void draw_pins(struct roi_source *src, float w, float h, float zoom, float view_x, float view_y)
 {
@@ -734,6 +782,12 @@ static void roi_render(void *data, gs_effect_t *effect)
 			gs_vertex2f(xm + 1.0f * ts.ux, h);
 			gs_render_stop(GS_TRISTRIP);
 		}
+	}
+
+	{
+		// guides: one screen pixel thick whatever the zoom
+		const struct text_scale gts = text_scale_from_viewport(w, h);
+		draw_guides(src, w, h, gts.ux / zoom);
 	}
 
 	pthread_mutex_lock(&src->shapes_mutex);

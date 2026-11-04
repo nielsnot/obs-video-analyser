@@ -58,6 +58,7 @@ enum fc_preset_e {
 	FC_PRESET_SPECTRUM = 3,
 	FC_PRESET_CUSTOM = 4,
 	FC_PRESET_HLG = 5,
+	FC_PRESET_PQ = 6,
 };
 
 static const struct fc_preset_band fc_preset_exposure[] = {
@@ -88,15 +89,27 @@ static const struct fc_preset_band fc_preset_spectrum[] = {
 	{0.90f, 0xFFFF5000, "FC.Band.Decile"}, {2.00f, 0xFFFF0040, "FC.Band.Decile"},
 };
 
-/* HLG signal levels (Rec. 2100 HLG, BT.2408): 18% grey near 38%, skin around 50-65%,
- * reference white at 75%. */
+/* HLG signal levels for a 1000 nits display (Rec. 2100 HLG, BT.2408), from the nits of each band:
+ * below 0.5 nits, 10, 22, 30 (18 % grey near 26), 39, 85 (skin), 190, 215 (reference white 203 nits at 75 %),
+ * 459, 900 and 1000 nits (100 %). */
 static const struct fc_preset_band fc_preset_hlg[] = {
-	{0.02f, 0xFFD938FF, "FC.Band.BlackClip"}, {0.20f, 0xFF548CFF, "FC.Band.Shadow"},
-	{0.35f, 0xFF4D4D4D, "FC.Band.Dark"},      {0.41f, 0xFF99FF00, "FC.Band.MidGrey"},
-	{0.50f, 0xFF808080, "FC.Band.Mid"},       {0.65f, 0xFFF29E9E, "FC.Band.Skin"},
-	{0.73f, 0xFFB3B3B3, "FC.Band.Bright"},    {0.77f, 0xFF40E0F0, "FC.Band.RefWhite"},
-	{0.90f, 0xFFB3B300, "FC.Band.Highlight"}, {0.98f, 0xFFFFFF00, "FC.Band.BrightHighlight"},
-	{1.00f, 0xFFE68000, "FC.Band.NearClip"},  {2.00f, 0xFFE63300, "FC.Band.Clip"},
+	{0.073f, 0xFFD938FF, "FC.Band.BlackClip"}, {0.254f, 0xFF548CFF, "FC.Band.Shadow"},
+	{0.353f, 0xFF4D4D4D, "FC.Band.Dark"},      {0.402f, 0xFF00D8E8, "FC.Band.Grey26"},
+	{0.448f, 0xFF808080, "FC.Band.Mid"},       {0.600f, 0xFFF29E9E, "FC.Band.SkinNits"},
+	{0.739f, 0xFFB3B3B3, "FC.Band.Bright"},    {0.759f, 0xFF40E060, "FC.Band.RefWhite"},
+	{0.880f, 0xFF9A9A60, "FC.Band.Highlight"}, {0.984f, 0xFFFFFF00, "FC.Band.Above459"},
+	{1.000f, 0xFFE68000, "FC.Band.NearPeak"},  {2.000f, 0xFFE63300, "FC.Band.Peak1000"},
+};
+
+/* PQ signal levels (SMPTE ST 2084, absolute nits), the same bands: below 0.5 nits, 10, 22, 30 (18 % grey near
+ * 26), 39, 85 (skin), 190, 215 (reference white 203 nits), 500 (half of 1000), 900 and 1000 nits. */
+static const struct fc_preset_band fc_preset_pq[] = {
+	{0.118f, 0xFFD938FF, "FC.Band.BlackClip"}, {0.300f, 0xFF548CFF, "FC.Band.Shadow"},
+	{0.365f, 0xFF4D4D4D, "FC.Band.Dark"},      {0.393f, 0xFF00D8E8, "FC.Band.Grey26"},
+	{0.417f, 0xFF808080, "FC.Band.Mid"},       {0.492f, 0xFFF29E9E, "FC.Band.SkinNits"},
+	{0.574f, 0xFFB3B3B3, "FC.Band.Bright"},    {0.587f, 0xFF40E060, "FC.Band.RefWhitePQ"},
+	{0.677f, 0xFF9A9A60, "FC.Band.Highlight"}, {0.740f, 0xFFFFFF00, "FC.Band.Above500"},
+	{0.752f, 0xFFE68000, "FC.Band.NearPeak"},  {2.000f, 0xFFE63300, "FC.Band.Above1000"},
 };
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
@@ -433,6 +446,9 @@ static void fc_load_scheme(struct zb_source *src, obs_data_t *settings)
 	case FC_PRESET_HLG:
 		fc_set_bands(src, fc_preset_hlg, ARRAY_LEN(fc_preset_hlg));
 		return;
+	case FC_PRESET_PQ:
+		fc_set_bands(src, fc_preset_pq, ARRAY_LEN(fc_preset_pq));
+		return;
 	case FC_PRESET_CUSTOM:
 		break;
 	default:
@@ -675,6 +691,7 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Skin"), FC_PRESET_SKIN);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Spectrum"), FC_PRESET_SPECTRUM);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.HLG"), FC_PRESET_HLG);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.PQ"), FC_PRESET_PQ);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Custom"), FC_PRESET_CUSTOM);
 		obs_property_set_modified_callback(prop, fc_scheme_props_changed);
 

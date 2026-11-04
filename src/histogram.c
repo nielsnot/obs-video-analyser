@@ -46,6 +46,7 @@ static const char *prof_draw_name = "draw";
 struct his_source
 {
 	struct cm_source cm;
+	bool hdr_ref;      // HDR: lines at 26, 203 and 1000 nits
 	volatile bool ext; // levels of the raw signal as legal codes (16 is 0 %, 235 is 100 %)
 	bool ext_prev;
 
@@ -152,6 +153,7 @@ static void his_update(void *data, obs_data_t *settings)
 			(src->components & COMP_YUV ? CM_FLAG_CONVERT_YUV : 0) | CM_FLAG_EXT;
 
 	src->level_height = (int)obs_data_get_int(settings, "level_height");
+	src->hdr_ref = obs_data_get_bool(settings, "hdr_ref");
 
 	bool logscale = obs_data_get_bool(settings, "logscale");
 	if (logscale != src->logscale) {
@@ -197,6 +199,7 @@ static void his_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "target_scale", 2);
 	obs_data_set_default_int(settings, "components", COMP_RGB);
 	obs_data_set_default_int(settings, "level_height", 200);
+	obs_data_set_default_bool(settings, "hdr_ref", true);
 	obs_data_set_default_int(settings, "graticule_vertical_lines", 5);
 	obs_data_set_default_int(settings, "level_fixed_value", 1000);
 	obs_data_set_default_double(settings, "level_ratio_value", 10.0);
@@ -290,6 +293,7 @@ static obs_properties_t *his_get_properties(void *data)
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
 
 	obs_properties_add_int(props, "level_height", obs_module_text("Height"), 50, 2048, 1);
+	obs_properties_add_bool(props, "hdr_ref", obs_module_text("Prop.HdrRef"));
 	obs_properties_add_bool(props, "logscale", obs_module_text("Log scale"));
 
 	prop = obs_properties_add_list(props, "level_mode", obs_module_text("Level mode"), OBS_COMBO_TYPE_LIST,
@@ -784,6 +788,36 @@ static void his_render_reference(struct his_source *src)
 	gs_blend_state_pop();
 }
 
+/* HDR: vertical dashed lines at 26, 203 and 1000 nits (BT.2408), as signal levels of HLG or PQ. */
+static void his_render_hdr_reference(struct his_source *src)
+{
+	const int cs = cm_get_colorspace(&src->cm);
+	if (!cm_cs_is_hdr(cs) || !src->hdr_ref)
+		return;
+	static const float hlg[3] = {0.3786f, 0.7499f, 1.0f}, pq[3] = {0.3800f, 0.5807f, 0.7518f};
+	static const uint32_t colors[3] = {0xB0A0A0FF, 0xB040E0F0, 0xB0FFB040};
+	const bool parade = src->display == DISP_PARADE, stack = src->display == DISP_STACK;
+	const int n_parade = parade ? (int)n_components(src) : 1;
+	const float h = (float)src->level_height * (stack ? n_components(src) : 1);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	for (int r = 0; r < 3; r++) {
+		const float level = cs == CM_CS_2100_PQ ? pq[r] : hlg[r];
+		const float f = src->ext ? (16.0f + 219.0f * level) / 255.0f : level;
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), colors[r]);
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			for (int i = 0; i < n_parade; i++) {
+				const float x = HI_SIZE * i + HI_SIZE * fminf(f, 0.999f);
+				for (float y = 0.0f; y < h; y += 8.0f) {
+					gs_vertex2f(x, y);
+					gs_vertex2f(x, fminf(y + 4.0f, h));
+				}
+			}
+			gs_render_stop(GS_LINES);
+		}
+	}
+}
+
 static void his_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -829,6 +863,8 @@ static void his_render(void *data, gs_effect_t *effect)
 		his_render_graticule(src);
 	if (is_hue_or_sat(src))
 		his_render_selection(src);
+	else
+		his_render_hdr_reference(src);
 
 	PROFILE_END(prof_render_name);
 }

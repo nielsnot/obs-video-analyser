@@ -74,6 +74,10 @@ struct roi_source
 	float zoom, view_x, view_y;
 	int zoom_anchor; // roi_zoom_anchor_e
 
+	// guides over the picture: title and action safe, thirds, center cross (each can be turned off)
+	bool guide_title, guide_action, guide_thirds, guide_center;
+	float guide_title_pct, guide_action_pct;
+
 	// follow faces: the selection is the faces found, instead of the drawn shapes
 	volatile bool face_follow;
 	struct face_detector *fd;

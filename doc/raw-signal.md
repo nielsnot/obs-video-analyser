@@ -41,15 +41,36 @@ Install **Blackmagic Desktop Video** and add a **Blackmagic Device** source in O
 | Color space | Rec. 709 (or what your signal is) | the matrix used for R, G and B |
 | Color range | Limited (Partial) | SDI and HDMI video are limited range: 0 % is code 64 (10-bit), 100 % is 940 |
 
-8-bit BGRA and 10-bit RGB are R'G'B' formats: they have no Y'CbCr to measure, so they show no `RAW` label.
+8-bit BGRA and 10-bit RGB (R'G'B' 4:4:4) work too: they show as `RAW 8-bit BGRA` or `RAW 10-bit RGB`. When the
+R'G'B' signal is video range (0 % at 64, 100 % at 940), set the filter's *Signal range* to *Video* (see below).
+
+### 3b. From DaVinci Resolve through an UltraStudio or DeckLink
+
+To see in OBS what leaves Resolve, including what goes beyond 0 % and 100 %:
+
+1. In Resolve: **Project Settings → Master Settings → Video Monitoring**: set **Data levels** to **Video** and
+   turn on **Retain sub-black and super-white data**.
+2. In OBS, in the Blackmagic Device source: *Color range* **Limited (Partial)**, *Pixel format* **10-bit YUV**
+   (or 10-bit RGB when Resolve outputs RGB 4:4:4).
+3. In the source's **Filters**, select **Video Analyser input** and set **Signal range** to **Video** when the label
+   says `full` while the signal is video range (often with RGB 4:4:4).
+
+With *Data levels* set to *Full* in Resolve, nothing goes beyond 0 % and 100 %: the whole code range is used.
+
+### 3c. The filter's settings
+
+| Setting | What it does |
+|---|---|
+| Signal range | *As the source reports it* (default), *Video (legal) range* or *Full range*: how the codes are read. Set it when the source reports the wrong range |
+| Also measure the raw signal when the source is SDR in an HDR project | see *HDR* below |
 
 ### 4. Other sources
 
 | Source | Raw signal |
 |---|---|
-| Video Capture Device (webcam, USB capture) | yes, when it delivers YUV (YUY2, NV12, ...); not for MJPEG decoded to RGB |
+| Video Capture Device (webcam, USB capture) | yes (YUY2, NV12, ... and RGB); a webcam is usually full range, so nothing goes beyond 0 % and 100 % |
 | Media Source (files) | yes, for YUV video files, 8- and 10-bit |
-| NDI | yes when the stream arrives as UYVY; not when it arrives as BGRA |
+| NDI | yes (UYVY or BGRA) |
 | Scenes, Program, Preview, browser, game or window capture | no: these are R'G'B' only |
 
 ## What uses the raw signal
@@ -99,7 +120,7 @@ a media file from its tags. A source that reports nothing counts as SDR.
 
 | You see | Do this |
 |---|---|
-| No `RAW` label | Is the dock measuring the source itself (step 1)? Is the source YUV (not BGRA or RGB)? |
+| No `RAW` label | Is the dock measuring the source itself (step 1)? In an HDR project: see *HDR* |
 | `RAW 8-bit UYVY` from a Blackmagic | Set *Pixel format* to *10-bit YUV* in the Blackmagic source |
 | No `RAW` label in an HLG project | The source is SDR (or reports no transfer): see *HDR* above |
 | Everything is shifted up or down by about 7 % | Check *Color range* in the source: limited for normal video |

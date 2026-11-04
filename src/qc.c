@@ -42,9 +42,17 @@ struct qc_bucket
 	float eymin, eymax, eapl_sum;
 	uint32_t n_ext;
 	uint32_t n;
-	uint32_t flags; // checks in violation during the stretch
+	uint32_t flags;      // checks in violation during the stretch
+	uint32_t warn_flags; // checks above their warning level (but not in violation)
 };
 #define QC_LOG_MAX 64
+
+enum qc_hdr_preset_e {
+	QC_HDR_HDR10_1000 = 0, // 1000 nits peak, 400 average
+	QC_HDR_HDR10_4000 = 1, // 4000 / 1000
+	QC_HDR_HLG = 2,        // 1000 / 400
+	QC_HDR_CUSTOM = 3,
+};
 
 enum qc_check_e {
 	QC_CLIP = 0,
@@ -56,15 +64,18 @@ enum qc_check_e {
 	QC_FREEZE,
 	QC_DEADPIX,
 	QC_LEGAL, // the raw signal beyond the preferred range of EBU R103 v3: -5 % to 105 % for luma and R, G, B
+	QC_HDR,   // HDR limit: MaxCLL (peak) or the frame average (FALL) above the delivery limit
 	QC_N_CHECKS,
 };
 
 static const char *check_keys[QC_N_CHECKS] = {"qc_check_clip",   "qc_check_crush",   "qc_check_rgb",
 					      "qc_check_gamut",  "qc_check_border",  "qc_check_black",
-					      "qc_check_freeze", "qc_check_deadpix", "qc_check_legal"};
+					      "qc_check_freeze", "qc_check_deadpix", "qc_check_legal",
+					      "qc_check_hdr"};
 static const char *check_names[QC_N_CHECKS] = {"QC.Check.Clip",   "QC.Check.Crush",   "QC.Check.RGB",
 					       "QC.Check.Gamut",  "QC.Check.Border",  "QC.Check.Black",
-					       "QC.Check.Freeze", "QC.Check.DeadPix", "QC.Check.Legal"};
+					       "QC.Check.Freeze", "QC.Check.DeadPix", "QC.Check.Legal",
+					       "QC.Check.Hdr"};
 
 /* Dead and stuck pixels: a pixel counts when it is near black (or near white) while the mean of its
  * four neighbors is clearly brighter (or darker), for this many analyzed frames in a row. */
@@ -108,6 +119,7 @@ struct qc_source
 
 	// check state (pipeline thread)
 	bool active[QC_N_CHECKS];    // currently in violation
+	bool warn[QC_N_CHECKS];      // above the warning level, below the violation
 	uint64_t since[QC_N_CHECKS]; // violation start, ns
 	bool logged[QC_N_CHECKS];    // already in the log
 	int log_slot[QC_N_CHECKS];
@@ -124,6 +136,11 @@ struct qc_source
 	// settings
 	bool enabled[QC_N_CHECKS];
 	float luma_hi, luma_lo, tolerance, min_duration, freeze_seconds;
+	float warn_tol;          // share of pixels for a warning (yellow), 0 for none
+	int hdr_preset;          // qc_hdr_preset_e
+	float hdr_peak, hdr_avg; // nits
+	int cll_method;          // 0: max R, G, B; 1: luminance (CIE Y)
+	float cll_reject;        // share of the brightest pixels not counted for CLL
 	int border_px;
 	bool lowpass;
 	char *log_file;
@@ -188,6 +205,22 @@ static void qc_update(void *data, obs_data_t *settings)
 	src->luma_hi = (float)obs_data_get_double(settings, "qc_luma_hi") / 100.0f;
 	src->luma_lo = (float)obs_data_get_double(settings, "qc_luma_lo") / 100.0f;
 	src->tolerance = (float)obs_data_get_double(settings, "qc_tolerance") / 100.0f;
+	src->warn_tol = (float)obs_data_get_double(settings, "qc_warn") / 100.0f;
+	src->hdr_preset = (int)obs_data_get_int(settings, "qc_hdr_preset");
+	switch (src->hdr_preset) {
+	case QC_HDR_HDR10_4000:
+		src->hdr_peak = 4000.0f, src->hdr_avg = 1000.0f;
+		break;
+	case QC_HDR_CUSTOM:
+		src->hdr_peak = (float)obs_data_get_int(settings, "qc_hdr_peak");
+		src->hdr_avg = (float)obs_data_get_int(settings, "qc_hdr_avg");
+		break;
+	default:
+		src->hdr_peak = 1000.0f, src->hdr_avg = 400.0f;
+		break;
+	}
+	src->cll_method = (int)obs_data_get_int(settings, "qc_cll_method");
+	src->cll_reject = (float)obs_data_get_double(settings, "qc_cll_reject") / 100.0f;
 	src->min_duration = (float)obs_data_get_double(settings, "qc_min_duration");
 	src->freeze_seconds = (float)obs_data_get_double(settings, "qc_freeze_seconds");
 	src->border_px = (int)obs_data_get_int(settings, "qc_border_px");
@@ -220,6 +253,13 @@ static void qc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "qc_check_clip", true);
 	obs_data_set_default_bool(settings, "qc_check_crush", true);
 	obs_data_set_default_bool(settings, "qc_check_legal", true);
+	obs_data_set_default_bool(settings, "qc_check_hdr", false);
+	obs_data_set_default_double(settings, "qc_warn", 0.0);
+	obs_data_set_default_int(settings, "qc_hdr_preset", QC_HDR_HDR10_1000);
+	obs_data_set_default_int(settings, "qc_hdr_peak", 1000);
+	obs_data_set_default_int(settings, "qc_hdr_avg", 400);
+	obs_data_set_default_int(settings, "qc_cll_method", 0);
+	obs_data_set_default_double(settings, "qc_cll_reject", 0.0);
 	obs_data_set_default_bool(settings, "qc_check_rgb", false);
 	obs_data_set_default_bool(settings, "qc_check_gamut", true);
 	obs_data_set_default_bool(settings, "qc_check_border", true);
@@ -288,11 +328,28 @@ static obs_properties_t *qc_get_properties(void *data)
 	obs_properties_add_float_slider(limits, "qc_luma_hi", obs_module_text("QC.LumaHi"), 50.0, 100.0, 0.5);
 	obs_properties_add_float_slider(limits, "qc_luma_lo", obs_module_text("QC.LumaLo"), 0.0, 20.0, 0.5);
 	obs_properties_add_float_slider(limits, "qc_tolerance", obs_module_text("QC.Tolerance"), 0.0, 20.0, 0.1);
+	obs_properties_add_float_slider(limits, "qc_warn", obs_module_text("QC.Warn"), 0.0, 20.0, 0.01);
 	obs_properties_add_float_slider(limits, "qc_min_duration", obs_module_text("QC.MinDuration"), 0.0, 10.0, 0.1);
 	obs_properties_add_int_slider(limits, "qc_border_px", obs_module_text("QC.BorderPx"), 1, 100, 1);
 	obs_properties_add_float_slider(limits, "qc_freeze_seconds", obs_module_text("QC.FreezeSeconds"), 0.5, 30.0,
 					0.5);
 	obs_properties_add_bool(limits, "qc_lowpass", obs_module_text("QC.Lowpass"));
+
+	obs_properties_t *hdr = obs_properties_create();
+	obs_property_t *hp = obs_properties_add_list(hdr, "qc_hdr_preset", obs_module_text("QC.Hdr.Preset"),
+						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(hp, "HDR10, 1000 nits (average 400)", QC_HDR_HDR10_1000);
+	obs_property_list_add_int(hp, "HDR10, 4000 nits (average 1000)", QC_HDR_HDR10_4000);
+	obs_property_list_add_int(hp, "HLG, 1000 nits (average 400)", QC_HDR_HLG);
+	obs_property_list_add_int(hp, obs_module_text("QC.Hdr.Custom"), QC_HDR_CUSTOM);
+	obs_properties_add_int(hdr, "qc_hdr_peak", obs_module_text("QC.Hdr.Peak"), 100, 10000, 10);
+	obs_properties_add_int(hdr, "qc_hdr_avg", obs_module_text("QC.Hdr.Avg"), 10, 10000, 10);
+	obs_property_t *cm = obs_properties_add_list(hdr, "qc_cll_method", obs_module_text("QC.Hdr.Method"),
+						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(cm, obs_module_text("QC.Hdr.Method.MaxRGB"), 0);
+	obs_property_list_add_int(cm, obs_module_text("QC.Hdr.Method.Y"), 1);
+	obs_properties_add_float_slider(hdr, "qc_cll_reject", obs_module_text("QC.Hdr.Reject"), 0.0, 1.0, 0.001);
+	obs_properties_add_group(props, "qc_hdr", obs_module_text("QC.Hdr"), OBS_GROUP_NORMAL, hdr);
 	obs_properties_add_group(props, "qc_limits", obs_module_text("QC.Limits"), OBS_GROUP_NORMAL, limits);
 
 	obs_properties_add_path(props, "qc_log_file", obs_module_text("QC.LogFile"), OBS_PATH_FILE_SAVE, "CSV (*.csv)",
@@ -389,6 +446,11 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 	uint8_t mn[4] = {255, 255, 255, 255}, mx[4] = {0, 0, 0, 0};
 	float cll = 0.0f;
 	uint64_t hash = 1469598103934665603ull;
+	// for "ignore the brightest pixels": a histogram of the CLL value, 1024 bins on a log scale to 10000 nits
+	static uint32_t cll_hist[1024]; // one pipeline thread per QC source; only used when rejecting
+	const bool reject = hdr && src->cll_reject > 0.0f;
+	if (reject)
+		memset(cll_hist, 0, sizeof(cll_hist));
 
 	for (uint32_t y = 0; y < sd->height; y++) {
 		const uint8_t *rgb = sd->rgb_data + (size_t)sd->linesize * y;
@@ -428,7 +490,8 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 					eg = src->nits_pq[g];
 					eb = src->nits_pq[b];
 					m = fmaxf(er, fmaxf(eg, eb));
-					nits = m;
+					// max R, G, B, or the luminance (CIE Y with Rec. 2020 weights)
+					nits = src->cll_method ? 0.2627f * er + 0.6780f * eg + 0.0593f * eb : m;
 				} else {
 					er = src->lin_hlg[r];
 					eg = src->lin_hlg[g];
@@ -436,11 +499,17 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 					const float ys = 0.2627f * er + 0.6780f * eg + 0.0593f * eb;
 					m = fmaxf(er, fmaxf(eg, eb));
 					// HLG OOTF for a 1000 nits display, system gamma 1.2
-					nits = ys > 0.0f ? 1000.0f * powf(ys, 0.2f) * m : 0.0f;
+					nits = ys <= 0.0f        ? 0.0f
+					       : src->cll_method ? 1000.0f * powf(ys, 1.2f)
+								 : 1000.0f * powf(ys, 0.2f) * m;
 				}
 				sum_nits += nits;
 				if (nits > cll)
 					cll = nits;
+				if (reject) {
+					int bin = (int)(log10f(nits + 1.0f) * (1023.0f / 4.0f));
+					cll_hist[bin < 0 ? 0 : bin > 1023 ? 1023 : bin]++;
+				}
 				// Rec. 2020 to Rec. 709; a negative component is outside Rec. 709
 				const float r7 = 1.6605f * er - 0.5876f * eg - 0.0728f * eb;
 				const float g7 = -0.1246f * er + 1.1329f * eg - 0.0083f * eb;
@@ -467,6 +536,15 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 	f->crush_share = (float)n_crush / n;
 	f->rgb_share = (float)n_rgb / n;
 	f->gamut_share = (float)n_gamut / n;
+	if (reject) {
+		// the level below which all but the brightest share of the pixels lie
+		const uint64_t skip = (uint64_t)(src->cll_reject * (double)n);
+		uint64_t above = 0;
+		int bin = 1023;
+		while (bin > 0 && above + cll_hist[bin] <= skip)
+			above += cll_hist[bin--];
+		cll = fminf(cll, powf(10.0f, (bin + 1) * (4.0f / 1023.0f)) - 1.0f);
+	}
 	f->cll = cll;
 	f->fall = (float)(sum_nits / n);
 	measure_borders(sd, f->border);
@@ -527,6 +605,17 @@ static void append_csv(const char *path, const struct qc_event *e)
 }
 
 /* Updates one check; called with the mutex held. */
+static void update_check(struct qc_source *src, int check, bool violation, const char *detail, uint64_t now);
+
+/* A check on a share of the pixels: a violation above the allowed share, a warning above the warning share. */
+static void update_share_check(struct qc_source *src, int check, bool valid, float share, const char *detail,
+			       uint64_t now)
+{
+	const bool violation = valid && share > src->tolerance;
+	src->warn[check] = valid && !violation && src->warn_tol > 0.0f && share > src->warn_tol && src->enabled[check];
+	update_check(src, check, violation, detail, now);
+}
+
 static void update_check(struct qc_source *src, int check, bool violation, const char *detail, uint64_t now)
 {
 	if (!src->enabled[check])
@@ -650,13 +739,13 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 
 	char d[48];
 	snprintf(d, sizeof(d), "%.1f%% of pixels", f.clip_share * 100.0f);
-	update_check(src, QC_CLIP, f.valid && f.clip_share > src->tolerance, d, now);
+	update_share_check(src, QC_CLIP, f.valid, f.clip_share, d, now);
 	snprintf(d, sizeof(d), "%.1f%% of pixels", f.crush_share * 100.0f);
-	update_check(src, QC_CRUSH, f.valid && f.crush_share > src->tolerance, d, now);
+	update_share_check(src, QC_CRUSH, f.valid, f.crush_share, d, now);
 	snprintf(d, sizeof(d), "%.1f%% of pixels", f.rgb_share * 100.0f);
-	update_check(src, QC_RGB, f.valid && f.rgb_share > src->tolerance, d, now);
+	update_share_check(src, QC_RGB, f.valid, f.rgb_share, d, now);
 	snprintf(d, sizeof(d), "%.1f%% of pixels", f.gamut_share * 100.0f);
-	update_check(src, QC_GAMUT, f.valid && cm_cs_is_hdr(f.colorspace) && f.gamut_share > src->tolerance, d, now);
+	update_share_check(src, QC_GAMUT, f.valid && cm_cs_is_hdr(f.colorspace), f.gamut_share, d, now);
 
 	// borders in pixels of the source picture
 	const int scale = src->cm.target_scale > 0 ? src->cm.target_scale : 1;
@@ -691,7 +780,18 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 			 f.legal_share * 100.0f);
 	else
 		snprintf(d, sizeof(d), "no raw signal");
-	update_check(src, QC_LEGAL, f.valid && f.ext && f.legal_share > src->tolerance, d, now);
+	update_share_check(src, QC_LEGAL, f.valid && f.ext, f.legal_share, d, now);
+
+	// HDR limit: the peak (CLL) or the frame average (FALL) above the delivery limit; a warning above 90 %
+	{
+		const bool hdr_valid = f.valid && cm_cs_is_hdr(f.colorspace);
+		snprintf(d, sizeof(d), "CLL %.0f / %.0f, FALL %.0f / %.0f nits", f.cll, src->hdr_peak, f.fall,
+			 src->hdr_avg);
+		const bool over = hdr_valid && (f.cll > src->hdr_peak || f.fall > src->hdr_avg);
+		src->warn[QC_HDR] = hdr_valid && !over && src->enabled[QC_HDR] &&
+				    (f.cll > src->hdr_peak * 0.9f || f.fall > src->hdr_avg * 0.9f);
+		update_check(src, QC_HDR, over, d, now);
+	}
 
 	// timeline: one bucket per window / QC_HIST
 	const uint64_t len = (uint64_t)(src->window / QC_HIST * 1e9);
@@ -730,9 +830,12 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 			b->n_ext++;
 		}
 		b->n++;
-		for (int i = 0; i < QC_N_CHECKS; i++)
+		for (int i = 0; i < QC_N_CHECKS; i++) {
 			if (src->active[i] && src->enabled[i])
 				b->flags |= 1u << i;
+			if (src->warn[i])
+				b->warn_flags |= 1u << i;
+		}
 	}
 	pthread_mutex_unlock(&src->mutex);
 }
@@ -875,6 +978,8 @@ static void render_timeline(struct qc_source *src, const struct text_scale *ts, 
 		}
 		// red bands where a check failed
 		const bool bad = b->flags != 0;
+		if (!bad && b->warn_flags)
+			fill_rect(x0 + bw * i, y0, x0 + bw * (i + 1), y1, 0x40FFC040);
 		if (bad && band_start < 0)
 			band_start = i;
 		if ((!bad || i == QC_HIST - 1) && band_start >= 0) {
@@ -884,6 +989,11 @@ static void render_timeline(struct qc_source *src, const struct text_scale *ts, 
 		}
 	}
 	if (nits) {
+		// the delivery limits of the HDR check: peak and average
+		const float yp = y1 - (y1 - y0) * fminf(src->hdr_peak / nits_max, 1.0f);
+		const float ya = y1 - (y1 - y0) * fminf(src->hdr_avg / nits_max, 1.0f);
+		fill_rect(x0, yp, x1, yp + 1.0f * ts->uy, 0xA0FF6060);
+		fill_rect(x0, ya, x1, ya + 1.0f * ts->uy, 0x80FFC040);
 		polyline(xs, fall, valid, QC_HIST, COLOR_OK);
 		polyline(xs, cll, valid, QC_HIST, 0xFFFF9F40);
 	} else {
@@ -969,6 +1079,7 @@ static void qc_render(void *data, gs_effect_t *effect)
 	struct qc_frame f;
 	float max_cll, max_fall;
 	bool active[QC_N_CHECKS];
+	bool warn[QC_N_CHECKS];
 	struct qc_event log[QC_LOG_MAX];
 	int n_log, i_log;
 	pthread_mutex_lock(&src->mutex);
@@ -976,6 +1087,7 @@ static void qc_render(void *data, gs_effect_t *effect)
 	max_cll = src->max_cll;
 	max_fall = src->max_fall;
 	memcpy(active, src->active, sizeof(active));
+	memcpy(warn, src->warn, sizeof(warn));
 	memcpy(log, src->log, sizeof(log));
 	n_log = src->n_log;
 	i_log = src->i_log;
@@ -1013,9 +1125,11 @@ static void qc_render(void *data, gs_effect_t *effect)
 	float y = 6.0f * ts.uy;
 
 	// header: overall status
-	int n_bad = 0;
-	for (int i = 0; i < QC_N_CHECKS; i++)
+	int n_bad = 0, n_warn = 0;
+	for (int i = 0; i < QC_N_CHECKS; i++) {
 		n_bad += active[i] && src->enabled[i];
+		n_warn += warn[i] && src->enabled[i];
+	}
 	const bool hlg = cm_cs_is_hdr(f.colorspace);
 	text_draw(&ts,
 		  f.colorspace == CM_CS_2100_PQ ? "QC  PQ"
@@ -1028,11 +1142,14 @@ static void qc_render(void *data, gs_effect_t *effect)
 			snprintf(buf, sizeof(buf), "%s", obs_module_text("QC.NoSignal"));
 		else if (n_bad)
 			snprintf(buf, sizeof(buf), "%d %s", n_bad, obs_module_text("QC.Problems"));
+		else if (n_warn)
+			snprintf(buf, sizeof(buf), "%d %s", n_warn, obs_module_text("QC.Warnings"));
 		else
 			snprintf(buf, sizeof(buf), "%s", obs_module_text("QC.AllOK"));
 		text_draw(&ts, buf, W - pad, y, px + 2.0f,
 			  !f.valid ? COLOR_DIM
 			  : n_bad  ? COLOR_BAD
+			  : n_warn ? COLOR_WARN
 				   : COLOR_OK,
 			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
 	}
@@ -1094,9 +1211,9 @@ static void qc_render(void *data, gs_effect_t *effect)
 			x = pad;
 			y += lh;
 		}
-		const uint32_t c = active[i] ? COLOR_BAD : COLOR_OK;
+		const uint32_t c = active[i] ? COLOR_BAD : warn[i] ? COLOR_WARN : COLOR_OK;
 		fill_rect(x, y + 4.0f * ts.uy, x + 7.0f * ts.ux, y + 11.0f * ts.uy, c);
-		text_draw(&ts, name, x + 11.0f * ts.ux, y, px - 1.0f, active[i] ? COLOR_BAD : COLOR_DIM,
+		text_draw(&ts, name, x + 11.0f * ts.ux, y, px - 1.0f, active[i] || warn[i] ? c : COLOR_DIM,
 			  TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 		x += tw + 24.0f * ts.ux;
 	}

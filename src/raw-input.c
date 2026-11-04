@@ -27,6 +27,12 @@ struct raw_frame
 	bool valid;
 };
 
+enum raw_range_e {
+	RAW_RANGE_AUTO = 0,
+	RAW_RANGE_VIDEO = 1,
+	RAW_RANGE_FULL = 2,
+};
+
 struct raw_input
 {
 	obs_source_t *self;
@@ -34,6 +40,7 @@ struct raw_input
 	struct raw_frame frame;
 	volatile uint64_t last_use; // ns; frames are copied only while a scope uses them
 	bool any_transfer;          // also when the source's transfer differs from the project's
+	int range;                  // RAW_RANGE_*: as the source says, or video (legal) or full range
 };
 
 static const char *raw_input_get_name(void *unused)
@@ -46,6 +53,7 @@ static void raw_input_update(void *data, obs_data_t *settings)
 {
 	struct raw_input *r = data;
 	r->any_transfer = obs_data_get_bool(settings, "any_transfer");
+	r->range = (int)obs_data_get_int(settings, "range");
 }
 
 static void *raw_input_create(obs_data_t *settings, obs_source_t *source)
@@ -61,6 +69,11 @@ static obs_properties_t *raw_input_get_properties(void *data)
 {
 	UNUSED_PARAMETER(data);
 	obs_properties_t *props = obs_properties_create();
+	obs_property_t *p = obs_properties_add_list(props, "range", obs_module_text("RawInput.Range"),
+						    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, obs_module_text("RawInput.Range.Auto"), RAW_RANGE_AUTO);
+	obs_property_list_add_int(p, obs_module_text("RawInput.Range.Video"), RAW_RANGE_VIDEO);
+	obs_property_list_add_int(p, obs_module_text("RawInput.Range.Full"), RAW_RANGE_FULL);
 	obs_properties_add_bool(props, "any_transfer", obs_module_text("RawInput.AnyTransfer"));
 	obs_properties_add_text(props, "note", obs_module_text("RawInput.Note"), OBS_TEXT_INFO);
 	return props;
@@ -109,6 +122,10 @@ static int plane_heights(enum video_format f, uint32_t h, uint32_t heights[MAX_A
 	case VIDEO_FORMAT_UYVY:
 	case VIDEO_FORMAT_AYUV:
 	case VIDEO_FORMAT_V210:
+	case VIDEO_FORMAT_BGRA:
+	case VIDEO_FORMAT_BGRX:
+	case VIDEO_FORMAT_RGBA:
+	case VIDEO_FORMAT_R10L:
 		heights[0] = h;
 		return 1;
 	default:
@@ -155,6 +172,14 @@ static const char *format_desc(enum video_format f)
 		return "16-bit P416";
 	case VIDEO_FORMAT_V210:
 		return "10-bit V210";
+	case VIDEO_FORMAT_BGRA:
+		return "8-bit BGRA";
+	case VIDEO_FORMAT_BGRX:
+		return "8-bit BGRX";
+	case VIDEO_FORMAT_RGBA:
+		return "8-bit RGBA";
+	case VIDEO_FORMAT_R10L:
+		return "10-bit RGB";
 	default:
 		return "?";
 	}
@@ -318,6 +343,39 @@ static void get_pixel(const struct raw_frame *f, uint32_t x, uint32_t y, uint32_
 	}
 }
 
+static inline bool is_rgb_format(enum video_format f)
+{
+	return f == VIDEO_FORMAT_BGRA || f == VIDEO_FORMAT_BGRX || f == VIDEO_FORMAT_RGBA || f == VIDEO_FORMAT_R10L;
+}
+
+/* One pixel of an R'G'B' format as 16-bit values (the code shifted to the top of 16 bits). */
+static void get_rgb(const struct raw_frame *f, uint32_t x, uint32_t y, uint32_t *R, uint32_t *G, uint32_t *B)
+{
+	const uint8_t *p = f->data[0] + f->linesize[0] * y + x * 4;
+	switch (f->format) {
+	case VIDEO_FORMAT_RGBA:
+		*R = p[0] << 8, *G = p[1] << 8, *B = p[2] << 8;
+		break;
+	case VIDEO_FORMAT_R10L: {
+		// little-endian 32 bits: R in 31..22, G in 21..12, B in 11..2 (Blackmagic 10-bit RGBXLE)
+		const uint32_t w = rd32(p);
+		*R = ((w >> 22) & 0x3FF) << 6;
+		*G = ((w >> 12) & 0x3FF) << 6;
+		*B = ((w >> 2) & 0x3FF) << 6;
+		break;
+	}
+	default: // BGRA, BGRX
+		*R = p[2] << 8, *G = p[1] << 8, *B = p[0] << 8;
+		break;
+	}
+}
+
+static inline uint8_t code8(uint32_t v16)
+{
+	const uint32_t c = (v16 + 128) >> 8;
+	return (uint8_t)(c > 255 ? 255 : c);
+}
+
 static inline uint8_t to_code(float v)
 {
 	// 0..1 of the signal to an 8-bit legal code: 16 is 0 %, 235 is 100 %
@@ -356,6 +414,12 @@ bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t
 	}
 	const float kx = (float)f->width / src_w, ky = (float)f->height / src_h;
 	const float *m = f->matrix;
+	// the range the codes are in: as the source says, or as set on the filter
+	const bool full = r->range == RAW_RANGE_AUTO ? f->full_range : r->range == RAW_RANGE_FULL;
+	const bool rgb_fmt = is_rgb_format(f->format);
+	// R'G'B' sources: luma with the weights of the transfer (Rec. 2020 for HDR, Rec. 709 otherwise)
+	const bool wide = f->trc == VIDEO_TRC_HLG || f->trc == VIDEO_TRC_PQ;
+	const float kr = wide ? 0.2627f : 0.2126f, kb = wide ? 0.0593f : 0.0722f, kg = 1.0f - kr - kb;
 	for (uint32_t y = 0; y < height; y++) {
 		uint32_t fy = (uint32_t)((y0 + y + 0.5f) * ky);
 		if (fy >= f->height)
@@ -367,18 +431,45 @@ bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t
 			uint32_t fx = (uint32_t)((x0 + x + 0.5f) * kx);
 			if (fx >= f->width)
 				fx = f->width - 1;
+			if (rgb_fmt) {
+				uint32_t R, G, B;
+				get_rgb(f, fx, fy, &R, &G, &B);
+				if (full) {
+					o[0] = to_code(B / 65535.0f);
+					o[1] = to_code(G / 65535.0f);
+					o[2] = to_code(R / 65535.0f);
+				} else {
+					// video range R'G'B': the codes themselves
+					o[0] = code8(B), o[1] = code8(G), o[2] = code8(R);
+				}
+				o[3] = (uint8_t)(kr * o[2] + kg * o[1] + kb * o[0] + 0.5f);
+				continue;
+			}
 			uint32_t Y, U, V;
 			get_pixel(f, fx, fy, &Y, &U, &V);
 			// normalized as the shaders of OBS see the planes, so the matrix of the frame applies
-			const float ny = Y / 65535.0f, nu = U / 65535.0f, nv = V / 65535.0f;
+			float ny = Y / 65535.0f, nu = U / 65535.0f, nv = V / 65535.0f;
+			if (full != f->full_range) {
+				// the filter says another range than the source: turn the codes into the source's
+				// range first, so its matrix gives the colors of the range set on the filter
+				if (!full) { // video range codes, the source says full
+					ny = (ny - 16.0f / 255.0f) * 255.0f / 219.0f;
+					nu = (nu - 128.0f / 255.0f) * 255.0f / 224.0f + 128.0f / 255.0f;
+					nv = (nv - 128.0f / 255.0f) * 255.0f / 224.0f + 128.0f / 255.0f;
+				} else { // full range codes, the source says video
+					ny = ny * 219.0f / 255.0f + 16.0f / 255.0f;
+					nu = (nu - 128.0f / 255.0f) * 224.0f / 255.0f + 128.0f / 255.0f;
+					nv = (nv - 128.0f / 255.0f) * 224.0f / 255.0f + 128.0f / 255.0f;
+				}
+			}
 			const float rr = m[0] * ny + m[1] * nu + m[2] * nv + m[3];
 			const float gg = m[4] * ny + m[5] * nu + m[6] * nv + m[7];
 			const float bb = m[8] * ny + m[9] * nu + m[10] * nv + m[11];
 			o[0] = to_code(bb);
 			o[1] = to_code(gg);
 			o[2] = to_code(rr);
-			if (f->full_range) {
-				o[3] = to_code(ny);
+			if (full) {
+				o[3] = to_code(Y / 65535.0f);
 			} else {
 				// the luma code itself, at 8 bits
 				const uint32_t c = (Y + 128) >> 8;
@@ -387,8 +478,7 @@ bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t
 		}
 	}
 	if (desc && desc_size)
-		snprintf(desc, desc_size, "RAW %s %s%s", format_desc(f->format), trc_desc(f->trc),
-			 f->full_range ? " full" : "");
+		snprintf(desc, desc_size, "RAW %s %s%s", format_desc(f->format), trc_desc(f->trc), full ? " full" : "");
 	pthread_mutex_unlock(&r->mutex);
 	return true;
 }
