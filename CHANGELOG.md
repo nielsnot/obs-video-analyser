@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.9.0
+
+A large update, inspired by what professional scope software offers. Everything new can be switched off; visual
+extras start off or are one click away.
+
+**New scopes**
+
+- **Channel plot:** every pixel as a point of two channels (R/G, R/B, G/B, Y/Cb, Y/Cr, Cb/Cr), with the diagonal,
+  the legal box and, with the raw signal, the EBU R103 box.
+- **Data analyser:** the values of a block of pixels around the first color pin (or the middle): Y, Y'CbCr or R'G'B'
+  as 10-bit or 8-bit codes or %, exact codes of the raw signal; values outside the legal range in orange.
+- **Skin tone:** finds skin in a hue window and colors it on the picture (on target, redder, yellower), with
+  statistics; *Find* takes the skin of your selection, *Apply* turns it into the ROI qualifier.
+- **HectorScope:** a 3D waveform in Y'CbCr. The 3D color cube can also show HSV and Lab; Shift-drag pans, Reset view.
+
+**Waveform**
+
+- Peak hold and highest/lowest level lines per channel (also in parade), with a reset.
+- Zoom presets for the blacks and the whites (5x, 7.5x, 10x), also as hotkeys.
+- EBU R103 / SDI lines at -5 %, 105 % and 109 % with labels up to 109 %.
+- HDR reference lines at 26, 203 and 1000 nits (also in the histogram).
+
+**Vectorscope**
+
+- Skin tone band (a wedge of your width), 100 % targets beside the 75 % ones, and a saturation alert ring that turns
+  red with *OVER* and a ring at the highest saturation in the picture.
+
+**False color, histogram, CIE**
+
+- PQ and nits-based HLG presets; a gamut view that colors everything outside Rec. 709 or P3; opacity; export the
+  false color as a `.cube` LUT for a monitor or another program.
+- Vertical histogram.
+- CIE: ACES AP0 and AP1, ProPhoto and Adobe RGB triangles, the Planckian locus with color temperatures, and CIE 1976
+  u'v'.
+
+**QC**
+
+- Warnings below the errors (yellow dots and timeline stretches), with their own thresholds.
+- HDR limit presets (HDR10 1000/400, 4000/1000, HLG 1000/400 or your own) and the MaxCLL method (max R'G'B' or
+  CIE Y, optionally ignoring the brightest pixels).
+
+**ROI view**
+
+- Title and action safe areas, rule of thirds and a center cross (each on or off, percentages adjustable).
+- Compare with the snapshot as a wipe (left/right or top/bottom, drag the divider) or a blend.
+
+**Raw signal**
+
+- *Signal range* on the filter: as the source says, video (legal) or full range.
+- Blackmagic R'G'B' formats (8-bit BGRA, BGRX, RGBA and 10-bit RGB).
+- Setup guide extended with DaVinci Resolve through an UltraStudio.
+
+**Dock tools**
+
+- **Pause all scopes** (toolbar, menu or hotkey): every scope keeps the current frame until you resume.
+- **Hotkeys** (OBS Settings, Hotkeys, also for a Stream Deck): next and previous view, view 1 to 5, snapshot,
+  compare, pause, besides the waveform zoom and peak hotkeys.
+- **Equal widths and heights:** the Layout menu evens out the scopes of a row or column in the free layout.
+- **Layout library:** save a view as a named layout and open it in any dock as a new view, on that dock's source.
+  Layouts belong to no scene collection.
+- **Snapshot library:** snapshots as PNG files with a name template (`{source} {view} {dock} {date} {time} {n}`),
+  thumbnails, load one as the reference picture (wipe or blend); every snapshot can be saved by itself (off by
+  default). Right click the Snapshot button to open it.
+- **Signal path:** a window per dock with the source, whether the raw signal is used (format, bit depth, range,
+  transfer), the project format, how the scopes capture it, the LUT, the selection and the scopes.
+- **Settings and backup** (Tools menu): export everything (docks, views, hotkeys, layouts, snapshot settings) to a
+  file, import it again or on another computer, or a factory reset. A backup is made by itself before an import or a
+  reset.
+- Help for the dock itself in the dock menu.
+
+**Fixes**
+
+- HDR capture keeps colors beyond Rec. 709 (they were clipped before the gamut checks).
+
 ## 0.8.2
 
 - **Raw signal and HDR:** the label says the transfer of the source, for example `RAW 10-bit V210 HLG`. The raw signal

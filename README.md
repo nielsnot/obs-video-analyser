@@ -31,6 +31,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | 2 | `+ Scope` | Adds a scope (see the list below). |
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
 | 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
+| 10 | `❚❚ Pause` | Pauses every scope in every dock on the current frame until you resume (also a hotkey). |
 | 10 | `☺ Faces (exp.)` | The selection follows every face found, so all scopes measure the faces. |
 | 10 | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
 | 10 | `⛶ Full` | Shows the dock full screen on the screen it is on; again, or Esc, to go back. |
@@ -59,6 +60,10 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term with maximum, integrated) against a target, a loudness timeline of 30 s to 1.5 h, phase correlation, goniometer for stereo and a room meter for 5.1 and 7.1 |
 | **Faces** *(experimental)* | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
 | **Color chart** | A 24-patch chart | Compares a color chart with a reference camera or the published values: Delta E per patch, exposure and white balance from the greys (with the gain change to match), saturation and the hue of the primaries |
+| **Channel plot** | Two channels against each other | R/G, R/B, G/B, Y/Cb, Y/Cr or Cb/Cr, with the legal and EBU R103 boxes |
+| **Data analyser** | Pixel values | A block of pixels around a pin as 10-bit or 8-bit codes or %, exact codes of the raw signal |
+| **Skin tone** | Skin in the picture | Colors skin on target, redder or yellower, with statistics; turns the skin into the qualifier |
+| **HectorScope** | A 3D waveform | Every pixel in Y'CbCr space; the 3D cube can also show HSV and Lab |
 | **Info and timecode** | Time and format | One line per tile: time-of-day timecode, clock, date, video format or your own text (or all of them stacked) |
 
 ## Tools
@@ -81,6 +86,12 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 - **Follow faces (experimental).** `☺ Faces (exp.)` turns the selection into the faces found, and it moves with them.
 - **Free layout.** `⊞ Arrange` lets you drag and resize every scope; give scopes of one camera the same tile color.
 - **Quick controls.** Hover a scope for intensity, grid, color, gain, shape and full size without opening the options.
+- **Guides.** Title and action safe, thirds and a center cross over the ROI view (right-click, Guides).
+- **Hotkeys.** OBS Settings, Hotkeys, Video Analyser: waveform zoom and peaks, views, snapshot, compare and pause.
+- **Layout library.** Save a view as a layout and open it in any dock (right-click, Layout library).
+- **Snapshot library.** Snapshots as PNG files with a name template and thumbnails; load one as the reference.
+- **Signal path.** Right-click, Signal path: where the measured signal comes from and how it is captured.
+- **Settings and backup.** Tools, Video Analyser Settings and Backup: export, import and factory reset.
 
 Quick setup for the raw signal (Blackmagic and other capture cards): [Raw signal](doc/raw-signal.md).
 
