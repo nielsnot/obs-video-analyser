@@ -76,11 +76,13 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 - **3D LUT.** In the ROI options, load a `.cube` LUT and apply it to the ROI view only or to everything the scopes
   measure, for example to check a log camera through its conversion LUT or an HLG to SDR conversion.
 - **Waveform colorize.** A luma waveform can draw its trace in the colors of the picture.
-- **Raw signal of video sources.** On a capture card, camera or media file the scopes read the Y'CbCr frame before OBS clips it (a filter the plugin adds by itself): the waveform runs from -7 % to 109 % and shows superwhite and sub-black, and QC checks the legal range (EBU R103). 8-bit and 10-bit, including Blackmagic V210.
+- **Raw signal of video sources.** On a capture card, camera or media file the scopes read the Y'CbCr frame before OBS clips it (a filter the plugin adds by itself): the waveform runs from -7 % to 109 % and shows superwhite and sub-black, and QC checks the legal range (EBU R103). 8-bit and 10-bit, including Blackmagic V210. See [Raw signal](doc/raw-signal.md).
 - **Help on every scope.** The **i** button in the hover bar explains how to read the scope and what its controls do.
 - **Follow faces (experimental).** `☺ Faces (exp.)` turns the selection into the faces found, and it moves with them.
 - **Free layout.** `⊞ Arrange` lets you drag and resize every scope; give scopes of one camera the same tile color.
 - **Quick controls.** Hover a scope for intensity, grid, color, gain, shape and full size without opening the options.
+
+Quick setup for the raw signal (Blackmagic and other capture cards): [Raw signal](doc/raw-signal.md).
 
 More details: [Dock](doc/dock.md), [Waveform](doc/waveform.md), [Vectorscope](doc/vectorscope.md),
 [Histogram](doc/histogram.md), [False Color](doc/falsecolor.md), [Zebra](doc/zebra.md),
