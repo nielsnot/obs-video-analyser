@@ -36,12 +36,18 @@ def dock_data():
         {'name': 'Line', 'kind': 2, 'hue': 300.0, 'style': 2},
     ]
     scopes = [
-        scope('qc', 'QC', {'qc_check_freeze': True, 'qc_freeze_seconds': 1.0, 'qc_min_duration': 0.2}),
+        scope('qc', 'QC', {'qc_check_freeze': True, 'qc_freeze_seconds': 1.0, 'qc_min_duration': 0.2,
+                           'qc_warn': 0.1, 'qc_check_hdr': True, 'qc_tl_rgb': True}),
         scope('satlum', 'SL'),
         scope('lineplot', 'LP'),
         scope('info', 'Info', {'text': 'Studio A'}),
-        scope('waveform', 'WV', {'components': 0x20, 'colorize': True, 'markers': markers}),
-        scope('vectorscope', 'VS', {'markers': vs_markers}),
+        scope('waveform', 'WV', {'components': 0x20, 'colorize': True, 'markers': markers, 'peak_hold': True}),
+        scope('vectorscope', 'VS', {'markers': vs_markers, 'skin_band': 20, 'sat_alert': 60, 'sat_max_ring': True}),
+        scope('waveform', 'Parade', {'components': 0x07, 'display': 2, 'peak_hold': True}),
+        scope('channelplot', 'CP', {'cp_pair': 0}),
+        scope('data', 'Data'),
+        scope('skintone', 'Skin'),
+        scope('falsecolor', 'Gamut', {'fc_gamut': 1}),
         scope('audio', 'Audio'),
         scope('cube', 'Cube'),
     ]
@@ -50,7 +56,8 @@ def dock_data():
             'name': 'New scopes',
             'toolbar': True,
             'active_view': 0,
-            'roi-prop': {'target_name': '', 'interleave': 0, 'target_scale': 2, 'shapes': []},
+            'roi-prop': {'target_name': '', 'interleave': 0, 'target_scale': 2, 'shapes': [],
+                         'guide_title': True, 'guide_action': True, 'guide_thirds': True, 'guide_center': True},
             'views': [{'name': 'View 1', 'state': {'layout': 0, 'roi-shown': True, 'scopes': scopes}}],
         }],
     }
@@ -107,11 +114,13 @@ class NewScopesTest(obstest.OBSTest):
                 kind = kind.rsplit('_v', 1)[0]
             kinds.setdefault(kind, i['inputName'])
         for kind in ('qc_source', 'satlum_source', 'lineplot_source', 'info_source', 'waveform_source',
-                     'vectorscope_source', 'audio_source', 'cube_source'):
+                     'vectorscope_source', 'audio_source', 'cube_source', 'channelplot_source', 'data_source',
+                     'skintone_source'):
             self.assertIn(PREFIX + kind, kinds, f'{kind} was not created')
 
         for kind in ('satlum_source', 'lineplot_source', 'info_source', 'waveform_source', 'vectorscope_source',
-                     'audio_source', 'cube_source'):
+                     'audio_source', 'cube_source', 'channelplot_source', 'data_source',
+                     'skintone_source'):
             img = self.screenshot(cl, kinds[PREFIX + kind])
             lit = sum(1 for x in range(0, img.width, 4) for y in range(0, img.height, 4)
                       if sum(img.getpixel((x, y))) > 60)

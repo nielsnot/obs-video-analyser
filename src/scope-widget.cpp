@@ -94,6 +94,9 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "cube_source", "cube", "Cube", FIT_SQUARE},
 	{ID_PREFIX "faces_source", "faces", "Faces", FIT_ASPECT},
 	{ID_PREFIX "chart_source", "chart", "Chart", FIT_ASPECT},
+	{ID_PREFIX "channelplot_source", "channelplot", "ChannelPlot", FIT_SQUARE},
+	{ID_PREFIX "data_source", "data", "DataAnalyser", FIT_ASPECT},
+	{ID_PREFIX "skintone_source", "skintone", "SkinTone", FIT_ASPECT},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -812,6 +815,8 @@ enum qb_kind_e {
 	QB_FACE_BASE,  // faces: this face is the reference look
 	QB_FACE_CLEAR, // faces: no reference look
 	QB_HELP,       // an explanation of the scope
+	QB_SKIN_FIND,  // skin tone: the window from the dock selection
+	QB_SKIN_APPLY, // skin tone: the window as the dock selection
 };
 
 struct qb_item
@@ -833,7 +838,8 @@ static bool type_has_intensity(int type)
 	default:
 		// CIE and Sat / Lum
 		return type >= 0 && type < N_TYPES &&
-		       (!strcmp(scope_types[type].key, "cie") || !strcmp(scope_types[type].key, "satlum"));
+		       (!strcmp(scope_types[type].key, "cie") || !strcmp(scope_types[type].key, "satlum") ||
+			!strcmp(scope_types[type].key, "channelplot"));
 	}
 }
 
@@ -880,6 +886,10 @@ static std::string qb_label(const scope_widget_s *data, const scope_entry *e, in
 		return "Clear reference";
 	case QB_HELP:
 		return "i";
+	case QB_SKIN_FIND:
+		return "Find";
+	case QB_SKIN_APPLY:
+		return "Use as selection";
 	default:
 		return "Int";
 	}
@@ -944,6 +954,10 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 			add(QB_MK_COLOR, 40);
 			add(QB_MK_DEL, 40);
 		}
+	}
+	if (e->type >= 0 && e->type < N_TYPES && !strcmp(scope_types[e->type].key, "skintone")) {
+		add(QB_SKIN_FIND, 40);
+		add(QB_SKIN_APPLY, 40);
 	}
 	if (e->type >= 0 && e->type < N_TYPES &&
 	    (!strcmp(scope_types[e->type].key, "faces") || !strcmp(scope_types[e->type].key, "chart"))) {
@@ -1700,6 +1714,14 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 	case QB_HELP:
 		showHelp(e->type);
 		return;
+	case QB_SKIN_FIND:
+	case QB_SKIN_APPLY: {
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "cmd", it.kind == QB_SKIN_FIND ? "find" : "apply");
+		proc_handler_call(obs_source_get_proc_handler(src), "va_skin", &cd);
+		calldata_free(&cd);
+		return;
+	}
 	case QB_FACE_BASE:
 	case QB_FACE_CLEAR: {
 		calldata_t cd = {0};

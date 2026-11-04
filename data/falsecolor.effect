@@ -152,6 +152,65 @@ float4 PSDrawFalseColorRaw(VertInOut vert_in) : TARGET
 	return lut.Sample(lut_sampler, float2((rgba.r * 255.0 + 0.5) / 256.0, 0.5));
 }
 
+// Gamut view: the captured HDR signal (HLG or PQ, Rec. 2020) decoded to light and checked against a smaller
+// gamut. Grey inside, orange near its edge, red outside. SDR captures are inside Rec. 709 by nature.
+uniform float gamut_hdr = 0.0;    // 0 SDR, 1 HLG, 2 PQ
+uniform float gamut_target = 0.0; // 0 Rec. 709, 1 DCI-P3 (D65)
+
+float hlg_to_light(float e)
+{
+	const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
+	return e <= 0.5 ? e * e / 3.0 : (exp((e - c) / a) + b) / 12.0;
+}
+
+float pq_to_light(float e)
+{
+	float p = pow(max(e, 0.0), 1.0 / 78.84375);
+	return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578);
+}
+
+float4 PSDrawGamut(VertInOut vert_in) : TARGET
+{
+	float4 rgba = image.Sample(def_sampler, vert_in.uv);
+	if (mask_outside > 0.5 && rgba.a < 0.5)
+		return outside_selection(rgba);
+	float g = dot(rgba.rgb, float3(0.2627, 0.6780, 0.0593)) * 0.8;
+	if (gamut_hdr < 0.5)
+		return float4(g, g, g, 1.0);
+	float3 l;
+	if (gamut_hdr > 1.5)
+		l = float3(pq_to_light(rgba.r), pq_to_light(rgba.g), pq_to_light(rgba.b));
+	else
+		l = float3(hlg_to_light(rgba.r), hlg_to_light(rgba.g), hlg_to_light(rgba.b));
+	float3 t;
+	if (gamut_target > 0.5) {
+		t = float3(dot(l, float3(1.3435783, -0.2821797, -0.0613986)),
+			   dot(l, float3(-0.0652975, 1.0757879, -0.0104905)),
+			   dot(l, float3(0.0028218, -0.0195985, 1.0167767)));
+	} else {
+		t = float3(dot(l, float3(1.6605, -0.5876, -0.0728)), dot(l, float3(-0.1246, 1.1329, -0.0083)),
+			   dot(l, float3(-0.0182, -0.1006, 1.1187)));
+	}
+	float mx = max(t.r, max(t.g, t.b));
+	float mn = min(t.r, min(t.g, t.b));
+	if (mx <= 1e-6)
+		return float4(g, g, g, 1.0);
+	if (mn < -0.004 * mx)
+		return float4(0.95, 0.15, 0.1, 1.0); // outside
+	if (mn < 0.03 * mx)
+		return float4(1.0, 0.6, 0.1, 1.0); // near the edge
+	return float4(g, g, g, 1.0);
+}
+
+technique DrawGamut
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawGamut(vert_in);
+	}
+}
+
 technique DrawFalseColorRaw
 {
 	pass

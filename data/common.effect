@@ -94,8 +94,9 @@ float4 to_signal(float4 c)
 {
 	if (hdr_mode < 0.5)
 		return c;
-	// display light relative to 10000 nits
-	float3 rgb = rec709_to_rec2020(max(c.rgb, float3(0.0, 0.0, 0.0)) * sdr_white_over_max);
+	// display light relative to 10000 nits; Rec. 2020 first, then no negative light, so colors beyond
+	// Rec. 709 (negative in the linear Rec. 709 canvas) keep their place in Rec. 2020
+	float3 rgb = max(rec709_to_rec2020(c.rgb * sdr_white_over_max), float3(0.0, 0.0, 0.0));
 	if (hdr_mode > 1.5) {
 		rgb = saturate(rgb);
 		return float4(linear_to_st2084_channel(rgb.r), linear_to_st2084_channel(rgb.g),

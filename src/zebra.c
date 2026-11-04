@@ -140,6 +140,7 @@ struct zb_source
 	gs_texture_t *scheme_lut_raw; // 256x1 color per legal code (16 is 0 %, 235 is 100 %)
 	gs_texture_t *key_tex_raw;
 	bool raw_dirty;
+	int gamut_mode; // false color: 0 levels, 1 outside Rec. 709, 2 outside DCI-P3
 };
 
 struct zbs_source
@@ -588,8 +589,10 @@ static void zb_update(struct zb_source *src, obs_data_t *settings)
 
 	src->show_key = obs_data_get_int(settings, "show_key");
 
-	if (src->is_falsecolor)
+	if (src->is_falsecolor) {
 		fc_load_scheme(src, settings);
+		src->gamut_mode = (int)obs_data_get_int(settings, "fc_gamut");
+	}
 }
 
 static void zbs_update(void *data, obs_data_t *settings)
@@ -684,6 +687,11 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		dstr_cat(&filename_filters, " (*.bmp *.jpg *.jpeg *.tga *.gif *.png);;");
 		dstr_cat(&filename_filters, obs_module_text("FalseColor.Prop.LUTFile.Filter.All"));
 		dstr_cat(&filename_filters, " (*.*)");
+		prop = obs_properties_add_list(props, "fc_gamut", obs_module_text("FC.Prop.Gamut"), OBS_COMBO_TYPE_LIST,
+					       OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(prop, obs_module_text("FC.Gamut.Off"), 0);
+		obs_property_list_add_int(prop, obs_module_text("FC.Gamut.709"), 1);
+		obs_property_list_add_int(prop, obs_module_text("FC.Gamut.P3"), 2);
 		prop = obs_properties_add_list(props, "fc_preset", obs_module_text("FC.Prop.Preset"),
 					       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Exposure"), FC_PRESET_EXPOSURE);
@@ -1249,6 +1257,29 @@ static void zbs_render(void *data, gs_effect_t *effect)
 			pthread_mutex_unlock(&src->ext_mutex);
 		}
 		const char *draw = draw_name(cm_get_colorspace(&src->cm), src->zb.is_falsecolor);
+		if (src->zb.is_falsecolor && src->zb.gamut_mode) {
+			// gamut view: grey inside, orange near the edge, red outside the chosen gamut
+			const int cs = cm_get_colorspace(&src->cm);
+			gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
+			set_effect_params(&src->zb, true);
+			gs_effect_set_float(gs_effect_get_param_by_name(e, "gamut_hdr"), cs == CM_CS_2100_PQ    ? 2.0f
+											 : cs == CM_CS_2100_HLG ? 1.0f
+														: 0.0f);
+			gs_effect_set_float(gs_effect_get_param_by_name(e, "gamut_target"),
+					    src->zb.gamut_mode == 2 ? 1.0f : 0.0f);
+			while (gs_effect_loop(e, "DrawGamut"))
+				gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
+			const struct text_scale ts = text_scale_from_viewport((float)cx, (float)cy);
+			const char *note = obs_module_text(!cm_cs_is_hdr(cs)         ? "FC.Gamut.SdrNote"
+							   : src->zb.gamut_mode == 2 ? "FC.Gamut.LegendP3"
+										     : "FC.Gamut.Legend709");
+			const float tw = text_width(&ts, note, 11.0f);
+			fill_rect(4.0f * ts.ux, cy - 22.0f * ts.uy, 12.0f * ts.ux + tw, cy - 4.0f * ts.uy, 0xB0000000);
+			text_draw(&ts, note, 8.0f * ts.ux, cy - 13.0f * ts.uy, 11.0f, 0xFFE6E6EA, TEXT_ALIGN_LEFT,
+				  TEXT_VALIGN_MIDDLE);
+			PROFILE_END(prof_render_name);
+			return;
+		}
 		if (raw && !src->zb.is_falsecolor) {
 			// zebra: the picture as it is, the stripes from the raw luma
 			gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);

@@ -26,6 +26,18 @@ void raw_input_ensure(obs_source_t *parent);
 bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0,
 		    uint32_t src_w, uint32_t src_h, int colorspace, char *desc, size_t desc_size);
 
+/* One pixel of the raw signal for the data analyser. */
+struct raw_sample
+{
+	uint16_t code[3]; // Y, Cb, Cr (or R, G, B for an R'G'B' source) as 10-bit codes
+	float rgb[3];     // R', G', B' of the pixel, 0..1 of the signal (beyond it for superwhite and sub-black)
+};
+
+/* The cols x rows pixels of the frame around (u, v) (0..1 of the picture), one per frame pixel. *rgb_source is set
+ * for an R'G'B' format, *full for full range. Returns false without a usable frame. */
+bool raw_input_sample(obs_source_t *filter, float u, float v, int cols, int rows, struct raw_sample *out,
+		      bool *rgb_source, bool *full, char *desc, size_t desc_size);
+
 /* Frees what the module keeps; at unload. */
 void raw_input_free(void);
 

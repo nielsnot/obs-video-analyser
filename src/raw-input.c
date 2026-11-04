@@ -388,6 +388,59 @@ static const char *trc_desc(int trc)
 	return trc == VIDEO_TRC_HLG ? "HLG" : trc == VIDEO_TRC_PQ ? "PQ" : "SDR";
 }
 
+bool raw_input_sample(obs_source_t *filter, float u, float v, int cols, int rows, struct raw_sample *out,
+		      bool *rgb_source, bool *full_out, char *desc, size_t desc_size)
+{
+	struct raw_input *r = filter ? obs_obj_get_data(filter) : NULL;
+	if (!r || cols <= 0 || rows <= 0)
+		return false;
+	r->last_use = os_gettime_ns();
+	pthread_mutex_lock(&r->mutex);
+	const struct raw_frame *f = &r->frame;
+	if (!f->valid || !f->width || !f->height) {
+		pthread_mutex_unlock(&r->mutex);
+		return false;
+	}
+	const bool full = r->range == RAW_RANGE_AUTO ? f->full_range : r->range == RAW_RANGE_FULL;
+	const bool rgb_fmt = is_rgb_format(f->format);
+	const int cx = (int)(u * f->width), cy = (int)(v * f->height);
+	const float *m = f->matrix;
+	for (int j = 0; j < rows; j++) {
+		for (int i = 0; i < cols; i++) {
+			int x = cx + i - cols / 2, y = cy + j - rows / 2;
+			x = x < 0 ? 0 : x >= (int)f->width ? (int)f->width - 1 : x;
+			y = y < 0 ? 0 : y >= (int)f->height ? (int)f->height - 1 : y;
+			const uint32_t fy = f->flip ? f->height - 1 - (uint32_t)y : (uint32_t)y;
+			struct raw_sample *o = out + j * cols + i;
+			uint32_t a, b, c;
+			if (rgb_fmt) {
+				get_rgb(f, (uint32_t)x, fy, &a, &b, &c);
+				for (int k = 0; k < 3; k++) {
+					const float n = (k == 0 ? a : k == 1 ? b : c) / 65535.0f;
+					o->rgb[k] = full ? n : (n * 255.0f - 16.0f) / 219.0f;
+				}
+			} else {
+				get_pixel(f, (uint32_t)x, fy, &a, &b, &c);
+				const float ny = a / 65535.0f, nu = b / 65535.0f, nv = c / 65535.0f;
+				o->rgb[0] = m[0] * ny + m[1] * nu + m[2] * nv + m[3];
+				o->rgb[1] = m[4] * ny + m[5] * nu + m[6] * nv + m[7];
+				o->rgb[2] = m[8] * ny + m[9] * nu + m[10] * nv + m[11];
+			}
+			o->code[0] = (uint16_t)(a >> 6);
+			o->code[1] = (uint16_t)(b >> 6);
+			o->code[2] = (uint16_t)(c >> 6);
+		}
+	}
+	if (rgb_source)
+		*rgb_source = rgb_fmt;
+	if (full_out)
+		*full_out = full;
+	if (desc && desc_size)
+		snprintf(desc, desc_size, "RAW %s %s%s", format_desc(f->format), trc_desc(f->trc), full ? " full" : "");
+	pthread_mutex_unlock(&r->mutex);
+	return true;
+}
+
 bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0,
 		    uint32_t src_w, uint32_t src_h, int colorspace, char *desc, size_t desc_size)
 {

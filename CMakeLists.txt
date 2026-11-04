@@ -61,6 +61,9 @@ set(PLUGIN_SOURCES
 	src/faces.c
 	src/chart.c
 	src/raw-input.c
+	src/channelplot.c
+	src/datascope.c
+	src/skintone.c
 	src/vectorscope.c
 	src/waveform.c
 	src/histogram.c

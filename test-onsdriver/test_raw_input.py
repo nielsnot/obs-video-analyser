@@ -29,7 +29,8 @@ def dock_data():
     'A dock on the clip with a luma waveform, without graticule, labels or min/max lines.'
     scopes = [{'type': 'waveform', 'label': 'Waveform', 'show_label': False, 'use_roi': True, 'target': '',
                'prop': {'target_scale': 2, 'components': 0x20, 'display': 0, 'intensity': 255,
-                        'graticule_lines': 0, 'scale_labels': 0, 'minmax': False, 'out_highlight': False, 'hdr_ref': False}}]
+                        'graticule_lines': 0, 'scale_labels': 0, 'minmax': False, 'out_highlight': False, 'hdr_ref': False,
+                        'ext_guides': False}}]
     return {'docks': [{
         'name': 'Raw', 'toolbar': True, 'active_view': 0,
         'roi-prop': {'target_name': SOURCE, 'interleave': 0, 'target_scale': 2, 'shapes': []},

@@ -219,6 +219,10 @@ static void roi_update(void *data, obs_data_t *settings)
 
 	src->n_interleave = (int)obs_data_get_int(settings, "interleave");
 	src->zoom_anchor = (int)obs_data_get_int(settings, "zoom_anchor");
+	src->compare_mode = (int)obs_data_get_int(settings, "compare_mode");
+	if (!src->wipe_drag)
+		src->compare_pos = (float)obs_data_get_double(settings, "compare_pos") / 100.0f;
+	src->compare_alpha = (float)obs_data_get_double(settings, "compare_alpha") / 100.0f;
 	src->guide_title = obs_data_get_bool(settings, "guide_title");
 	src->guide_action = obs_data_get_bool(settings, "guide_action");
 	src->guide_thirds = obs_data_get_bool(settings, "guide_thirds");
@@ -264,6 +268,9 @@ static void roi_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "qual_luma_min", 0);
 	obs_data_set_default_int(settings, "qual_luma_max", 100);
 	obs_data_set_default_double(settings, "guide_title_pct", 90.0);
+	obs_data_set_default_int(settings, "compare_mode", 0);
+	obs_data_set_default_double(settings, "compare_pos", 50.0);
+	obs_data_set_default_double(settings, "compare_alpha", 50.0);
 	obs_data_set_default_double(settings, "guide_action_pct", 95.0);
 }
 
@@ -291,6 +298,16 @@ static obs_properties_t *roi_get_properties(void *data)
 	obs_properties_add_bool(gp, "guide_thirds", obs_module_text("ROI.Guide.Thirds"));
 	obs_properties_add_bool(gp, "guide_center", obs_module_text("ROI.Guide.Center"));
 	obs_properties_add_group(props, "guides", obs_module_text("ROI.Guides"), OBS_GROUP_NORMAL, gp);
+
+	obs_properties_t *cp = obs_properties_create();
+	obs_property_t *cmode = obs_properties_add_list(cp, "compare_mode", obs_module_text("ROI.Compare.Mode"),
+							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(cmode, obs_module_text("ROI.Compare.WipeH"), 0);
+	obs_property_list_add_int(cmode, obs_module_text("ROI.Compare.WipeV"), 1);
+	obs_property_list_add_int(cmode, obs_module_text("ROI.Compare.Blend"), 2);
+	obs_properties_add_float_slider(cp, "compare_pos", obs_module_text("ROI.Compare.Pos"), 0.0, 100.0, 0.5);
+	obs_properties_add_float_slider(cp, "compare_alpha", obs_module_text("ROI.Compare.Alpha"), 0.0, 100.0, 1.0);
+	obs_properties_add_group(props, "compare", obs_module_text("ROI.Compare"), OBS_GROUP_NORMAL, cp);
 
 	obs_properties_t *lp = obs_properties_create();
 	obs_property_t *mode = obs_properties_add_list(lp, "lut_mode", obs_module_text("LUT.Mode"), OBS_COMBO_TYPE_LIST,
@@ -758,9 +775,12 @@ static void roi_render(void *data, gs_effect_t *effect)
 	// comparing: the reference frame fills the left half, with a divider line
 	const bool comparing = src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
 			       src->ref_h == src->cm.texrender_height;
+	// the HDR reference (linear float) cannot be blended here: it is wiped instead
+	const bool hdr_ref = comparing && gs_texture_get_color_format(src->ref_tex) == GS_RGBA16F && src->cm.effect;
+	const int cmode = comparing && src->compare_mode == 2 && hdr_ref ? 0 : src->compare_mode;
+	const float cpos = fminf(fmaxf(src->compare_pos, 0.0f), 1.0f);
 	if (comparing) {
 		// the reference has the captured format: linear float for HDR, shown the same way as the live picture
-		const bool hdr_ref = gs_texture_get_color_format(src->ref_tex) == GS_RGBA16F && src->cm.effect;
 		gs_effect_t *def = hdr_ref ? src->cm.effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		if (hdr_ref) {
 			cm_set_signal_params(def,
@@ -768,19 +788,32 @@ static void roi_render(void *data, gs_effect_t *effect)
 			cm_set_lut_params(def, NULL, true);
 		}
 		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
-		while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
-			gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, src->ref_w / 2, src->ref_h);
-		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFF59D9);
-		const float xm = (float)(src->ref_w / 2);
 		const struct text_scale ts = text_scale_from_viewport(w, h);
-		while (gs_effect_loop(solid, "Solid")) {
-			gs_render_start(false);
-			gs_vertex2f(xm - 1.0f * ts.ux, 0.0f);
-			gs_vertex2f(xm + 1.0f * ts.ux, 0.0f);
-			gs_vertex2f(xm - 1.0f * ts.ux, h);
-			gs_vertex2f(xm + 1.0f * ts.ux, h);
-			gs_render_stop(GS_TRISTRIP);
+		if (cmode == 2) {
+			// blend: the live picture times (1 - a), plus the snapshot times a
+			const float a = fminf(fmaxf(src->compare_alpha, 0.0f), 1.0f);
+			gs_blend_state_push();
+			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+			fill_quad(0.0f, 0.0f, w, h, (uint32_t)(a * 255.0f) << 24);
+			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
+			gs_effect_set_float(gs_effect_get_param_by_name(def, "multiplier"), a);
+			while (gs_effect_loop(def, "DrawMultiply"))
+				gs_draw_sprite(src->ref_tex, 0, src->ref_w, src->ref_h);
+			gs_blend_state_pop();
+		} else if (cmode == 1) {
+			// wipe: the snapshot above, live below
+			const uint32_t rows = (uint32_t)(cpos * src->ref_h);
+			if (rows)
+				while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
+					gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, src->ref_w, rows);
+			fill_quad(0.0f, rows - 1.0f * ts.uy, w, rows + 1.0f * ts.uy, 0xFFFF59D9);
+		} else {
+			// wipe: the snapshot on the left, live on the right
+			const uint32_t cols = (uint32_t)(cpos * src->ref_w);
+			if (cols)
+				while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
+					gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, cols, src->ref_h);
+			fill_quad(cols - 1.0f * ts.ux, 0.0f, cols + 1.0f * ts.ux, h, 0xFFFF59D9);
 		}
 	}
 
@@ -818,14 +851,28 @@ static void roi_render(void *data, gs_effect_t *effect)
 
 	// labels keep their size: drawn in view coordinates
 	const struct text_scale ts = text_scale_from_viewport(w, h);
-	if (comparing) {
-		const float xm = ((float)(src->ref_w / 2) - view_x) * zoom;
+	if (comparing && cmode == 0) {
+		const float xm = (cpos * src->ref_w - view_x) * zoom;
 		if (xm > 0.0f && xm < w) {
 			text_draw(&ts, obs_module_text("ROI.Reference"), xm - 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f,
 				  0xFFFF59D9, TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
 			text_draw(&ts, obs_module_text("ROI.Live"), xm + 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f,
 				  0xFFFFFFFF, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
 		}
+	} else if (comparing && cmode == 1) {
+		const float ym = (cpos * src->ref_h - view_y) * zoom;
+		if (ym > 0.0f && ym < h) {
+			text_draw(&ts, obs_module_text("ROI.Reference"), 6.0f * ts.ux, ym - 4.0f * ts.uy, 12.0f,
+				  0xFFFF59D9, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+			text_draw(&ts, obs_module_text("ROI.Live"), 6.0f * ts.ux, ym + 4.0f * ts.uy, 12.0f, 0xFFFFFFFF,
+				  TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		}
+	} else if (comparing) {
+		char buf[48];
+		snprintf(buf, sizeof(buf), "%s %.0f%%", obs_module_text("ROI.Compare.BlendLabel"),
+			 src->compare_alpha * 100.0f);
+		text_draw(&ts, buf, 6.0f * ts.ux, h - 6.0f * ts.uy, 12.0f, 0xFFFF59D9, TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_BOTTOM);
 	}
 
 	draw_pins(src, w, h, zoom, view_x, view_y);
@@ -860,6 +907,19 @@ void roi_unregister_source(struct roi_source *src, struct cm_source *cm)
 
 /* Reads the color under each pin, averaged over 3x3 pixels. Pins need the whole frame,
  * so the analysis isn't cropped while any exist (see roi_send_range). */
+bool roi_first_pin(struct roi_source *src, float *x, float *y)
+{
+	bool found = false;
+	pthread_mutex_lock(&src->shapes_mutex);
+	if (src->pins.num) {
+		*x = src->pins.array[0].x;
+		*y = src->pins.array[0].y;
+		found = true;
+	}
+	pthread_mutex_unlock(&src->shapes_mutex);
+	return found;
+}
+
 static void read_pins(struct roi_source *src, const struct cm_surface_data *sd)
 {
 	if (!sd->rgb_data || !sd->width || !sd->height)
@@ -1009,6 +1069,14 @@ static void roi_mouse_move(void *data, const struct obs_mouse_event *event, bool
 
 	src->shift_down = !!(event->modifiers & INTERACT_SHIFT_KEY);
 
+	if (src->wipe_drag) {
+		const float w = (float)roi_get_width(src), h = (float)roi_get_height(src);
+		const float p = src->compare_mode == 1 ? to_picture_y(src, event->y) / fmaxf(h, 1.0f)
+						       : to_picture_x(src, event->x) / fmaxf(w, 1.0f);
+		src->compare_pos = fminf(fmaxf(p, 0.0f), 1.0f);
+		return;
+	}
+
 	if (src->panning) {
 		src->view_x = src->pan_view_x - (event->x - src->pan_mouse_x) / src->zoom;
 		src->view_y = src->pan_view_y - (event->y - src->pan_mouse_y) / src->zoom;
@@ -1073,6 +1141,27 @@ static void roi_mouse_click(void *data, const struct obs_mouse_event *event, int
 	struct roi_source *src = data;
 
 	UNUSED_PARAMETER(click_count);
+
+	// comparing with a wipe: drag the divider (near it, with no tool on)
+	if (type == MOUSE_LEFT && src->draw_mode == ROI_DRAW_NONE && src->compare && src->ref_tex &&
+	    src->compare_mode != 2) {
+		if (mouse_up && src->wipe_drag) {
+			src->wipe_drag = false;
+			obs_data_t *d = obs_data_create();
+			obs_data_set_double(d, "compare_pos", src->compare_pos * 100.0);
+			obs_source_update(src->cm.self, d);
+			obs_data_release(d);
+			return;
+		}
+		const float w = (float)roi_get_width(src), h = (float)roi_get_height(src);
+		const float px = to_picture_x(src, event->x), py = to_picture_y(src, event->y);
+		const float d = src->compare_mode == 1 ? fabsf(py - src->compare_pos * h)
+						       : fabsf(px - src->compare_pos * w);
+		if (!mouse_up && w > 0.0f && d * src->zoom < 12.0f) {
+			src->wipe_drag = true;
+			return;
+		}
+	}
 
 	// Pan with the middle button, or with the left one while no tool is on.
 	const bool pan_button = type == MOUSE_MIDDLE || (type == MOUSE_LEFT && src->draw_mode == ROI_DRAW_NONE);

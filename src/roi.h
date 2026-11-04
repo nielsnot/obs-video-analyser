@@ -76,6 +76,12 @@ struct roi_source
 
 	// guides over the picture: title and action safe, thirds, center cross (each can be turned off)
 	bool guide_title, guide_action, guide_thirds, guide_center;
+
+	// comparing with the snapshot: 0 wipe left | right, 1 wipe top / bottom, 2 blend
+	int compare_mode;
+	volatile float compare_pos; // where the wipe is, 0..1
+	float compare_alpha;        // how much of the snapshot in a blend, 0..1
+	volatile bool wipe_drag;
 	float guide_title_pct, guide_action_pct;
 
 	// follow faces: the selection is the faces found, instead of the drawn shapes
@@ -114,6 +120,8 @@ void roi_clear_shapes(struct roi_source *src);
 size_t roi_get_shape_count(struct roi_source *src);
 void roi_undo_pin(struct roi_source *src);
 void roi_clear_pins(struct roi_source *src);
+/* The first color picker pin, normalized to the picture; false when there is none. */
+bool roi_first_pin(struct roi_source *src, float *x, float *y);
 
 #ifdef __cplusplus
 }
