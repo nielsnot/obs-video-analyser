@@ -299,11 +299,27 @@ static obs_source_t *raw_filter_for(struct cm_source *src, obs_source_t *target)
 	return src->raw_filter ? obs_weak_source_get_source(src->raw_filter) : NULL;
 }
 
+static volatile bool cm_paused = false;
+
+void cm_set_paused(bool paused)
+{
+	cm_paused = paused;
+}
+
+bool cm_get_paused(void)
+{
+	return cm_paused;
+}
+
 void cm_render_target(struct cm_source *src)
 {
 	if (src->rendered)
 		return;
 	src->rendered = 1;
+
+	// paused: keep the last capture (the scopes keep showing what they computed from it)
+	if (cm_paused && src->texrender && src->texrender_width)
+		return;
 
 	if (cm_is_roi(src)) {
 		// Call roi_target_render just in case ROI is not rendered.

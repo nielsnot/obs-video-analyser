@@ -75,6 +75,7 @@ set(PLUGIN_SOURCES
 	src/util-cpp.cc
 	src/obs-convenience.c
 	src/scope-dock.cpp
+	src/va-config.cpp
 	src/scope-dock-new-dialog.cpp
 	src/scope-widget.cpp
 	src/text-render.cpp

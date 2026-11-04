@@ -119,6 +119,7 @@ static void roi_destroy(void *data)
 	gs_texture_destroy(src->ref_tex);
 	obs_leave_graphics();
 	bfree(src->mask_buf);
+	bfree(src->ref_load_path);
 
 	da_free(src->shapes);
 	da_free(src->pins);
@@ -705,6 +706,119 @@ bool roi_target_render(struct roi_source *src)
 	return false;
 }
 
+void roi_load_reference(struct roi_source *src, const char *path)
+{
+	if (!src || !path || !*path)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	bfree(src->ref_load_path);
+	src->ref_load_path = bstrdup(path);
+	pthread_mutex_unlock(&src->shapes_mutex);
+}
+
+/* Makes the reference texture the size and format of the capture. */
+static bool ensure_ref_tex(struct roi_source *src, uint32_t tw, uint32_t th, enum gs_color_format fmt)
+{
+	if (!src->ref_tex || src->ref_w != tw || src->ref_h != th || gs_texture_get_color_format(src->ref_tex) != fmt) {
+		gs_texture_destroy(src->ref_tex);
+		src->ref_tex = gs_texture_create(tw, th, fmt, 1, NULL, 0);
+		src->ref_w = tw;
+		src->ref_h = th;
+	}
+	return src->ref_tex != NULL;
+}
+
+/* A picture file as the reference: drawn scaled into the size of the capture; linear light for HDR, with SDR
+ * white at the SDR white level as OBS composites SDR pictures. */
+static void load_reference_now(struct roi_source *src, const char *path, gs_texture_t *tex)
+{
+	gs_texture_t *img = gs_texture_create_from_file(path);
+	if (!img) {
+		blog(LOG_WARNING, "Could not load the reference picture '%s'", path);
+		return;
+	}
+	const uint32_t tw = gs_texture_get_width(tex), th = gs_texture_get_height(tex);
+	const enum gs_color_format fmt = gs_texture_get_color_format(tex);
+	gs_texrender_t *tr = gs_texrender_create(fmt, GS_ZS_NONE);
+	if (tr && gs_texrender_begin(tr, tw, th)) {
+		struct vec4 black;
+		vec4_set(&black, 0.0f, 0.0f, 0.0f, 1.0f);
+		gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
+		gs_ortho(0.0f, (float)tw, 0.0f, (float)th, -100.0f, 100.0f);
+		gs_blend_state_push();
+		gs_reset_blend_state();
+		gs_enable_blending(false);
+		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		const bool linear = fmt == GS_RGBA16F;
+		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), img);
+		if (linear)
+			gs_effect_set_float(gs_effect_get_param_by_name(def, "multiplier"),
+					    obs_get_video_sdr_white_level() / 80.0f);
+		while (gs_effect_loop(def, linear ? "DrawSrgbDecompressMultiply" : "Draw"))
+			gs_draw_sprite(img, 0, tw, th);
+		gs_blend_state_pop();
+		gs_texrender_end(tr);
+		if (ensure_ref_tex(src, tw, th, fmt))
+			gs_copy_texture(src->ref_tex, gs_texrender_get_texture(tr));
+	}
+	gs_texrender_destroy(tr);
+	gs_texture_destroy(img);
+}
+
+bool roi_read_reference(struct roi_source *src, uint8_t **out, uint32_t *w_out, uint32_t *h_out)
+{
+	if (!src || !src->ref_tex || !out)
+		return false;
+	const uint32_t w = src->ref_w, h = src->ref_h;
+	gs_texrender_t *tr = NULL;
+	gs_texture_t *tex = src->ref_tex;
+	if (gs_texture_get_color_format(src->ref_tex) != GS_BGRA) {
+		// HDR: through the display conversion of the view
+		if (!src->cm.effect)
+			return false;
+		tr = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+		if (!tr || !gs_texrender_begin(tr, w, h)) {
+			gs_texrender_destroy(tr);
+			return false;
+		}
+		struct vec4 black;
+		vec4_set(&black, 0.0f, 0.0f, 0.0f, 1.0f);
+		gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
+		gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+		gs_blend_state_push();
+		gs_reset_blend_state();
+		gs_enable_blending(false);
+		gs_effect_t *e = src->cm.effect;
+		cm_set_signal_params(e, cm_cs_is_hdr(src->cm.colorspace) ? src->cm.colorspace : CM_CS_2100_HLG);
+		cm_set_lut_params(e, NULL, true);
+		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->ref_tex);
+		while (gs_effect_loop(e, "DrawDisplay"))
+			gs_draw_sprite(src->ref_tex, 0, w, h);
+		gs_blend_state_pop();
+		gs_texrender_end(tr);
+		tex = gs_texrender_get_texture(tr);
+	}
+	bool ok = false;
+	gs_stagesurf_t *stage = gs_stagesurface_create(w, h, GS_BGRA);
+	if (stage) {
+		gs_stage_texture(stage, tex);
+		uint8_t *ptr;
+		uint32_t linesize;
+		if (gs_stagesurface_map(stage, &ptr, &linesize)) {
+			*out = bmalloc((size_t)w * h * 4);
+			for (uint32_t y = 0; y < h; y++)
+				memcpy(*out + (size_t)y * w * 4, ptr + (size_t)y * linesize, (size_t)w * 4);
+			gs_stagesurface_unmap(stage);
+			*w_out = w;
+			*h_out = h;
+			ok = true;
+		}
+		gs_stagesurface_destroy(stage);
+	}
+	gs_texrender_destroy(tr);
+	return ok;
+}
+
 static void roi_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -731,15 +845,20 @@ static void roi_render(void *data, gs_effect_t *effect)
 
 	if (src->want_snapshot && tex) {
 		src->want_snapshot = false;
-		const uint32_t tw = gs_texture_get_width(tex), th = gs_texture_get_height(tex);
-		if (!src->ref_tex || src->ref_w != tw || src->ref_h != th) {
-			gs_texture_destroy(src->ref_tex);
-			src->ref_tex = gs_texture_create(tw, th, gs_texture_get_color_format(tex), 1, NULL, 0);
-			src->ref_w = tw;
-			src->ref_h = th;
-		}
-		if (src->ref_tex)
+		if (ensure_ref_tex(src, gs_texture_get_width(tex), gs_texture_get_height(tex),
+				   gs_texture_get_color_format(tex)))
 			gs_copy_texture(src->ref_tex, tex);
+	}
+
+	// a picture from the snapshot library as the reference
+	if (tex && src->ref_load_path) {
+		pthread_mutex_lock(&src->shapes_mutex);
+		char *path = src->ref_load_path;
+		src->ref_load_path = NULL;
+		pthread_mutex_unlock(&src->shapes_mutex);
+		if (path)
+			load_reference_now(src, path, tex);
+		bfree(path);
 	}
 
 	if (zoomed) {

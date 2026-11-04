@@ -38,6 +38,10 @@ struct raw_sample
 bool raw_input_sample(obs_source_t *filter, float u, float v, int cols, int rows, struct raw_sample *out,
 		      bool *rgb_source, bool *full, char *desc, size_t desc_size);
 
+/* For the signal path window: what the filter saw last ("10-bit V210, 1920x1080, video range, HLG") and whether
+ * the scopes can use it in a project of this color space (CM_CS_*). Returns false when no frame was seen. */
+bool raw_input_describe(obs_source_t *filter, int colorspace, char *desc, size_t desc_size, bool *usable);
+
 /* Frees what the module keeps; at unload. */
 void raw_input_free(void);
 

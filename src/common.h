@@ -174,6 +174,10 @@ static inline bool cm_is_roi(const struct cm_source *src)
 
 bool is_roi_source_name(const char *name);
 
+/* Pause: every scope keeps what it shows now and stops capturing, until resumed (dock button or hotkey). */
+void cm_set_paused(bool paused);
+bool cm_get_paused(void);
+
 #ifdef __cplusplus
 }
 #endif

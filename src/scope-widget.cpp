@@ -51,6 +51,12 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCursor>
+#include <QListWidget>
+#include <QMessageBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QDir>
+#include <QFileInfo>
 #include <memory>
 #include "plugin-macros.generated.h"
 #include "scope-widget.hpp"
@@ -59,6 +65,9 @@
 #include "ScopeWidgetInteractiveEventFilter.hpp"
 #include "roi.h"
 #include "text-render.h"
+#include "raw-input.h"
+#include "va-config.hpp"
+#include "util.h"
 
 /* ---------- scope types that can be added to a dock ---------- */
 
@@ -714,6 +723,16 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 			  TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
 		text_draw(&ts, obs_module_text("dock.empty.hint"), cx * 0.5f, cy * 0.5f + 12.0f * ts.uy, 11.0f,
 			  0xFF8D8D96, TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+		gs_projection_pop();
+	}
+
+	// paused: say so, the scopes show a frozen frame
+	if (cm_get_paused()) {
+		gs_projection_push();
+		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+		const struct text_scale ts = text_scale_from_viewport((float)cx, (float)cy);
+		text_draw(&ts, obs_module_text("dock.paused"), 10.0f * ts.ux, cy - 8.0f * ts.uy, 13.0f, 0xFFFFB020,
+			  TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
 		gs_projection_pop();
 	}
 
@@ -1376,6 +1395,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	auto *btnExport = make_tool_button(toolbar, "dock.toolbar.export", "dock.toolbar.export.tip", false);
 	btnFull = make_tool_button(toolbar, "dock.toolbar.full", "dock.toolbar.full.tip", true);
 	btnFaces = make_tool_button(toolbar, "dock.toolbar.faces", "dock.toolbar.faces.tip", true);
+	btnPause = make_tool_button(toolbar, "dock.toolbar.pause", "dock.toolbar.pause.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
 	auto *btnReset = make_tool_button(toolbar, "dock.toolbar.reset", "dock.toolbar.reset.tip", false);
 
@@ -1409,6 +1429,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addWidget(btnSnap);
 	layout->addWidget(btnCompare);
 	layout->addWidget(btnFaces);
+	layout->addWidget(btnPause);
 	layout->addWidget(toolbar_separator(toolbar));
 	layout->addWidget(btnArrange);
 	layout->addWidget(btnExport);
@@ -1423,6 +1444,15 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnPin, &QToolButton::clicked, this,
 		[this](bool checked) { setDrawMode(checked ? ROI_DRAW_PIN : ROI_DRAW_NONE); });
 	connect(btnSnap, &QToolButton::clicked, this, &ScopeWidget::takeSnapshot);
+	// right click on Snapshot: the snapshot library
+	btnSnap->setContextMenuPolicy(Qt::CustomContextMenu);
+	connect(btnSnap, &QWidget::customContextMenuRequested, this, [this]() { openSnapshotLibrary(); });
+	connect(btnPause, &QToolButton::toggled, this, [](bool on) {
+		if (on != cm_get_paused()) {
+			cm_set_paused(on);
+			scope_docks_update_pause();
+		}
+	});
 	connect(btnCompare, &QToolButton::toggled, this, &ScopeWidget::setCompare);
 	connect(btnArrange, &QToolButton::toggled, this, &ScopeWidget::setArranging);
 	connect(btnExport, &QToolButton::clicked, this, &ScopeWidget::exportScreenshot);
@@ -1445,6 +1475,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
 
 	toolbar->setVisible(toolbarVisible);
+	updatePause();
 	return toolbar;
 }
 
@@ -1571,6 +1602,15 @@ void ScopeWidget::takeSnapshot()
 		snap(e->src);
 	if (btnCompare && !btnCompare->isChecked())
 		btnCompare->setChecked(true); // show what was just taken
+
+	// the snapshot library: also save the picture, when that is switched on
+	if (obs_data_get_bool(va_config(), "snap_autosave")) {
+		QTimer::singleShot(300, this, [this]() {
+			const QString dir = QString::fromUtf8(obs_data_get_string(va_config(), "snap_dir"));
+			if (saveSnapshotPicture(dir + QStringLiteral("/") + snapshotName()) && snapshotRefresh)
+				snapshotRefresh();
+		});
+	}
 }
 
 /* Renders the whole dock as it is now (without the hover controls) into a PNG file. */
@@ -1654,12 +1694,15 @@ void ScopeWidget::sendCommand(const char *proc, const char *cmd)
 /* A window with the explanation of a scope type ("Help.<key>" in the locale, HTML). */
 void ScopeWidget::showHelp(int type)
 {
-	if (type < 0 || type >= N_TYPES)
+	// -1: the dock itself (views, layouts, snapshots, hotkeys, signal path)
+	if (type < -1 || type >= N_TYPES)
 		return;
-	const std::string key = std::string("Help.") + scope_types[type].key;
+	const std::string key = std::string("Help.") + (type < 0 ? "dock" : scope_types[type].key);
 	const char *text = obs_module_text(key.c_str());
-	QString html = text && key != text ? QString::fromUtf8(text) : scope_tip(scope_types[type].key);
-	const QString name = QString::fromUtf8(obs_module_text(scope_types[type].name_key));
+	QString html = text && key != text ? QString::fromUtf8(text)
+					   : (type < 0 ? QString() : scope_tip(scope_types[type].key));
+	const QString name =
+		QString::fromUtf8(obs_module_text(type < 0 ? "Help.dock.name" : scope_types[type].name_key));
 
 	QDialog *dlg = new QDialog(window());
 	dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -2443,6 +2486,13 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 				setArranging(false);
 		});
 	}
+	layoutMenu->addSeparator();
+	act = layoutMenu->addAction(QString::fromUtf8(obs_module_text("dock.menu.layout.equal_w")));
+	connect(act, &QAction::triggered, this, [this]() { equalizeTiles(true); });
+	act = layoutMenu->addAction(QString::fromUtf8(obs_module_text("dock.menu.layout.equal_h")));
+	connect(act, &QAction::triggered, this, [this]() { equalizeTiles(false); });
+
+	fillLayoutMenu(popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.layouts"))));
 
 	// guides over the ROI view, each on or off
 	if (data->roi) {
@@ -2477,6 +2527,20 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 
 	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.export")));
 	connect(act, &QAction::triggered, this, &ScopeWidget::exportScreenshot, Qt::QueuedConnection);
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.snapshots")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::openSnapshotLibrary, Qt::QueuedConnection);
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.signalpath")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::openSignalPath, Qt::QueuedConnection);
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.pause")));
+	act->setCheckable(true);
+	act->setChecked(cm_get_paused());
+	connect(act, &QAction::toggled, this, [](bool on) {
+		cm_set_paused(on);
+		scope_docks_update_pause();
+	});
+
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.help")));
+	connect(act, &QAction::triggered, this, [this]() { showHelp(-1); }, Qt::QueuedConnection);
 
 	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.toolbar")));
 	act->setCheckable(true);
@@ -3788,6 +3852,7 @@ void ScopeWidget::openTabMenu(const QPoint &pos)
 	}
 	act = menu.addAction(QString::fromUtf8(obs_module_text("dock.view.add")));
 	connect(act, &QAction::triggered, this, &ScopeWidget::addView);
+	fillLayoutMenu(menu.addMenu(QString::fromUtf8(obs_module_text("dock.menu.layouts"))));
 	menu.exec(tabs->mapToGlobal(pos));
 }
 
@@ -3862,4 +3927,580 @@ void ScopeWidget::load_properties(obs_data_t *props)
 	data->active_view = (active >= 0 && active < (int)data->views.size()) ? active : 0;
 	loadActive(data->views[data->active_view].state);
 	rebuildTabs();
+}
+
+/* ---------- hotkeys, pause, arranging, layout library, snapshot library, signal path ---------- */
+
+void ScopeWidget::dockCommand(const char *cmd)
+{
+	if (!cmd)
+		return;
+	const int n = (int)data->views.size();
+	if (strcmp(cmd, "view_next") == 0) {
+		if (n > 1)
+			switchView((data->active_view + 1) % n);
+	} else if (strcmp(cmd, "view_prev") == 0) {
+		if (n > 1)
+			switchView((data->active_view + n - 1) % n);
+	} else if (strncmp(cmd, "view_", 5) == 0) {
+		switchView(atoi(cmd + 5) - 1);
+	} else if (strcmp(cmd, "snapshot") == 0) {
+		takeSnapshot();
+	} else if (strcmp(cmd, "compare") == 0) {
+		if (btnCompare)
+			btnCompare->setChecked(!btnCompare->isChecked());
+		else
+			setCompare(!comparing);
+	}
+}
+
+void ScopeWidget::updatePause()
+{
+	if (!btnPause)
+		return;
+	const bool paused = cm_get_paused();
+	btnPause->blockSignals(true);
+	btnPause->setChecked(paused);
+	btnPause->setText(QString::fromUtf8(obs_module_text(paused ? "dock.toolbar.paused" : "dock.toolbar.pause")));
+	btnPause->blockSignals(false);
+}
+
+/* All tiles of a row the same width (or of a column the same height), filling the space the row had. */
+void ScopeWidget::equalizeTiles(bool widths)
+{
+	if (data->layout != SCOPE_LAYOUT_FREE) {
+		// the tiles get their places from the grid on the next frame, then they are evened out
+		data->layout = SCOPE_LAYOUT_FREE;
+		QTimer::singleShot(150, this, [this, widths]() {
+			if (data->layout == SCOPE_LAYOUT_FREE)
+				equalizeTiles(widths);
+		});
+		return;
+	}
+	pthread_mutex_lock(&data->mutex);
+	const float gap = widths ? (data->last_cx > 0 ? (float)SCOPE_GAP / data->last_cx : 0.0f)
+				 : (data->last_cy > 0 ? (float)SCOPE_GAP / data->last_cy : 0.0f);
+	std::vector<free_rect_s *> rects;
+	const int total = n_tiles(data);
+	for (int t = 0; t < total; t++) {
+		const bool shown = t == 0 ? (data->roi && data->roi_shown) : tile_source(data, t) != nullptr;
+		free_rect_s *f = tile_free(data, t);
+		if (shown && f && f->w > 0.0f && f->h > 0.0f)
+			rects.push_back(f);
+	}
+	// rows: tiles whose middle falls inside the first tile of the row (columns the same way)
+	std::vector<std::vector<free_rect_s *>> groups;
+	for (free_rect_s *f : rects) {
+		const float c = widths ? f->y + f->h * 0.5f : f->x + f->w * 0.5f;
+		bool placed = false;
+		for (auto &g : groups) {
+			const free_rect_s *g0 = g.front();
+			const float a = widths ? g0->y : g0->x, b = widths ? g0->y + g0->h : g0->x + g0->w;
+			if (c >= a && c <= b) {
+				g.push_back(f);
+				placed = true;
+				break;
+			}
+		}
+		if (!placed)
+			groups.push_back({f});
+	}
+	for (auto &g : groups) {
+		std::sort(g.begin(), g.end(), [widths](const free_rect_s *a, const free_rect_s *b) {
+			return widths ? a->x < b->x : a->y < b->y;
+		});
+		float lo = 1e9f, hi = -1e9f;
+		for (const free_rect_s *f : g) {
+			lo = std::min(lo, widths ? f->x : f->y);
+			hi = std::max(hi, widths ? f->x + f->w : f->y + f->h);
+		}
+		const int k = (int)g.size();
+		const float size = (hi - lo - gap * (k - 1)) / k;
+		if (size <= 0.01f)
+			continue;
+		float pos = lo;
+		for (free_rect_s *f : g) {
+			if (widths) {
+				f->x = pos;
+				f->w = size;
+			} else {
+				f->y = pos;
+				f->h = size;
+			}
+			pos += size + gap;
+		}
+	}
+	pthread_mutex_unlock(&data->mutex);
+}
+
+void ScopeWidget::fillLayoutMenu(QMenu *menu)
+{
+	QAction *act = menu->addAction(QString::fromUtf8(obs_module_text("dock.layouts.save")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::saveLayout, Qt::QueuedConnection);
+	OBSDataArrayAutoRelease a = va_layouts();
+	const size_t n = obs_data_array_count(a);
+	menu->addSeparator();
+	if (!n) {
+		act = menu->addAction(QString::fromUtf8(obs_module_text("dock.layouts.none")));
+		act->setEnabled(false);
+		return;
+	}
+	QStringList names;
+	for (size_t i = 0; i < n; i++) {
+		OBSDataAutoRelease item = obs_data_array_item(a, i);
+		names << QString::fromUtf8(obs_data_get_string(item, "name"));
+	}
+	for (const QString &name : names) {
+		act = menu->addAction(name);
+		act->setToolTip(QString::fromUtf8(obs_module_text("dock.layouts.open.tip")));
+		connect(act, &QAction::triggered, this, [this, name]() { openLayout(name); }, Qt::QueuedConnection);
+	}
+	QMenu *del = menu->addMenu(QString::fromUtf8(obs_module_text("dock.layouts.delete")));
+	for (const QString &name : names) {
+		act = del->addAction(name);
+		connect(act, &QAction::triggered, this, [name]() { va_layout_delete(name.toUtf8().constData()); });
+	}
+	menu->setToolTipsVisible(true);
+}
+
+void ScopeWidget::saveLayout()
+{
+	storeActive();
+	if (data->active_view < 0 || data->active_view >= (int)data->views.size())
+		return;
+	bool ok = false;
+	const QString name = QInputDialog::getText(this, QString::fromUtf8(obs_module_text("dock.layouts.save.title")),
+						   QString::fromUtf8(obs_module_text("dock.layouts.save.label")),
+						   QLineEdit::Normal,
+						   QString::fromStdString(data->views[data->active_view].name), &ok)
+				     .trimmed();
+	if (!ok || name.isEmpty())
+		return;
+	va_layout_store(name.toUtf8().constData(), data->views[data->active_view].state);
+}
+
+/* A layout opens as a new view of this dock: its scopes and arrangement, on this dock's source. */
+void ScopeWidget::openLayout(const QString &name)
+{
+	OBSDataAutoRelease state;
+	OBSDataArrayAutoRelease a = va_layouts();
+	for (size_t i = 0, n = obs_data_array_count(a); i < n && !state; i++) {
+		OBSDataAutoRelease item = obs_data_array_item(a, i);
+		if (name == QString::fromUtf8(obs_data_get_string(item, "name"))) {
+			OBSDataAutoRelease s = obs_data_get_obj(item, "state");
+			if (s)
+				state = obs_data_create_from_json(obs_data_get_json(s));
+		}
+	}
+	if (!state)
+		return;
+	storeActive();
+	data->views.push_back({name.toStdString(), state.Get()});
+	data->active_view = (int)data->views.size() - 1;
+	loadActive(state);
+	rebuildTabs();
+}
+
+static QString target_label(obs_source_t *roi)
+{
+	OBSDataAutoRelease rs = roi ? obs_source_get_settings(roi) : nullptr;
+	const char *t = rs ? obs_data_get_string(rs, "target_name") : "";
+	if (!t || !*t)
+		return QString::fromUtf8(obs_module_text("Program"));
+	if (t[0] == '\x10')
+		return QString::fromUtf8(obs_module_text("Preview"));
+	return QString::fromUtf8(t);
+}
+
+/* The file name of a snapshot from the name template: {source} {view} {dock} {date} {time} {n}. */
+QString ScopeWidget::snapshotName() const
+{
+	obs_data_t *c = va_config();
+	QString t = QString::fromUtf8(obs_data_get_string(c, "snap_template")).trimmed();
+	if (t.isEmpty())
+		t = QStringLiteral("{source} {date} {time}");
+	const QDateTime now = QDateTime::currentDateTime();
+	const QString view = data->active_view >= 0 && data->active_view < (int)data->views.size()
+				     ? QString::fromStdString(data->views[data->active_view].name)
+				     : QString();
+	const QDir dir(QString::fromUtf8(obs_data_get_string(c, "snap_dir")));
+	const int count = (int)dir.entryList({QStringLiteral("*.png")}, QDir::Files).size();
+	t.replace(QStringLiteral("{source}"), target_label(data->roi));
+	t.replace(QStringLiteral("{view}"), view);
+	t.replace(QStringLiteral("{dock}"), QString::fromStdString(name));
+	t.replace(QStringLiteral("{date}"), now.toString(QStringLiteral("yyyy-MM-dd")));
+	t.replace(QStringLiteral("{time}"), now.toString(QStringLiteral("HH-mm-ss")));
+	t.replace(QStringLiteral("{n}"), QStringLiteral("%1").arg(count + 1, 3, 10, QLatin1Char('0')));
+	for (QChar &ch : t)
+		if (QStringLiteral("\\/:*?\"<>|").contains(ch) || ch.unicode() < 32)
+			ch = QLatin1Char('-');
+	return t.trimmed() + QStringLiteral(".png");
+}
+
+/* Saves the snapshot reference (the picture as the ROI view shows it) as a PNG file. */
+bool ScopeWidget::saveSnapshotPicture(const QString &file)
+{
+	struct roi_source *r = widget_roi(data);
+	if (!r || file.isEmpty())
+		return false;
+	uint8_t *buf = nullptr;
+	uint32_t w = 0, h = 0;
+	obs_enter_graphics();
+	const bool ok = roi_read_reference(r, &buf, &w, &h);
+	obs_leave_graphics();
+	if (!ok)
+		return false;
+	const QImage image = QImage(buf, (int)w, (int)h, (int)w * 4, QImage::Format_RGB32).copy();
+	bfree(buf);
+	QDir().mkpath(QFileInfo(file).absolutePath());
+	if (!image.save(file, "PNG")) {
+		blog(LOG_WARNING, "Could not save the snapshot to '%s'", file.toUtf8().constData());
+		return false;
+	}
+	return true;
+}
+
+void ScopeWidget::loadReference(const QString &file)
+{
+	roi_load_reference(widget_roi(data), file.toUtf8().constData());
+	if (btnCompare && !btnCompare->isChecked())
+		btnCompare->setChecked(true);
+	else if (!btnCompare)
+		setCompare(true);
+}
+
+void ScopeWidget::openSnapshotLibrary()
+{
+	if (snapshotDialog) {
+		snapshotDialog->raise();
+		snapshotDialog->activateWindow();
+		return;
+	}
+	auto *dlg = new QDialog(this);
+	dlg->setAttribute(Qt::WA_DeleteOnClose, true);
+	dlg->setWindowTitle(QString::fromUtf8(obs_module_text("Snapshots.Title")));
+	snapshotDialog = dlg;
+	connect(dlg, &QObject::destroyed, this, [this]() {
+		snapshotDialog = nullptr;
+		snapshotRefresh = nullptr;
+	});
+
+	obs_data_t *c = va_config();
+	auto *v = new QVBoxLayout(dlg);
+	auto *grid = new QGridLayout();
+	auto *dirEdit = new QLineEdit(QString::fromUtf8(obs_data_get_string(c, "snap_dir")), dlg);
+	auto *browse = new QPushButton(QString::fromUtf8(obs_module_text("Snapshots.Browse")), dlg);
+	auto *nameEdit = new QLineEdit(QString::fromUtf8(obs_data_get_string(c, "snap_template")), dlg);
+	nameEdit->setToolTip(QString::fromUtf8(obs_module_text("Snapshots.Template.Tip")));
+	auto *autosave = new QCheckBox(QString::fromUtf8(obs_module_text("Snapshots.Autosave")), dlg);
+	autosave->setChecked(obs_data_get_bool(c, "snap_autosave"));
+	grid->addWidget(new QLabel(QString::fromUtf8(obs_module_text("Snapshots.Folder")), dlg), 0, 0);
+	grid->addWidget(dirEdit, 0, 1);
+	grid->addWidget(browse, 0, 2);
+	grid->addWidget(new QLabel(QString::fromUtf8(obs_module_text("Snapshots.Template")), dlg), 1, 0);
+	grid->addWidget(nameEdit, 1, 1, 1, 2);
+	grid->addWidget(autosave, 2, 0, 1, 3);
+	v->addLayout(grid);
+
+	auto *list = new QListWidget(dlg);
+	list->setViewMode(QListView::IconMode);
+	list->setIconSize(QSize(160, 90));
+	list->setGridSize(QSize(180, 130));
+	list->setResizeMode(QListView::Adjust);
+	list->setMovement(QListView::Static);
+	list->setWordWrap(true);
+	list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	v->addWidget(list, 1);
+
+	auto *buttons = new QHBoxLayout();
+	auto *btnSave = new QPushButton(QString::fromUtf8(obs_module_text("Snapshots.SaveCurrent")), dlg);
+	auto *btnUse = new QPushButton(QString::fromUtf8(obs_module_text("Snapshots.Use")), dlg);
+	btnUse->setToolTip(QString::fromUtf8(obs_module_text("Snapshots.Use.Tip")));
+	auto *btnDelete = new QPushButton(QString::fromUtf8(obs_module_text("Snapshots.Delete")), dlg);
+	auto *btnFolder = new QPushButton(QString::fromUtf8(obs_module_text("Snapshots.OpenFolder")), dlg);
+	auto *btnClose = new QPushButton(QString::fromUtf8(obs_module_text("Close")), dlg);
+	buttons->addWidget(btnSave);
+	buttons->addWidget(btnUse);
+	buttons->addWidget(btnDelete);
+	buttons->addWidget(btnFolder);
+	buttons->addStretch(1);
+	buttons->addWidget(btnClose);
+	v->addLayout(buttons);
+
+	auto refresh = [list]() {
+		list->clear();
+		const QDir dir(QString::fromUtf8(obs_data_get_string(va_config(), "snap_dir")));
+		const QFileInfoList files =
+			dir.entryInfoList({QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.jpeg")},
+					  QDir::Files, QDir::Time);
+		for (int i = 0; i < files.size() && i < 120; i++) {
+			const QFileInfo &fi = files[i];
+			const QImage img(fi.absoluteFilePath());
+			if (img.isNull())
+				continue;
+			auto *item =
+				new QListWidgetItem(QIcon(QPixmap::fromImage(img.scaled(160, 90, Qt::KeepAspectRatio,
+											Qt::SmoothTransformation))),
+						    fi.completeBaseName());
+			item->setData(Qt::UserRole, fi.absoluteFilePath());
+			item->setToolTip(fi.absoluteFilePath() + QStringLiteral("\n") +
+					 fi.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) +
+					 QStringLiteral("  %1x%2").arg(img.width()).arg(img.height()));
+			list->addItem(item);
+		}
+	};
+	snapshotRefresh = refresh;
+
+	connect(dirEdit, &QLineEdit::editingFinished, dlg, [dirEdit, refresh]() {
+		obs_data_set_string(va_config(), "snap_dir", dirEdit->text().trimmed().toUtf8().constData());
+		va_config_save();
+		refresh();
+	});
+	connect(browse, &QPushButton::clicked, dlg, [dlg, dirEdit, refresh]() {
+		const QString d = QFileDialog::getExistingDirectory(dlg, QString(), dirEdit->text());
+		if (d.isEmpty())
+			return;
+		dirEdit->setText(d);
+		obs_data_set_string(va_config(), "snap_dir", d.toUtf8().constData());
+		va_config_save();
+		refresh();
+	});
+	connect(nameEdit, &QLineEdit::editingFinished, dlg, [nameEdit]() {
+		obs_data_set_string(va_config(), "snap_template", nameEdit->text().toUtf8().constData());
+		va_config_save();
+	});
+	connect(autosave, &QCheckBox::toggled, dlg, [](bool on) {
+		obs_data_set_bool(va_config(), "snap_autosave", on);
+		va_config_save();
+	});
+	connect(btnSave, &QPushButton::clicked, dlg, [this, dlg, refresh]() {
+		const QString dir = QString::fromUtf8(obs_data_get_string(va_config(), "snap_dir"));
+		if (!saveSnapshotPicture(dir + QStringLiteral("/") + snapshotName())) {
+			QMessageBox::information(dlg, QString::fromUtf8(obs_module_text("Snapshots.Title")),
+						 QString::fromUtf8(obs_module_text("Snapshots.NoSnapshot")));
+			return;
+		}
+		refresh();
+	});
+	auto use = [this, list]() {
+		QListWidgetItem *it = list->currentItem();
+		if (it)
+			loadReference(it->data(Qt::UserRole).toString());
+	};
+	connect(btnUse, &QPushButton::clicked, dlg, use);
+	connect(list, &QListWidget::itemDoubleClicked, dlg, use);
+	connect(btnDelete, &QPushButton::clicked, dlg, [dlg, list, refresh]() {
+		const QList<QListWidgetItem *> sel = list->selectedItems();
+		if (sel.isEmpty())
+			return;
+		if (QMessageBox::question(
+			    dlg, QString::fromUtf8(obs_module_text("Snapshots.Title")),
+			    QString::fromUtf8(obs_module_text("Snapshots.Delete.Confirm")).arg(sel.size())) !=
+		    QMessageBox::Yes)
+			return;
+		for (QListWidgetItem *it : sel)
+			QFile::remove(it->data(Qt::UserRole).toString());
+		refresh();
+	});
+	connect(btnFolder, &QPushButton::clicked, dlg, []() {
+		const QString d = QString::fromUtf8(obs_data_get_string(va_config(), "snap_dir"));
+		QDir().mkpath(d);
+		QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+	});
+	connect(btnClose, &QPushButton::clicked, dlg, &QDialog::close);
+
+	refresh();
+	dlg->resize(760, 540);
+	dlg->show();
+}
+
+static const char *cs_name(int cs)
+{
+	switch (cs) {
+	case CM_CS_601:
+		return "Rec. 601";
+	case CM_CS_709:
+		return "Rec. 709";
+	case CM_CS_2100_HLG:
+		return "Rec. 2100 HLG";
+	case CM_CS_2100_PQ:
+		return "Rec. 2100 PQ";
+	default:
+		return "?";
+	}
+}
+
+static QString esc(const QString &s)
+{
+	return s.toHtmlEscaped();
+}
+
+QString ScopeWidget::signalPathHtml()
+{
+	auto T = [](const char *key) { return QString::fromUtf8(obs_module_text(key)); };
+	struct roi_source *r = widget_roi(data);
+	if (!r)
+		return T("SignalPath.None");
+
+	QString rows;
+	auto row = [&rows](const QString &k, const QString &v) {
+		rows += QStringLiteral("<tr><td valign=top style='padding-right:14px'><b>%1</b></td><td>%2</td></tr>")
+				.arg(esc(k), v);
+	};
+	QStringList path; // the short flow at the top
+
+	// the source
+	pthread_mutex_lock(&r->cm.target_update_mutex);
+	obs_source_t *target = r->cm.weak_target ? obs_weak_source_get_source(r->cm.weak_target) : nullptr;
+	pthread_mutex_unlock(&r->cm.target_update_mutex);
+	const QString label = target_label(data->roi);
+	QString src = esc(label);
+	bool async = false;
+	if (target) {
+		const char *id = obs_source_get_id(target);
+		const char *disp = id ? obs_source_get_display_name(id) : nullptr;
+		async = (obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO) == OBS_SOURCE_ASYNC_VIDEO;
+		if (QString::fromUtf8(obs_source_get_name(target)) != label)
+			src += QStringLiteral(" &rarr; ") + esc(QString::fromUtf8(obs_source_get_name(target)));
+		src += QStringLiteral(" (%1), %2&times;%3")
+			       .arg(esc(QString::fromUtf8(disp ? disp
+							  : id ? id
+							       : "?")))
+			       .arg(obs_source_get_width(target))
+			       .arg(obs_source_get_height(target));
+		src += QStringLiteral("<br>") + T(async ? "SignalPath.Async" : "SignalPath.Rendered");
+	}
+	row(T("SignalPath.Source"), src);
+	path << esc(label);
+
+	// the raw signal
+	QString raw;
+	bool rawUsed = false;
+	if (!target || !async) {
+		raw = T("SignalPath.Raw.NotVideo");
+	} else {
+		obs_source_t *filter = raw_input_find(target);
+		if (!filter) {
+			raw = T("SignalPath.Raw.NoFilter");
+		} else if (!obs_source_enabled(filter)) {
+			raw = T("SignalPath.Raw.Off");
+		} else {
+			char desc[160] = "";
+			bool usable = false;
+			if (raw_input_describe(filter, r->cm.colorspace, desc, sizeof(desc), &usable)) {
+				raw = esc(QString::fromUtf8(desc)) + QStringLiteral("<br>") +
+				      T(usable ? "SignalPath.Raw.Used" : "SignalPath.Raw.Transfer");
+				rawUsed = usable;
+			} else {
+				raw = T("SignalPath.Raw.NoFrame");
+			}
+		}
+		obs_source_release(filter);
+	}
+	row(T("SignalPath.Raw"), raw);
+	obs_source_release(target);
+
+	// the project
+	struct obs_video_info ovi = {};
+	if (obs_get_video_info(&ovi)) {
+		row(T("SignalPath.Project"),
+		    QStringLiteral("%1&times;%2 &rarr; %3&times;%4, %5, %6, %7")
+			    .arg(ovi.base_width)
+			    .arg(ovi.base_height)
+			    .arg(ovi.output_width)
+			    .arg(ovi.output_height)
+			    .arg(QString::fromUtf8(get_video_format_name(ovi.output_format)))
+			    .arg(QString::fromUtf8(get_video_colorspace_name(ovi.colorspace)))
+			    .arg(QString::fromUtf8(get_video_range_name(ovi.output_format, ovi.range))));
+	}
+
+	// the capture of the scopes
+	const bool hdr = r->cm.texrender_format == GS_RGBA16F && r->cm.texrender;
+	row(T("SignalPath.Capture"), QStringLiteral("%1, %2<br>%3")
+					     .arg(QString::fromUtf8(cs_name(r->cm.colorspace)))
+					     .arg(T(hdr ? "SignalPath.Capture.Float" : "SignalPath.Capture.8bit"))
+					     .arg(T("SignalPath.Capture.Scale")
+							  .arg(r->cm.target_scale)
+							  .arg(r->cm.texrender_width)
+							  .arg(r->cm.texrender_height)));
+	path << (rawUsed ? T("SignalPath.Flow.Raw") : T(hdr ? "SignalPath.Flow.Float" : "SignalPath.Flow.8bit"));
+
+	// LUT
+	QString lut = T("SignalPath.Off");
+	if (r->cm.lut_mode != CM_LUT_OFF && r->cm.lut_tex) {
+		lut = esc(QFileInfo(QString::fromUtf8(r->cm.lut_path ? r->cm.lut_path : "")).fileName()) +
+		      QStringLiteral(" (%1)").arg(
+			      T(r->cm.lut_mode == CM_LUT_SCOPES ? "SignalPath.Lut.Scopes" : "SignalPath.Lut.View"));
+		if (r->cm.lut_mode == CM_LUT_SCOPES)
+			path << QStringLiteral("LUT");
+	}
+	row(T("SignalPath.Lut"), lut);
+
+	// selection
+	pthread_mutex_lock(&r->shapes_mutex);
+	const int shapes = (int)r->shapes.num, pins = (int)r->pins.num;
+	pthread_mutex_unlock(&r->shapes_mutex);
+	QStringList sel;
+	if (r->face_follow)
+		sel << T("SignalPath.Sel.Faces");
+	else if (shapes)
+		sel << T("SignalPath.Sel.Shapes").arg(shapes);
+	else
+		sel << T("SignalPath.Sel.Whole");
+	if (r->mask.qualifier)
+		sel << T("SignalPath.Sel.Qualifier");
+	if (pins)
+		sel << T("SignalPath.Sel.Pins").arg(pins);
+	row(T("SignalPath.Selection"), esc(sel.join(QStringLiteral(", "))));
+	if (r->face_follow || shapes || r->mask.qualifier)
+		path << T("SignalPath.Flow.Selection");
+
+	// the scopes of this view
+	QStringList scopes;
+	pthread_mutex_lock(&data->mutex);
+	for (scope_entry *e : data->entries)
+		scopes << QString::fromUtf8(e->label.empty() ? obs_module_text(scope_types[e->type].name_key)
+							     : e->label.c_str());
+	pthread_mutex_unlock(&data->mutex);
+	row(T("SignalPath.Scopes"), scopes.isEmpty() ? T("SignalPath.Off") : esc(scopes.join(QStringLiteral(", "))));
+	path << T("SignalPath.Flow.Scopes").arg(scopes.size());
+
+	if (cm_get_paused())
+		row(T("SignalPath.State"),
+		    QStringLiteral("<span style='color:#ffb020'>%1</span>").arg(T("dock.paused")));
+
+	return QStringLiteral("<p style='font-size:larger'>%1</p><table cellspacing=0 cellpadding=3>%2</table>")
+		.arg(path.join(QStringLiteral(" &rarr; ")), rows);
+}
+
+void ScopeWidget::openSignalPath()
+{
+	if (signalDialog) {
+		signalDialog->raise();
+		signalDialog->activateWindow();
+		return;
+	}
+	auto *dlg = new QDialog(this);
+	dlg->setAttribute(Qt::WA_DeleteOnClose, true);
+	dlg->setWindowTitle(QString::fromUtf8(obs_module_text("SignalPath.Title")) + QStringLiteral(" - ") +
+			    QString::fromStdString(name));
+	signalDialog = dlg;
+	connect(dlg, &QObject::destroyed, this, [this]() { signalDialog = nullptr; });
+	auto *v = new QVBoxLayout(dlg);
+	auto *tb = new QTextBrowser(dlg);
+	v->addWidget(tb, 1);
+	auto *box = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+	connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::close);
+	v->addWidget(box);
+	auto update = [this, tb]() {
+		const int pos = tb->verticalScrollBar()->value();
+		tb->setHtml(signalPathHtml());
+		tb->verticalScrollBar()->setValue(pos);
+	};
+	auto *timer = new QTimer(dlg);
+	connect(timer, &QTimer::timeout, dlg, update);
+	timer->start(1000);
+	update();
+	dlg->resize(620, 420);
+	dlg->show();
 }

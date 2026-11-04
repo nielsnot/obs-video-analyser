@@ -101,6 +101,7 @@ struct roi_source
 	volatile bool compare;
 	gs_texture_t *ref_tex;
 	uint32_t ref_w, ref_h;
+	char *ref_load_path; // a picture file to load as the reference on the next frame (shapes_mutex)
 
 	pthread_mutex_t sources_mutex;
 	DARRAY(struct cm_source *) sources;
@@ -120,6 +121,11 @@ void roi_clear_shapes(struct roi_source *src);
 size_t roi_get_shape_count(struct roi_source *src);
 void roi_undo_pin(struct roi_source *src);
 void roi_clear_pins(struct roi_source *src);
+/* Loads a picture file (PNG, JPEG) as the snapshot reference, scaled to the ROI picture, on the next frame. */
+void roi_load_reference(struct roi_source *src, const char *path);
+/* Copies the snapshot reference as 8-bit BGRA, the way the view shows it (an HDR one through the display
+ * conversion). Call inside obs_enter_graphics(). *out is allocated with bmalloc. */
+bool roi_read_reference(struct roi_source *src, uint8_t **out, uint32_t *w, uint32_t *h);
 /* The first color picker pin, normalized to the picture; false when there is none. */
 bool roi_first_pin(struct roi_source *src, float *x, float *y);
 

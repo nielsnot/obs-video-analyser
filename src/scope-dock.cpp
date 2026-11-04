@@ -4,6 +4,19 @@
 #include <QMainWindow>
 #include <QDockWidget>
 #include <QVBoxLayout>
+#include <QDialog>
+#include <QPushButton>
+#include <QLabel>
+#include <QFileDialog>
+#include <QMessageBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QDir>
+#include <QDateTime>
+#include <QStandardPaths>
+#include <util/platform.h>
+#include "common.h"
+#include "va-config.hpp"
 #include "plugin-macros.generated.h"
 #include "scope-dock.hpp"
 #include "scope-dock-new-dialog.hpp"
@@ -26,6 +39,8 @@ static inline bool is_program_dock(obs_data_t *props)
 
 	return ret;
 }
+
+static void scope_dock_show(ScopeWidget *w);
 
 void scope_dock_add(const char *name, obs_data_t *props, bool show)
 {
@@ -51,22 +66,26 @@ void scope_dock_add(const char *name, obs_data_t *props, bool show)
 	if (docks)
 		docks->push_back(w);
 
-	if (show) {
-		QMetaObject::invokeMethod(
-			w,
-			[w]() {
-				auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
-				if (!main_window)
-					return;
-				QList<QDockWidget *> dd = main_window->findChildren<QDockWidget *>();
-				for (QDockWidget *d : dd) {
-					if (d->widget() == w || d->widget() == w->parentWidget()) {
-						d->setVisible(true);
-					}
+	if (show)
+		scope_dock_show(w);
+}
+
+static void scope_dock_show(ScopeWidget *w)
+{
+	QMetaObject::invokeMethod(
+		w,
+		[w]() {
+			auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+			if (!main_window)
+				return;
+			QList<QDockWidget *> dd = main_window->findChildren<QDockWidget *>();
+			for (QDockWidget *d : dd) {
+				if (d->widget() == w || d->widget() == w->parentWidget()) {
+					d->setVisible(true);
 				}
-			},
-			Qt::QueuedConnection);
-	}
+			}
+		},
+		Qt::QueuedConnection);
 }
 
 static void close_all_docks()
@@ -158,6 +177,17 @@ static va_hotkey hotkeys[] = {
 	{"VideoAnalyser.Peaks", "Hotkey.Peaks", "va_waveform", "peaks", OBS_INVALID_HOTKEY_ID},
 	{"VideoAnalyser.PeakHold", "Hotkey.PeakHold", "va_waveform", "hold", OBS_INVALID_HOTKEY_ID},
 	{"VideoAnalyser.PeakHoldReset", "Hotkey.PeakHoldReset", "va_waveform", "hold_reset", OBS_INVALID_HOTKEY_ID},
+	// dock commands (no proc)
+	{"VideoAnalyser.ViewNext", "Hotkey.ViewNext", nullptr, "view_next", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.ViewPrev", "Hotkey.ViewPrev", nullptr, "view_prev", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.View1", "Hotkey.View1", nullptr, "view_1", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.View2", "Hotkey.View2", nullptr, "view_2", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.View3", "Hotkey.View3", nullptr, "view_3", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.View4", "Hotkey.View4", nullptr, "view_4", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.View5", "Hotkey.View5", nullptr, "view_5", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.Snapshot", "Hotkey.Snapshot", nullptr, "snapshot", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.Compare", "Hotkey.Compare", nullptr, "compare", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.Pause", "Hotkey.Pause", nullptr, "pause", OBS_INVALID_HOTKEY_ID},
 };
 
 static void hotkey_pressed(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
@@ -171,8 +201,17 @@ static void hotkey_pressed(void *data, obs_hotkey_id, obs_hotkey_t *, bool press
 			const va_hotkey *h = static_cast<const va_hotkey *>(param);
 			if (!docks)
 				return;
-			for (ScopeWidget *w : *docks)
-				w->sendCommand(h->proc, h->cmd);
+			if (!h->proc && strcmp(h->cmd, "pause") == 0) {
+				cm_set_paused(!cm_get_paused());
+				scope_docks_update_pause();
+				return;
+			}
+			for (ScopeWidget *w : *docks) {
+				if (h->proc)
+					w->sendCommand(h->proc, h->cmd);
+				else
+					w->dockCommand(h->cmd);
+			}
 		},
 		data, false);
 }
@@ -215,6 +254,174 @@ static void hotkeys_load(obs_data_t *props)
 	obs_data_release(keys);
 }
 
+void scope_docks_update_pause()
+{
+	if (!docks)
+		return;
+	for (ScopeWidget *w : *docks)
+		w->updatePause();
+}
+
+/* ---------- export, import, factory reset ---------- */
+
+/* Everything: the docks with their views and settings, the hotkeys, the layout and snapshot libraries. */
+static obs_data_t *export_all()
+{
+	obs_data_t *all = obs_data_create();
+	obs_data_set_int(all, "video-analyser-backup", 1);
+	obs_data_set_string(all, "version", PLUGIN_VERSION);
+	obs_data_set_string(all, "date", QDateTime::currentDateTime().toString(Qt::ISODate).toUtf8().constData());
+	obs_data_t *props = obs_data_create();
+	save_load_scope_docks(props, true, nullptr);
+	obs_data_t *dock_data = obs_data_get_obj(props, SAVE_DATA_NAME);
+	obs_data_set_obj(all, "docks", dock_data);
+	obs_data_release(dock_data);
+	obs_data_release(props);
+	obs_data_set_obj(all, "config", va_config());
+	return all;
+}
+
+static void remove_all_docks()
+{
+	if (!docks)
+		return;
+	std::vector<std::string> names;
+	for (ScopeWidget *w : *docks)
+		names.push_back(w->name);
+	for (const std::string &n : names)
+		obs_frontend_remove_dock(n.c_str()); // deletes the dock and its scope widget
+	close_all_docks();                           // any left
+}
+
+static void import_all(obs_data_t *all)
+{
+	obs_data_t *dock_data = obs_data_get_obj(all, "docks");
+	obs_data_t *config_data = obs_data_get_obj(all, "config");
+	va_config_replace(config_data);
+	remove_all_docks();
+	obs_data_t *wrap = obs_data_create();
+	if (dock_data)
+		obs_data_set_obj(wrap, SAVE_DATA_NAME, dock_data);
+	save_load_scope_docks(wrap, false, nullptr);
+	obs_data_release(wrap);
+	obs_data_release(config_data);
+	obs_data_release(dock_data);
+	if (docks)
+		for (ScopeWidget *w : *docks)
+			scope_dock_show(w);
+}
+
+static std::string backup_dir()
+{
+	const std::string dir = va_config_dir() + "backups/";
+	os_mkdirs(dir.c_str());
+	return dir;
+}
+
+/* Writes a backup of everything to the backups folder; returns its path, or empty on failure. */
+static QString write_backup(const char *why)
+{
+	obs_data_t *all = export_all();
+	const QString file = QString::fromStdString(backup_dir()) +
+			     QStringLiteral("backup %1 %2.json")
+				     .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH-mm-ss")))
+				     .arg(QString::fromUtf8(why));
+	const bool ok = obs_data_save_json_pretty_safe(all, file.toUtf8().constData(), "tmp", "bak");
+	obs_data_release(all);
+	return ok ? file : QString();
+}
+
+static void factory_reset()
+{
+	remove_all_docks();
+	for (va_hotkey &h : hotkeys) {
+		obs_data_array_t *empty = obs_data_array_create();
+		obs_hotkey_load(h.id, empty);
+		obs_data_array_release(empty);
+	}
+	va_config_replace(nullptr);
+	cm_set_paused(false);
+}
+
+static void open_settings_dialog()
+{
+	auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	auto *dlg = new QDialog(main_window);
+	dlg->setAttribute(Qt::WA_DeleteOnClose, true);
+	dlg->setWindowTitle(QString::fromUtf8(obs_module_text("Settings.Title")));
+	auto *v = new QVBoxLayout(dlg);
+	auto *info = new QLabel(QString::fromUtf8(obs_module_text("Settings.Info")), dlg);
+	info->setWordWrap(true);
+	v->addWidget(info);
+	auto T = [](const char *k) { return QString::fromUtf8(obs_module_text(k)); };
+	auto *btnExport = new QPushButton(T("Settings.Export"), dlg);
+	auto *btnImport = new QPushButton(T("Settings.Import"), dlg);
+	auto *btnBackups = new QPushButton(T("Settings.Backups"), dlg);
+	auto *btnReset = new QPushButton(T("Settings.Reset"), dlg);
+	auto *btnClose = new QPushButton(T("Close"), dlg);
+	for (QPushButton *b : {btnExport, btnImport, btnBackups, btnReset})
+		v->addWidget(b);
+	v->addStretch(1);
+	v->addWidget(btnClose);
+
+	QObject::connect(btnExport, &QPushButton::clicked, dlg, [dlg, T]() {
+		const QString name = QStringLiteral("Video Analyser settings %1.json")
+					     .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd")));
+		const QString file = QFileDialog::getSaveFileName(
+			dlg, T("Settings.Export"),
+			QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + QStringLiteral("/") +
+				name,
+			QStringLiteral("JSON (*.json)"));
+		if (file.isEmpty())
+			return;
+		obs_data_t *all = export_all();
+		const bool ok = obs_data_save_json_pretty_safe(all, file.toUtf8().constData(), "tmp", "bak");
+		obs_data_release(all);
+		if (!ok)
+			QMessageBox::warning(dlg, T("Settings.Title"), T("Settings.Failed"));
+	});
+	QObject::connect(btnImport, &QPushButton::clicked, dlg, [dlg, T]() {
+		const QString file = QFileDialog::getOpenFileName(
+			dlg, T("Settings.Import"), QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation),
+			QStringLiteral("JSON (*.json)"));
+		if (file.isEmpty())
+			return;
+		obs_data_t *all = obs_data_create_from_json_file(file.toUtf8().constData());
+		if (!all || !obs_data_get_int(all, "video-analyser-backup")) {
+			obs_data_release(all);
+			QMessageBox::warning(dlg, T("Settings.Title"), T("Settings.NotBackup"));
+			return;
+		}
+		if (QMessageBox::question(dlg, T("Settings.Title"), T("Settings.Import.Confirm")) != QMessageBox::Yes) {
+			obs_data_release(all);
+			return;
+		}
+		write_backup("before import");
+		import_all(all);
+		obs_data_release(all);
+	});
+	QObject::connect(btnBackups, &QPushButton::clicked, dlg, []() {
+		QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(backup_dir())));
+	});
+	QObject::connect(btnReset, &QPushButton::clicked, dlg, [dlg, T]() {
+		if (QMessageBox::warning(dlg, T("Settings.Title"), T("Settings.Reset.Confirm"),
+					 QMessageBox::Yes | QMessageBox::Cancel,
+					 QMessageBox::Cancel) != QMessageBox::Yes)
+			return;
+		const QString file = write_backup("before reset");
+		if (file.isEmpty() && QMessageBox::warning(dlg, T("Settings.Title"), T("Settings.Reset.NoBackup"),
+							   QMessageBox::Yes | QMessageBox::Cancel,
+							   QMessageBox::Cancel) != QMessageBox::Yes)
+			return;
+		factory_reset();
+		QMessageBox::information(dlg, T("Settings.Title"),
+					 T("Settings.Reset.Done").arg(QDir::toNativeSeparators(file)));
+	});
+	QObject::connect(btnClose, &QPushButton::clicked, dlg, &QDialog::close);
+	dlg->resize(420, 300);
+	dlg->show();
+}
+
 static void frontend_event(enum obs_frontend_event event, void *)
 {
 	switch (event) {
@@ -249,11 +456,17 @@ void scope_docks_init()
 		obs_frontend_pop_ui_translation();
 	};
 	QAction::connect(action, &QAction::triggered, cb);
+
+	QAction *settings = static_cast<QAction *>(
+		obs_frontend_add_tools_menu_qaction(obs_module_text("Video Analyser Settings and Backup...")));
+	settings->setObjectName("actionVideoAnalyserSettings");
+	QAction::connect(settings, &QAction::triggered, [] { open_settings_dialog(); });
 }
 
 void scope_docks_release()
 {
 	hotkeys_unregister();
+	va_config_release();
 	delete docks;
 	docks = NULL;
 

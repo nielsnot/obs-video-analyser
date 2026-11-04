@@ -441,6 +441,34 @@ bool raw_input_sample(obs_source_t *filter, float u, float v, int cols, int rows
 	return true;
 }
 
+bool raw_input_describe(obs_source_t *filter, int colorspace, char *desc, size_t desc_size, bool *usable)
+{
+	struct raw_input *r = filter ? obs_obj_get_data(filter) : NULL;
+	if (usable)
+		*usable = false;
+	if (!r)
+		return false;
+	r->last_use = os_gettime_ns(); // keep the frame fresh while the window is open
+	pthread_mutex_lock(&r->mutex);
+	const struct raw_frame *f = &r->frame;
+	const bool valid = f->valid && f->width && f->height;
+	if (valid) {
+		const bool full = r->range == RAW_RANGE_AUTO ? f->full_range : r->range == RAW_RANGE_FULL;
+		const int project = colorspace == CM_CS_2100_HLG  ? VIDEO_TRC_HLG
+				    : colorspace == CM_CS_2100_PQ ? VIDEO_TRC_PQ
+								  : VIDEO_TRC_DEFAULT;
+		const int source = f->trc == VIDEO_TRC_HLG || f->trc == VIDEO_TRC_PQ ? f->trc : VIDEO_TRC_DEFAULT;
+		if (usable)
+			*usable = source == project || r->any_transfer;
+		if (desc && desc_size)
+			snprintf(desc, desc_size, "%s, %ux%u, %s%s, %s", format_desc(f->format), f->width, f->height,
+				 full ? "full range" : "video range", r->range == RAW_RANGE_AUTO ? "" : " (set)",
+				 trc_desc(f->trc));
+	}
+	pthread_mutex_unlock(&r->mutex);
+	return valid;
+}
+
 bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0,
 		    uint32_t src_w, uint32_t src_h, int colorspace, char *desc, size_t desc_size)
 {
