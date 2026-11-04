@@ -7,6 +7,7 @@
 #include "util.h"
 #include "roi.h"
 #include "lut.h"
+#include "raw-input.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -56,6 +57,8 @@ void cm_destroy(struct cm_source *src)
 		gs_stagesurface_destroy(src->queue[i].stagesurface);
 		gs_texrender_destroy(src->queue[i].texrender);
 		bfree(src->queue[i].copy);
+		bfree(src->queue[i].ext);
+		obs_source_release(src->queue[i].raw_filter);
 	}
 	if (src->texrender)
 		gs_texrender_destroy(src->texrender);
@@ -68,6 +71,8 @@ void cm_destroy(struct cm_source *src)
 
 	pthread_mutex_destroy(&src->target_update_mutex);
 	obs_weak_source_release(src->weak_target);
+	obs_weak_source_release(src->raw_filter);
+	obs_weak_source_release(src->raw_checked);
 
 	bfree(src->target_name);
 }
@@ -270,6 +275,30 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 	return true;
 }
 
+/* The raw input filter of the target (a new reference), looked up once a second; adds one when missing. */
+static obs_source_t *raw_filter_for(struct cm_source *src, obs_source_t *target)
+{
+	if (!target || !(obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO))
+		return NULL;
+	const uint64_t now = os_gettime_ns();
+	const bool same = src->raw_checked && obs_weak_source_references_source(src->raw_checked, target);
+	if (!same || now - src->raw_check_ns > 1000000000ULL) {
+		src->raw_check_ns = now;
+		obs_weak_source_release(src->raw_checked);
+		src->raw_checked = obs_source_get_weak_source(target);
+		obs_weak_source_release(src->raw_filter);
+		src->raw_filter = NULL;
+		obs_source_t *f = raw_input_find(target);
+		if (f) {
+			src->raw_filter = obs_source_get_weak_source(f);
+			obs_source_release(f);
+		} else {
+			raw_input_ensure(target);
+		}
+	}
+	return src->raw_filter ? obs_weak_source_get_source(src->raw_filter) : NULL;
+}
+
 void cm_render_target(struct cm_source *src)
 {
 	if (src->rendered)
@@ -344,6 +373,14 @@ void cm_render_target(struct cm_source *src)
 	item->flags = src->bypass ? CM_FLAG_RAW_TEXTURE
 				  : src->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV | CM_FLAG_RAW_TEXTURE);
 	item->colorspace = src->colorspace;
+
+	// the raw signal, when the target is a video source of the same size as its frames
+	obs_source_release(item->raw_filter);
+	item->raw_filter = (has_rgb || has_yuv) && (src->flags & CM_FLAG_EXT) ? raw_filter_for(src, target) : NULL;
+	item->raw_x = x;
+	item->raw_y = y;
+	item->raw_w = scaled_width;
+	item->raw_h = scaled_height;
 
 	prepare_stagesurface(item, cx, cy, sheight);
 
@@ -437,6 +474,24 @@ static void cm_pipeline_thread_loop(struct cm_surface_queue_item *item)
 	}
 	if (item->flags & CM_FLAG_CONVERT_YUV) {
 		surface_data.yuv_data = video_data;
+	}
+
+	obs_source_t *raw = item->raw_filter;
+	item->raw_filter = NULL;
+	if (raw) {
+		const size_t size = (size_t)item->width * 4 * item->height;
+		if (item->ext_size < size) {
+			bfree(item->ext);
+			item->ext = bmalloc(size);
+			item->ext_size = size;
+		}
+		if (raw_input_fill(raw, item->ext, item->width, item->height, item->raw_x, item->raw_y, item->raw_w,
+				   item->raw_h, item->ext_desc, sizeof(item->ext_desc))) {
+			surface_data.ext_data = item->ext;
+			surface_data.ext_linesize = item->width * 4;
+			surface_data.ext_desc = item->ext_desc;
+		}
+		obs_source_release(raw);
 	}
 
 	if (item->cb) {

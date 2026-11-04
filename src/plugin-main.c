@@ -50,6 +50,7 @@ extern const struct obs_source_info colormonitor_cube;
 extern const struct obs_source_info colormonitor_face_probe;
 extern const struct obs_source_info colormonitor_faces;
 extern const struct obs_source_info colormonitor_chart;
+extern const struct obs_source_info colormonitor_raw_input;
 void scope_docks_init();
 void text_render_init(void);
 void text_render_free(void);
@@ -135,6 +136,7 @@ bool obs_module_load(void)
 		return false;
 	if (!register_source_with_flags(&colormonitor_roi, src_flags))
 		return false;
+	obs_register_source(&colormonitor_raw_input);
 
 	text_render_init();
 	scope_docks_init();

@@ -42,7 +42,7 @@ def dock_data(colorspace):
         {
             'type': 'waveform',
             'label': 'WV', 'show_label': False, 'use_roi': True, 'target': '',
-            'prop': {'components': 0x20, 'display': 0, 'graticule_lines': 0, 'scale_labels': 0,
+            'prop': {'components': 0x20, 'display': 0, 'graticule_lines': 0, 'scale_labels': 0, 'minmax': False,
                      'intensity': 255, 'target_scale': 2},
         },
     ]

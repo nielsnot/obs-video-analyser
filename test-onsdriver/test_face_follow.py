@@ -25,7 +25,7 @@ def dock_data():
     'A dock following faces, with a luma waveform on the dock selection and a drawn shape that must not count.'
     scopes = [{'type': 'waveform', 'label': 'Waveform', 'show_label': False, 'use_roi': True, 'target': '',
                'prop': {'target_scale': 2, 'components': 0x20, 'display': 0, 'intensity': 255,
-                        'graticule_lines': 0, 'scale_labels': 0}}]
+                        'graticule_lines': 0, 'scale_labels': 0, 'minmax': False}}]
     return {'docks': [{
         'name': 'Follow', 'toolbar': True, 'active_view': 0,
         'roi-prop': {'target_name': '', 'interleave': 0, 'target_scale': 2, 'face_follow': True,

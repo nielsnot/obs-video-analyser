@@ -98,7 +98,28 @@ struct wvs_source
 	bool ref_alpha;
 	bool ref_dirty;
 	gs_texture_t *tex_ref;
+
+	// raw signal (raw input filter): the scale runs from -7 % to 109 %
+	volatile bool ext;
+	bool ext_prev;
+	char ext_desc[48];
+
+	// the highest and lowest level of the trace, as lines with their value
+	bool minmax;
+	volatile int top_row, bottom_row; // rows of the trace buffer (0 is the top), -1 when empty
 };
+
+/* Where a level (0..1 of the signal) sits, as a share of the height from the bottom. */
+static inline float lvl(const struct wvs_source *src, float level)
+{
+	return src->ext ? (16.0f + 219.0f * level) / 255.0f : level;
+}
+
+/* The level at a share of the height from the bottom. */
+static inline float lvl_inv(const struct wvs_source *src, float f)
+{
+	return src->ext ? (f * 255.0f - 16.0f) / 219.0f : f;
+}
 
 static void wvs_update(void *, obs_data_t *);
 static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data);
@@ -125,6 +146,7 @@ static void wvs_compare_cb(void *data, calldata_t *cd)
 static void *wvs_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct wvs_source *src = bzalloc(sizeof(struct wvs_source));
+	src->top_row = src->bottom_row = -1;
 
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, wvs_surface_cb, src);
@@ -178,6 +200,7 @@ static void wvs_update(void *data, obs_data_t *settings)
 	src->out_lo = (float)obs_data_get_double(settings, "out_lo") / 100.0f;
 	src->side_histogram = obs_data_get_bool(settings, "side_histogram");
 	src->x_axis = obs_data_get_bool(settings, "x_axis");
+	src->minmax = obs_data_get_bool(settings, "minmax");
 	const int gain = (int)obs_data_get_int(settings, "gain");
 	if (gain >= 1 && gain != src->gain) {
 		src->gain = gain;
@@ -190,7 +213,8 @@ static void wvs_update(void *data, obs_data_t *settings)
 	src->components = (uint32_t)obs_data_get_int(settings, "components");
 	src->colorize = obs_data_get_bool(settings, "colorize") && src->components == COMP_Y;
 	src->cm.flags = (src->components & COMP_RGB || src->colorize ? CM_FLAG_CONVERT_RGB : 0) |
-			(src->components & COMP_YUV || is_yrgb(src->components) ? CM_FLAG_CONVERT_YUV : 0);
+			(src->components & COMP_YUV || is_yrgb(src->components) ? CM_FLAG_CONVERT_YUV : 0) |
+			CM_FLAG_EXT;
 
 	src->intensity = (int)obs_data_get_int(settings, "intensity");
 	if (src->intensity < 1)
@@ -212,6 +236,7 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "out_lo", 0.0);
 	obs_data_set_default_bool(settings, "side_histogram", false);
 	obs_data_set_default_bool(settings, "x_axis", false);
+	obs_data_set_default_bool(settings, "minmax", true);
 }
 
 static bool components_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
@@ -277,6 +302,7 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_properties_add_bool(props, "side_histogram", obs_module_text("WV.Prop.SideHistogram"));
 	obs_properties_add_bool(props, "x_axis", obs_module_text("WV.Prop.XAxis"));
 	obs_properties_add_bool(props, "out_highlight", obs_module_text("WV.Prop.OutHighlight"));
+	obs_properties_add_bool(props, "minmax", obs_module_text("WV.Prop.MinMax"));
 	obs_properties_add_float_slider(props, "out_hi", obs_module_text("WV.Prop.OutHi"), 80.0, 100.0, 0.5);
 	obs_properties_add_float_slider(props, "out_lo", obs_module_text("WV.Prop.OutLo"), 0.0, 20.0, 0.5);
 
@@ -348,6 +374,47 @@ static inline void wvs_draw_waveform(struct wvs_source *src, uint8_t *dbuf, cons
 		video_data = surface_data->yuv_data;
 	if (!video_data)
 		return;
+
+	// the raw signal: B, G, R, Y as legal codes, the selection in the alpha of the captured picture
+	const uint8_t *ext = surface_data->ext_data;
+	const uint8_t *alpha = surface_data->rgb_data ? surface_data->rgb_data : surface_data->yuv_data;
+	if (ext && alpha && !(src->components & COMP_UV)) {
+		const bool rgb = (src->components & COMP_RGB) != 0;
+		const bool yrgb = is_yrgb(src->components);
+		for (uint32_t y = 0; y < height; y++) {
+			const uint8_t *e = ext + surface_data->ext_linesize * y;
+			const uint8_t *a = alpha + surface_data->linesize * y;
+			const uint8_t *c = surface_data->rgb_data ? surface_data->rgb_data + surface_data->linesize * y
+								  : NULL;
+			for (uint32_t x = 0; x < width; x++, e += 4, a += 4) {
+				if (!a[3])
+					continue;
+				uint8_t *d = dbuf + x * 4;
+				if (src->colorize && c) {
+					// running average of the colors in the bin, the count in alpha
+					uint8_t *b = d + (WV_SIZE - 1 - e[3]) * width * 4;
+					const int n = b[3] < 255 ? b[3] + 1 : 255;
+					b[3] = (uint8_t)n;
+					for (int k = 0; k < 3; k++)
+						b[k] = (uint8_t)(b[k] + ((int)c[x * 4 + k] - (int)b[k]) / n);
+					continue;
+				}
+				if (rgb) {
+					if (src->components & 0x11)
+						inc_uint8(d + (WV_SIZE - 1 - e[0]) * width * 4 + 0);
+					if (src->components & 0x22)
+						inc_uint8(d + (WV_SIZE - 1 - e[1]) * width * 4 + 1);
+					if (src->components & 0x44)
+						inc_uint8(d + (WV_SIZE - 1 - e[2]) * width * 4 + 2);
+					if (yrgb)
+						inc_uint8(d + (WV_SIZE - 1 - e[3]) * width * 4 + 3);
+				} else {
+					inc_uint8(d + (WV_SIZE - 1 - e[3]) * width * 4 + 1); // luma alone is in G
+				}
+			}
+		}
+		return;
+	}
 
 	const bool calc_b = (src->components & 0x11) ? true : false;
 	const bool calc_g = (src->components & 0x22) ? true : false;
@@ -454,9 +521,32 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		}
 	}
 
+	const bool ext = surface_data->ext_data && !(src->components & COMP_UV);
+	if (ext)
+		snprintf(src->ext_desc, sizeof(src->ext_desc), "%s",
+			 surface_data->ext_desc ? surface_data->ext_desc : "RAW");
+	src->ext = ext;
+
 	PROFILE_START(prof_draw_waveform_name);
 	wvs_draw_waveform(src, src->tex_buf[src->w_tex_buf], surface_data);
 	PROFILE_END(prof_draw_waveform_name);
+	{
+		// the highest and lowest row with any trace (the alpha channel only counts for luma or colorize)
+		const uint8_t *buf = src->tex_buf[src->w_tex_buf];
+		const size_t row = (size_t)surface_data->width * 4;
+		const bool use_a = is_yrgb(src->components) || src->colorize;
+		int top = -1, bottom = -1;
+		for (int r = 0; r < WV_SIZE && top < 0; r++)
+			for (size_t i = 0; i < row && top < 0; i++)
+				if (buf[r * row + i] && ((i & 3) != 3 || use_a))
+					top = r;
+		for (int r = WV_SIZE - 1; r >= 0 && bottom < 0 && top >= 0; r--)
+			for (size_t i = 0; i < row && bottom < 0; i++)
+				if (buf[r * row + i] && ((i & 3) != 3 || use_a))
+					bottom = r;
+		src->top_row = top;
+		src->bottom_row = bottom;
+	}
 	if (src->side_histogram) {
 		// how many pixels sit at each level, from the trace buffer
 		float(*h)[4] = src->side_hist[src->w_side ^ 1];
@@ -484,8 +574,18 @@ static void create_graticule_vbuf(struct wvs_source *src)
 	if (src->graticule_lines > 0) {
 		gs_render_start(true);
 		for (int i = 0; i <= src->graticule_lines; i++) {
-			gs_vertex2f(0.0f, 256.0f * i / src->graticule_lines);
-			gs_vertex2f(1.0f, 256.0f * i / src->graticule_lines);
+			const float y = 256.0f * (1.0f - lvl(src, 1.0f - (float)i / src->graticule_lines));
+			gs_vertex2f(0.0f, y);
+			gs_vertex2f(1.0f, y);
+		}
+		// with the raw signal: the same steps above 100 %, up to the top of the scale
+		for (int i = 1; src->ext && i <= src->graticule_lines; i++) {
+			const float level = 1.0f + (float)i / src->graticule_lines;
+			if (lvl(src, level) > 1.0f)
+				break;
+			const float y = 256.0f * (1.0f - lvl(src, level));
+			gs_vertex2f(0.0f, y);
+			gs_vertex2f(1.0f, y);
 		}
 		src->graticule_line_vbuf = gs_render_save();
 	}
@@ -683,9 +783,12 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 		for (int k = 0; k < n_stack; k++) {
 			const float xo = width * pi / n_par;
 			const float base = (float)(WV_SIZE * k);
-			for (int i = 0; i <= src->graticule_lines; i++) {
-				const float level = 1.0f - (float)i / src->graticule_lines; // top line is white
-				const float y = base + (WV_SIZE * (float)i / src->graticule_lines - off) * zoom;
+			const int n_above = src->ext ? src->graticule_lines : 0;
+			for (int i = -n_above; i <= src->graticule_lines; i++) {
+				const float level = 1.0f - (float)i / src->graticule_lines; // the 100 % line is i = 0
+				if (lvl(src, level) > 1.0f)
+					continue;
+				const float y = base + (WV_SIZE * (1.0f - lvl(src, level)) - off) * zoom;
 				if (y < base - 1.0f || y > base + WV_SIZE + 1.0f)
 					continue; // outside the zoomed view
 				char buf[16];
@@ -739,7 +842,7 @@ static void wvs_render_hlg_reference(struct wvs_source *src, float width, float 
 		const float base = (float)(WV_SIZE * k);
 		// 203 nits: 75 % in HLG, 58 % in PQ
 		const float ref = cs == CM_CS_2100_PQ ? 0.58f : 0.75f;
-		const float y = base + (WV_SIZE * (1.0f - ref) - off) * zoom;
+		const float y = base + (WV_SIZE * (1.0f - lvl(src, ref)) - off) * zoom;
 		if (y < base || y > base + WV_SIZE)
 			continue;
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xB040E0F0);
@@ -775,8 +878,8 @@ static void wvs_render_out_of_range(struct wvs_source *src, float width)
 	for (int k = 0; k < n_stack; k++) {
 		const float base = (float)(WV_SIZE * k);
 		// rows with a level at or above out_hi, and at or below out_lo (row 0 is 100 %)
-		const float hi_rows = WV_SIZE * (1.0f - src->out_hi) + 1.0f;
-		const float lo_row = WV_SIZE * (1.0f - src->out_lo) - 1.0f;
+		const float hi_rows = WV_SIZE * (1.0f - lvl(src, src->out_hi)) + 1.0f;
+		const float lo_row = WV_SIZE * (1.0f - lvl(src, src->out_lo)) - 1.0f;
 		const float ya0 = base + (0.0f - off) * zoom, ya1 = base + (hi_rows - off) * zoom;
 		const float yb0 = base + (lo_row - off) * zoom, yb1 = base + (WV_SIZE - off) * zoom;
 		while (gs_effect_loop(solid, "Solid")) {
@@ -952,7 +1055,7 @@ static void wvs_render_markers(struct wvs_source *src, float width, float height
 			continue;
 		for (int s = 0; s < n_stack; s++) {
 			const float base = (float)(WV_SIZE * s);
-			const float y = base + (WV_SIZE * (1.0f - k->level) - off) * zoom;
+			const float y = base + (WV_SIZE * (1.0f - lvl(src, k->level)) - off) * zoom;
 			if (y < base || y > base + WV_SIZE)
 				continue;
 			cm_marker_draw_line(0.0f, y, width, y, k->color, k->style, k->width, ts.ux, ts.uy);
@@ -979,6 +1082,43 @@ static void wvs_render_markers(struct wvs_source *src, float width, float height
 					   TEXT_ALIGN_RIGHT, below ? TEXT_VALIGN_TOP : TEXT_VALIGN_BOTTOM);
 			}
 		}
+	}
+}
+
+/* Lines at the highest and lowest level of the trace with their value, and what the raw signal is. */
+static void wvs_render_minmax(struct wvs_source *src, float width, float height)
+{
+	const struct text_scale ts = text_scale_from_viewport(width, height);
+	const float zoom = zoom_active(src) ? src->zoom : 1.0f;
+	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
+	const float px = 10.0f;
+	if (src->ext && src->ext_desc[0])
+		text_draw(&ts, src->ext_desc, width - 4.0f * ts.ux, height - 3.0f * ts.uy, px, 0xC0F0D060,
+			  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
+	const int top = src->top_row, bottom = src->bottom_row;
+	if (!src->minmax || src->display == DISP_STACK || top < 0 || bottom < 0)
+		return;
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	for (int k = 0; k < 2; k++) {
+		// row r holds the code WV_SIZE - 1 - r
+		const int r = k == 0 ? top : bottom;
+		const float f = (WV_SIZE - 1 - r) / (float)(WV_SIZE - 1);
+		const float level = lvl_inv(src, f);
+		const float y = (WV_SIZE * (1.0f - f) - off) * zoom;
+		if (y < 0.0f || y > WV_SIZE)
+			continue;
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x90B8D860);
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			gs_vertex2f(0.0f, y);
+			gs_vertex2f(width, y);
+			gs_render_stop(GS_LINES);
+		}
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%.0f", level * 100.0f);
+		const bool above = k == 0 ? y - (px + 2.0f) * ts.uy > 0.0f : y + (px + 2.0f) * ts.uy > WV_SIZE;
+		text_draw(&ts, buf, width - 8.0f * ts.ux, above ? y - 2.0f * ts.uy : y + 2.0f * ts.uy, px, 0xE0C8E070,
+			  TEXT_ALIGN_RIGHT, above ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
 	}
 }
 
@@ -1020,7 +1160,8 @@ static void wvs_render(void *data, gs_effect_t *effect)
 
 	PROFILE_START(prof_draw_graticule_name);
 	if (src->graticule_lines > 0) {
-		if (src->graticule_lines != src->graticule_lines_prev) {
+		if (src->graticule_lines != src->graticule_lines_prev || src->ext != src->ext_prev) {
+			src->ext_prev = src->ext;
 			create_graticule_vbuf(src);
 			src->graticule_lines_prev = src->graticule_lines;
 		}
@@ -1036,6 +1177,7 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	wvs_render_markers(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 	wvs_render_out_of_range(src, (float)wvs_get_width(src));
 	wvs_render_side_histogram(src, (float)wvs_get_width(src));
+	wvs_render_minmax(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 	wvs_render_x_axis(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 
 	PROFILE_END(prof_render_name);
@@ -1049,7 +1191,7 @@ static float level_at(const struct wvs_source *src, int y)
 	const bool zoomed = zoom_active(src);
 	const float zoom = zoomed ? src->zoom : 1.0f, off = zoomed ? src->zoom_off : 0.0f;
 	const float local = fmodf((float)y, (float)WV_SIZE);
-	const float level = 1.0f - (local / zoom + off) / (float)WV_SIZE;
+	const float level = lvl_inv(src, 1.0f - (local / zoom + off) / (float)WV_SIZE);
 	return fmaxf(-0.1f, fminf(level, 1.1f));
 }
 
@@ -1065,7 +1207,7 @@ static int level_marker_at(struct wvs_source *src, int y)
 	for (int i = 0; i < n; i++) {
 		if (items[i].kind != CM_MARKER_LEVEL)
 			continue;
-		const float my = base + (WV_SIZE * (1.0f - items[i].level) - off) * zoom;
+		const float my = base + (WV_SIZE * (1.0f - lvl(src, items[i].level)) - off) * zoom;
 		const float d = fabsf((float)y - my);
 		if (d < best_d) {
 			best_d = d;

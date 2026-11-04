@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.1
+
+- **Raw signal of video sources:** when a dock or scope measures a video source (a capture card such as a Blackmagic
+  UltraStudio or DeckLink, a webcam, NDI, a media file), the plugin adds the filter *Video Analyser input* to that
+  source by itself. It keeps the Y'CbCr frame as it arrives, before OBS converts it to 8-bit R'G'B' and clips it.
+  8-bit and 10-bit formats are read (UYVY, YUY2, NV12, I420, I422, I444, P010, I010, I210, P216, P416, V210 and
+  more). Remove the filter and it is not added again in that session. A scene or the program stays 8-bit.
+- **Waveform, extended range:** with the raw signal the scale runs from -7 % to 109 %, so superwhite above 100 % and
+  sub-black below 0 % are visible; graticule lines and labels continue above 100 %. The label at the bottom right
+  says what arrives, for example "RAW 10-bit V210". For a Blackmagic, set its pixel format to 10-bit YUV.
+- **Waveform, highest and lowest level:** two thin lines at the highest and lowest level in the picture, with their
+  value (can be turned off).
+- **QC:** a new check, *Outside the legal range (raw signal, EBU R103)*: luma below -1 % or above 103 %, or R, G, B
+  below -5 % or above 105 %, with the lowest and highest luma in the detail.
+
 ## 0.7.14
 
 - **Help on every scope:** an **i** button in the hover bar of a scope. Hovering it shows a short explanation;

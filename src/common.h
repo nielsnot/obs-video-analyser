@@ -39,6 +39,13 @@ struct cm_surface_data
 	uint32_t linesize, width, height;
 	int colorspace;
 	gs_texture_t *tex; // for bypass mode
+
+	// the raw signal of a video source, when it has one (raw input filter): width x height pixels of
+	// B, G, R, Y as 8-bit legal codes (16 is 0 %, 235 is 100 %), so it keeps values from -7 % to 109 %.
+	// The selection is in the alpha of rgb_data / yuv_data, which have the same pixels.
+	const uint8_t *ext_data;
+	uint32_t ext_linesize;
+	const char *ext_desc; // e.g. "RAW 10-bit V210"
 };
 
 typedef void (*cm_surface_cb_t)(void *data, struct cm_surface_data *surface_data);
@@ -55,6 +62,13 @@ struct cm_surface_queue_item
 
 	cm_surface_cb_t cb;
 	void *cb_data;
+
+	// raw signal: the filter to read it from (a reference) and where the captured picture lies in it
+	obs_source_t *raw_filter;
+	uint32_t raw_x, raw_y, raw_w, raw_h; // region origin, size of the whole capture
+	uint8_t *ext;
+	size_t ext_size;
+	char ext_desc[48];
 };
 
 #define CM_SURFACE_QUEUE_SIZE 3
@@ -95,6 +109,11 @@ struct cm_source
 	struct roi_source *roi;
 	char *target_name;
 
+	// raw input filter of the target, looked up now and then
+	obs_weak_source_t *raw_filter;
+	obs_weak_source_t *raw_checked; // the target it was looked up for
+	uint64_t raw_check_ns;
+
 	// optional selection mask, owned by the ROI source
 	const struct cm_mask *mask;
 
@@ -122,6 +141,7 @@ enum cm_lut_mode_e {
 #define CM_FLAG_CONVERT_YUV 2
 #define CM_FLAG_RAW_TEXTURE 4
 #define CM_FLAG_ROI 8
+#define CM_FLAG_EXT 16 // wants the raw signal of a video source (ext_data)
 
 void cm_create(struct cm_source *src, obs_data_t *settings, obs_source_t *source);
 void cm_destroy(struct cm_source *src);

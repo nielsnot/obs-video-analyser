@@ -50,15 +50,16 @@ enum qc_check_e {
 	QC_BLACK,
 	QC_FREEZE,
 	QC_DEADPIX,
+	QC_LEGAL, // the raw signal beyond EBU R103: luma -1 % to 103 %, R, G, B -5 % to 105 %
 	QC_N_CHECKS,
 };
 
-static const char *check_keys[QC_N_CHECKS] = {"qc_check_clip",   "qc_check_crush",  "qc_check_rgb",
-					      "qc_check_gamut",  "qc_check_border", "qc_check_black",
-					      "qc_check_freeze", "qc_check_deadpix"};
-static const char *check_names[QC_N_CHECKS] = {"QC.Check.Clip",   "QC.Check.Crush",  "QC.Check.RGB",
-					       "QC.Check.Gamut",  "QC.Check.Border", "QC.Check.Black",
-					       "QC.Check.Freeze", "QC.Check.DeadPix"};
+static const char *check_keys[QC_N_CHECKS] = {"qc_check_clip",   "qc_check_crush",   "qc_check_rgb",
+					      "qc_check_gamut",  "qc_check_border",  "qc_check_black",
+					      "qc_check_freeze", "qc_check_deadpix", "qc_check_legal"};
+static const char *check_names[QC_N_CHECKS] = {"QC.Check.Clip",   "QC.Check.Crush",   "QC.Check.RGB",
+					       "QC.Check.Gamut",  "QC.Check.Border",  "QC.Check.Black",
+					       "QC.Check.Freeze", "QC.Check.DeadPix", "QC.Check.Legal"};
 
 /* Dead and stuck pixels: a pixel counts when it is near black (or near white) while the mean of its
  * four neighbors is clearly brighter (or darker), for this many analyzed frames in a row. */
@@ -73,8 +74,10 @@ struct qc_frame
 	float min[4], max[4]; // R, G, B, Y; 0..1 of the signal
 	float apl;            // average luma
 	float clip_share, crush_share, rgb_share, gamut_share;
-	float cll, fall; // HLG: brightest pixel and frame average, in nits (maxRGB)
-	int border[4];   // black rows/columns: top, bottom, left, right (captured pixels)
+	float cll, fall;                       // HLG: brightest pixel and frame average, in nits (maxRGB)
+	int border[4];                         // black rows/columns: top, bottom, left, right (captured pixels)
+	bool ext;                              // the raw signal was measured too
+	float legal_share, ext_ymin, ext_ymax; // raw signal: share beyond R103, lowest and highest luma
 	uint64_t hash;
 };
 
@@ -145,7 +148,7 @@ static void *qc_create(obs_data_t *settings, obs_source_t *source)
 		src->nits_pq[i] = pq_to_linear(i / 255.0f) * 10000.0f;
 	}
 
-	src->cm.flags = CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV;
+	src->cm.flags = CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV | CM_FLAG_EXT;
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, qc_surface_cb, src);
 
@@ -198,6 +201,7 @@ static void qc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "target_scale", 2);
 	obs_data_set_default_bool(settings, "qc_check_clip", true);
 	obs_data_set_default_bool(settings, "qc_check_crush", true);
+	obs_data_set_default_bool(settings, "qc_check_legal", true);
 	obs_data_set_default_bool(settings, "qc_check_rgb", false);
 	obs_data_set_default_bool(settings, "qc_check_gamut", true);
 	obs_data_set_default_bool(settings, "qc_check_border", true);
@@ -428,6 +432,34 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 	f->cll = cll;
 	f->fall = (float)(sum_nits / n);
 	measure_borders(sd, f->border);
+
+	// the raw signal of a video source: legal codes, 16 is 0 % and 235 is 100 %
+	if (sd->ext_data) {
+		uint64_t n_ext = 0, n_legal = 0;
+		int ymin = 255, ymax = 0;
+		for (uint32_t y = 0; y < sd->height; y++) {
+			const uint8_t *e = sd->ext_data + (size_t)sd->ext_linesize * y;
+			const uint8_t *rgb = sd->rgb_data + (size_t)sd->linesize * y;
+			for (uint32_t x = 0; x < sd->width; x++, e += 4, rgb += 4) {
+				if (!rgb[3])
+					continue;
+				n_ext++;
+				if (e[3] < ymin)
+					ymin = e[3];
+				if (e[3] > ymax)
+					ymax = e[3];
+				if (e[3] < 14 || e[3] > 241 || e[0] < 5 || e[0] > 245 || e[1] < 5 || e[1] > 245 ||
+				    e[2] < 5 || e[2] > 245)
+					n_legal++;
+			}
+		}
+		if (n_ext) {
+			f->ext = true;
+			f->legal_share = (float)n_legal / n_ext;
+			f->ext_ymin = (ymin - 16) / 219.0f;
+			f->ext_ymax = (ymax - 16) / 219.0f;
+		}
+	}
 }
 
 static void append_csv(const char *path, const struct qc_event *e)
@@ -610,6 +642,13 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 	else
 		snprintf(d, sizeof(d), "none");
 	update_check(src, QC_DEADPIX, f.valid && n_dead > 0, d, now);
+
+	if (f.ext)
+		snprintf(d, sizeof(d), "Y %.0f..%.0f%%, %.1f%% of pixels", f.ext_ymin * 100.0f, f.ext_ymax * 100.0f,
+			 f.legal_share * 100.0f);
+	else
+		snprintf(d, sizeof(d), "no raw signal");
+	update_check(src, QC_LEGAL, f.valid && f.ext && f.legal_share > src->tolerance, d, now);
 
 	// timeline: one bucket per window / QC_HIST
 	const uint64_t len = (uint64_t)(src->window / QC_HIST * 1e9);

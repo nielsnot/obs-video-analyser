@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-project(obs-video-analyser VERSION 0.7.14)
+project(obs-video-analyser VERSION 0.8.1)
 
 set(PLUGIN_AUTHOR "Niels Notenboom, based on Color Monitor by Norihiro Kamae")
 
@@ -60,6 +60,7 @@ set(PLUGIN_SOURCES
 	src/face.cpp
 	src/faces.c
 	src/chart.c
+	src/raw-input.c
 	src/vectorscope.c
 	src/waveform.c
 	src/histogram.c

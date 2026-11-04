@@ -1185,7 +1185,7 @@ static void roi_tick(void *data, float unused)
 	pthread_mutex_lock(&src->sources_mutex);
 	for (size_t i = 0; i < src->sources.num; i++) {
 		struct cm_source *cm = src->sources.array[i];
-		src->cm.flags |= cm->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV);
+		src->cm.flags |= cm->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV | CM_FLAG_EXT);
 	}
 	pthread_mutex_unlock(&src->sources_mutex);
 	if (src->pins.num || src->face_follow)
