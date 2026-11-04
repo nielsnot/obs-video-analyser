@@ -145,7 +145,10 @@ bool obs_module_load(void)
 	return true;
 }
 
+void raw_input_free(void);
+
 void obs_module_unload(void)
 {
 	text_render_free();
+	raw_input_free();
 }

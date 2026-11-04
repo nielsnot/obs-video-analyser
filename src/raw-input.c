@@ -429,6 +429,15 @@ void raw_input_ensure(obs_source_t *parent)
 	obs_queue_task(OBS_TASK_UI, ensure_task, obs_source_get_weak_source(parent), false);
 }
 
+void raw_input_free(void)
+{
+	pthread_mutex_lock(&added_mutex);
+	for (size_t i = 0; i < added.num; i++)
+		bfree(added.array[i]);
+	da_free(added);
+	pthread_mutex_unlock(&added_mutex);
+}
+
 const struct obs_source_info colormonitor_raw_input = {
 	.id = RAW_INPUT_ID,
 	.type = OBS_SOURCE_TYPE_FILTER,

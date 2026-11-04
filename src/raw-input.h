@@ -24,6 +24,9 @@ void raw_input_ensure(obs_source_t *parent);
 bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0,
 		    uint32_t src_w, uint32_t src_h, char *desc, size_t desc_size);
 
+/* Frees what the module keeps; at unload. */
+void raw_input_free(void);
+
 #ifdef __cplusplus
 }
 #endif
