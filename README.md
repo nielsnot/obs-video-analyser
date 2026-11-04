@@ -1,9 +1,11 @@
 # Video Analyser for OBS Studio
 
 Broadcast-style scopes inside OBS Studio: build your own scope dock with waveforms, vectorscopes,
-histograms, a CIE diagram, a diamond display, false color, QC with a timeline, audio loudness and face
-analysis across cameras. Arrange the scopes freely, look at just one part of the picture or follow faces,
-measure SDR, HLG and PQ, apply LUTs and compare against a snapshot.
+histograms, a CIE diagram, a diamond display, false color, QC with a timeline, a channel plot, a data analyser,
+skin tone, a HectorScope, a color chart, audio loudness and face analysis across cameras. Arrange the scopes freely,
+look at just one part of the picture or follow faces, measure SDR, HLG and PQ (also the raw 10-bit signal of a
+capture card, from -7 % to 109 %), apply LUTs, compare against a snapshot and keep layouts and snapshots in a
+library.
 
 Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color-monitor) by Norihiro Kamae
 (GPL-2.0). It uses its own source ids, so both plugins can be installed side by side.
@@ -30,7 +32,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | 1 | **View tabs** and `+ View` | Several layouts per dock, each with its own scopes. Right-click a tab to rename, duplicate or delete it. |
 | 2 | `+ Scope` | Adds a scope (see the list below). |
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
-| 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and reference \| live in the ROI view. |
+| 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and a wipe or blend in the ROI view. Right-click Snapshot for the snapshot library. |
 | 10 | `❚❚ Pause` | Pauses every scope in every dock on the current frame until you resume (also a hotkey). |
 | 10 | `☺ Faces (exp.)` | The selection follows every face found, so all scopes measure the faces. |
 | 10 | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
@@ -45,21 +47,21 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 
 | Scope | Shows | Highlights |
 |-------|-------|------------|
-| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit, 10-bit or nits; colorize; levels at the limits in orange; histogram along the right edge; pixel positions along the top; gain and mouse wheel zoom (for example into the blacks); markers |
-| **Vectorscope** | Hue and saturation | Skin tone line, ring scale with degree ticks, colored hue ring, part of the picture (all, lows, mids or highs), gain and mouse wheel zoom, Rec. 601/709/2020 targets, markers as points or lines |
-| **Histogram** | Distribution of levels | RGB, Luma, Chroma, YUV, plus Hue and Saturation; drag across a hue or saturation histogram to select that range |
-| **CIE diagram** | Chromaticity | Spectral locus, Rec. 709, DCI-P3 and Rec. 2020 triangles, D65 white point |
+| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit, 10-bit or nits; colorize; levels at the limits in orange; histogram along the right edge; pixel positions along the top; gain, zoom presets for blacks and whites, mouse wheel zoom and drag; highest/lowest lines and peak hold per channel; EBU R103 lines (-5/105/109 %); HDR lines at 26, 203 and 1000 nits; markers |
+| **Vectorscope** | Hue and saturation | Skin tone line and band, ring scale with degree ticks, colored hue ring, part of the picture (all, lows, mids or highs), gain and mouse wheel zoom, Rec. 601/709/2020 targets at 75 % and 100 %, a saturation alert ring and the highest saturation, markers as points or lines |
+| **Histogram** | Distribution of levels | RGB, Luma, Chroma, YUV, plus Hue and Saturation; horizontal or vertical; HDR reference lines; drag across a hue or saturation histogram to select that range |
+| **CIE diagram** | Chromaticity | Spectral locus, Rec. 709, DCI-P3, Rec. 2020, ACES AP0/AP1, ProPhoto and Adobe RGB triangles, D65 white point, the Planckian locus with color temperatures; CIE 1931 xy or 1976 u'v' |
 | **Diamond** | RGB gamut | Anything outside the dashed outlines is out of gamut |
-| **False color** | Exposure as colors | Presets (Exposure, Clipping only, Skin and mid grey, Spectrum) or your own bands; optional table with the share of the picture in each band |
+| **False color** | Exposure as colors | Presets (Exposure, Clipping only, Skin and mid grey, Spectrum, HLG and PQ in nits) or your own bands; sub-black and superwhite with the raw signal; a gamut view (outside Rec. 709 or P3); opacity; table with the share of the picture in each band; export as a `.cube` LUT |
 | **Zebra** | Over- and underexposure | Adjustable thresholds |
 | **Focus peaking** | Sharp edges | Color and threshold |
-| **QC and MinMax** | Signal checks | Min/max of R, G, B and luma, APL, clipped and crushed share, black borders, black and frozen picture, MaxCLL/MaxFALL and out-of-Rec. 709 share for HDR; a timeline of 1 min to 4 h with failed stretches in red; a timestamped error log, also as CSV; optional EBU R103 low-pass |
+| **QC and MinMax** | Signal checks | Min/max of R, G, B and luma, APL, clipped and crushed share, black borders, black and frozen picture, legal range (EBU R103) of the raw signal, MaxCLL/MaxFALL with HDR limit presets and out-of-Rec. 709 share for HDR; warnings and errors with their own thresholds; a timeline of 1 min to 4 h with lines of your choice, failed stretches in red and warnings in yellow; a timestamped error log, also as CSV; optional EBU R103 low-pass |
 | **Sat / Lum** | Saturation against luma | Shows whether highlights or shadows carry too much color |
 | **Line plot** | One picture line | R, G, B and luma of the line you choose |
-| **3D color cube** | Every pixel in the RGB cube | Turns by itself; drag to turn, wheel to zoom |
+| **3D color cube** | Every pixel in a color space | RGB, Y'CbCr, HSV or Lab; turns by itself; drag to turn, Shift-drag to pan, wheel to zoom |
 | **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term with maximum, integrated) against a target, a loudness timeline of 30 s to 1.5 h, phase correlation, goniometer for stereo and a room meter for 5.1 and 7.1 |
 | **Faces** *(experimental)* | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
-| **Color chart** | A 24-patch chart | Compares a color chart with a reference camera or the published values: Delta E per patch, exposure and white balance from the greys (with the gain change to match), saturation and the hue of the primaries |
+| **Color chart** | A color chart | ColorChecker Classic (24), 140 patches (14 x 10) or your own grid: compares with a reference camera or the published values: Delta E per patch, exposure and white balance from the greys (with the gain change to match), saturation and the hue of the primaries |
 | **Channel plot** | Two channels against each other | R/G, R/B, G/B, Y/Cb, Y/Cr or Cb/Cr, with the legal and EBU R103 boxes |
 | **Data analyser** | Pixel values | A block of pixels around a pin as 10-bit or 8-bit codes or %, exact codes of the raw signal |
 | **Skin tone** | Skin in the picture | Colors skin on target, redder or yellower, with statistics; turns the skin into the qualifier |
@@ -113,6 +115,8 @@ the ROI view and set `Color space` yourself.
 - **Vectorscope:** Rec. 2020 targets, skin tone line and hue ring.
 - **False color:** the `HDR HLG levels` preset (18 % grey near 38 %, skin, reference white at 75 %).
 - **CIE diagram:** plots in Rec. 2020; compare with the Rec. 709 triangle to see wide-gamut colors.
+- **HDR lines:** waveform and histogram can mark 26, 203 and 1000 nits; QC has HDR10 and HLG limit presets.
+- **Raw HDR:** a 10-bit HLG or PQ capture card in a project with the same transfer is measured from its raw signal.
 - The ROI view shows the picture as SDR with highlights above SDR white clipped.
 
 The scopes measure the HDR signal in 8 bits.
