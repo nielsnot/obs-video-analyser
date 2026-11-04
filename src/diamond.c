@@ -52,7 +52,7 @@ static void *dm_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct dm_source *src = bzalloc(sizeof(struct dm_source));
 
-	src->cm.flags = CM_FLAG_CONVERT_RGB;
+	src->cm.flags = CM_FLAG_CONVERT_RGB | CM_FLAG_EXT;
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, dm_surface_cb, src);
 
@@ -137,6 +137,9 @@ static uint32_t dm_get_height(void *data)
 	return src->cm.bypass ? cm_bypass_get_height(&src->cm) : DM_SIZE;
 }
 
+/* A legal code of the raw signal (16 is 0 %, 235 is 100 %) on the 0..255 scale of the diamonds. */
+#define RAW_FULL(c) (((int)(c) - 16) * 255 / 219)
+
 static inline void inc_uint8(uint8_t *c)
 {
 	if (*c < 255)
@@ -148,12 +151,17 @@ static void dm_draw(uint8_t *dbuf, const struct cm_surface_data *surface_data)
 	memset(dbuf, 0, DM_SIZE * DM_SIZE);
 
 	const uint8_t *rgb = surface_data->rgb_data;
+	const uint8_t *ext = surface_data->ext_data;
 	for (uint32_t y = 0; y < surface_data->height; y++) {
 		const uint8_t *p = rgb + (size_t)surface_data->linesize * y;
+		const uint8_t *e = ext ? ext + (size_t)surface_data->ext_linesize * y : NULL;
 		for (uint32_t x = 0; x < surface_data->width; x++, p += 4) {
 			if (!p[3])
 				continue; // outside the selection
-			const int b = p[0], g = p[1], r = p[2];
+			// the raw signal goes beyond 0 and 255, and so beyond the edges of the diamonds
+			const int b = e ? RAW_FULL(e[x * 4 + 0]) : p[0];
+			const int g = e ? RAW_FULL(e[x * 4 + 1]) : p[1];
+			const int r = e ? RAW_FULL(e[x * 4 + 2]) : p[2];
 
 			// upper diamond: rows 0..127, black at the bottom of it
 			int ux = 128 + (b - g) / 2;
@@ -162,14 +170,10 @@ static void dm_draw(uint8_t *dbuf, const struct cm_surface_data *surface_data)
 			int lx = 128 + (r - g) / 2;
 			int ly = 128 + (r + g) / 4;
 
-			if (ux > 255)
-				ux = 255;
-			if (lx > 255)
-				lx = 255;
-			if (uy < 0)
-				uy = 0;
-			if (ly > 255)
-				ly = 255;
+			ux = ux < 0 ? 0 : ux > 255 ? 255 : ux;
+			lx = lx < 0 ? 0 : lx > 255 ? 255 : lx;
+			uy = uy < 0 ? 0 : uy > 127 ? 127 : uy;
+			ly = ly < 128 ? 128 : ly > 255 ? 255 : ly;
 
 			inc_uint8(dbuf + uy * DM_SIZE + ux);
 			inc_uint8(dbuf + ly * DM_SIZE + lx);
@@ -192,22 +196,23 @@ static void dm_draw_color(uint8_t *dbuf, const struct cm_surface_data *surface_d
 	memset(dbuf, 0, DM_SIZE * DM_SIZE * 4);
 
 	const uint8_t *rgb = surface_data->rgb_data;
+	const uint8_t *ext = surface_data->ext_data;
 	for (uint32_t y = 0; y < surface_data->height; y++) {
 		const uint8_t *p = rgb + (size_t)surface_data->linesize * y;
+		const uint8_t *e = ext ? ext + (size_t)surface_data->ext_linesize * y : NULL;
 		for (uint32_t x = 0; x < surface_data->width; x++, p += 4) {
 			if (!p[3])
 				continue;
-			const int b = p[0], g = p[1], r = p[2];
+			// the raw signal goes beyond 0 and 255, and so beyond the edges of the diamonds
+			const int b = e ? RAW_FULL(e[x * 4 + 0]) : p[0];
+			const int g = e ? RAW_FULL(e[x * 4 + 1]) : p[1];
+			const int r = e ? RAW_FULL(e[x * 4 + 2]) : p[2];
 			int ux = 128 + (b - g) / 2, uy = 127 - (b + g) / 4;
 			int lx = 128 + (r - g) / 2, ly = 128 + (r + g) / 4;
-			if (ux > 255)
-				ux = 255;
-			if (lx > 255)
-				lx = 255;
-			if (uy < 0)
-				uy = 0;
-			if (ly > 255)
-				ly = 255;
+			ux = ux < 0 ? 0 : ux > 255 ? 255 : ux;
+			lx = lx < 0 ? 0 : lx > 255 ? 255 : lx;
+			uy = uy < 0 ? 0 : uy > 127 ? 127 : uy;
+			ly = ly < 128 ? 128 : ly > 255 ? 255 : ly;
 			add_color(dbuf + (uy * DM_SIZE + ux) * 4, p);
 			add_color(dbuf + (ly * DM_SIZE + lx) * 4, p);
 		}

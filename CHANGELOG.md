@@ -14,6 +14,11 @@
   drag the trace up or down to look at another part of the levels.
 - **Waveform, highest and lowest level:** two thin lines at the highest and lowest level in the picture, with their
   value (can be turned off).
+- **False color, zebra, histogram, line plot, Sat / Lum and the gamut diamond** use the raw signal too. False color
+  gets two more colors, *Sub-black* (cyan, below 0 %) and *Superwhite* (white, above 100 %), also in its key and its
+  table with percentages; zebra with a high threshold of 100 % stripes superwhite as well.
+- **QC timeline:** choose the lines (max, APL, min, the R, G, B averages); HDR in nits (CLL and FALL); with the raw
+  signal the scale runs from -7 % to 109 %; hover the timeline to read the time and values there.
 - **QC:** a new check, *Outside the legal range (raw signal, EBU R103)*: luma below -1 % or above 103 %, or R, G, B
   below -5 % or above 105 %, with the lowest and highest luma in the detail.
 

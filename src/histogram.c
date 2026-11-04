@@ -46,6 +46,8 @@ static const char *prof_draw_name = "draw";
 struct his_source
 {
 	struct cm_source cm;
+	volatile bool ext; // levels of the raw signal as legal codes (16 is 0 %, 235 is 100 %)
+	bool ext_prev;
 
 	gs_effect_t *effect;
 	gs_texture_t *tex_hi;
@@ -147,7 +149,7 @@ static void his_update(void *data, obs_data_t *settings)
 
 	src->components = (uint32_t)obs_data_get_int(settings, "components");
 	src->cm.flags = (src->components & COMP_RGB ? CM_FLAG_CONVERT_RGB : 0) |
-			(src->components & COMP_YUV ? CM_FLAG_CONVERT_YUV : 0);
+			(src->components & COMP_YUV ? CM_FLAG_CONVERT_YUV : 0) | CM_FLAG_EXT;
 
 	src->level_height = (int)obs_data_get_int(settings, "level_height");
 
@@ -407,7 +409,31 @@ static inline void his_draw_histogram(struct his_source *src, uint8_t *tex_buf, 
 	const bool calc_g = (src->components & 0x22) ? true : false;
 	const bool calc_r = (src->components & 0x44) ? true : false;
 
-	if (src->components & (COMP_HUE_FLAG | COMP_SAT_FLAG)) {
+	// the raw signal of a video source: R, G, B or luma as legal codes, beyond 0 % and 100 %
+	const bool ext = surface_data->ext_data && !(src->components & (COMP_HUE_FLAG | COMP_SAT_FLAG)) &&
+			 !(src->components & COMP_UV);
+	src->ext = ext;
+	if (ext) {
+		const bool rgb = (src->components & COMP_RGB) != 0;
+		for (uint32_t y = 0; y < height; y++) {
+			const uint8_t *e = surface_data->ext_data + surface_data->ext_linesize * y;
+			const uint8_t *v = video_data + surface_data->linesize * y;
+			for (uint32_t x = 0; x < width; x++, e += 4, v += 4) {
+				if (!v[3])
+					continue;
+				if (rgb) {
+					if (calc_r)
+						dbuf[e[2] * 4 + 0]++;
+					if (calc_g)
+						dbuf[e[1] * 4 + 1]++;
+					if (calc_b)
+						dbuf[e[0] * 4 + 2]++;
+				} else {
+					dbuf[e[3] * 4 + 1]++; // luma alone is in G
+				}
+			}
+		}
+	} else if (src->components & (COMP_HUE_FLAG | COMP_SAT_FLAG)) {
 		const bool hue = (src->components & COMP_HUE_FLAG) != 0;
 		for (uint32_t y = 0; y < height; y++) {
 			const uint8_t *v = video_data + surface_data->linesize * y;
@@ -544,8 +570,10 @@ static void create_graticule_vbuf(struct his_source *src)
 	if (has_graticule_vertical) {
 		const int n = src->graticule_vertical_lines;
 		for (int i = 0; i <= n; i++) {
-			gs_vertex2f(256.0f * i / n, 0.0f);
-			gs_vertex2f(256.0f * i / n, 1.0f);
+			// with the raw signal 0 % is at code 16 and 100 % at code 235
+			const float x = src->ext ? 256.0f * (16.0f + 219.0f * i / n) / 255.0f : 256.0f * i / n;
+			gs_vertex2f(x, 0.0f);
+			gs_vertex2f(x, 1.0f);
 		}
 	}
 
@@ -789,6 +817,10 @@ static void his_render(void *data, gs_effect_t *effect)
 		his_render_reference(src);
 	PROFILE_END(prof_draw_name);
 
+	if (src->ext != src->ext_prev) {
+		src->ext_prev = src->ext;
+		src->graticule_need_update = true;
+	}
 	if (src->graticule_need_update) {
 		create_graticule_vbuf(src);
 		src->graticule_need_update = false;

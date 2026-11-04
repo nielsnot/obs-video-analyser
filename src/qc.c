@@ -36,6 +36,11 @@ enum qc_display_e {
 struct qc_bucket
 {
 	float ymin, ymax, apl_sum, cll;
+	float rgb_sum[3]; // average R, G, B of each frame, summed
+	float fall_sum;   // HDR: frame average in nits, summed
+	// raw signal (levels may go below 0 and above 1)
+	float eymin, eymax, eapl_sum;
+	uint32_t n_ext;
 	uint32_t n;
 	uint32_t flags; // checks in violation during the stretch
 };
@@ -73,6 +78,8 @@ struct qc_frame
 	uint32_t width, height;
 	float min[4], max[4]; // R, G, B, Y; 0..1 of the signal
 	float apl;            // average luma
+	float avg[3];         // average R, G, B
+	float ext_apl;        // raw signal: average luma
 	float clip_share, crush_share, rgb_share, gamut_share;
 	float cll, fall;                       // HLG: brightest pixel and frame average, in nits (maxRGB)
 	int border[4];                         // black rows/columns: top, bottom, left, right (captured pixels)
@@ -124,10 +131,14 @@ struct qc_source
 
 	// timeline
 	struct qc_bucket hist[QC_HIST];
-	int hist_head;         // the bucket being filled
-	uint64_t bucket_start; // ns
-	double window;         // seconds shown
-	int display;           // qc_display_e
+	int hist_head;                       // the bucket being filled
+	uint64_t bucket_start;               // ns
+	double window;                       // seconds shown
+	int display;                         // qc_display_e
+	bool tl_max, tl_apl, tl_min, tl_rgb; // lines shown in the timeline
+	bool tl_nits;                        // HDR: the timeline in nits (CLL and FALL)
+	bool tl_ext;                         // raw signal: the timeline from -7 % to 109 %
+	volatile float hover_x, hover_y;     // the pointer over the scope, in source units; < 0 when away
 };
 
 static void qc_update(void *, obs_data_t *);
@@ -142,6 +153,7 @@ static const char *qc_get_name(void *unused)
 static void *qc_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct qc_source *src = bzalloc(sizeof(struct qc_source));
+	src->hover_x = src->hover_y = -1.0f;
 	pthread_mutex_init(&src->mutex, NULL);
 	for (int i = 0; i < 256; i++) {
 		src->lin_hlg[i] = hlg_to_scene(i / 255.0f);
@@ -181,6 +193,12 @@ static void qc_update(void *data, obs_data_t *settings)
 	src->border_px = (int)obs_data_get_int(settings, "qc_border_px");
 	src->lowpass = obs_data_get_bool(settings, "qc_lowpass");
 	src->display = (int)obs_data_get_int(settings, "qc_display");
+	src->tl_max = obs_data_get_bool(settings, "qc_tl_max");
+	src->tl_apl = obs_data_get_bool(settings, "qc_tl_apl");
+	src->tl_min = obs_data_get_bool(settings, "qc_tl_min");
+	src->tl_rgb = obs_data_get_bool(settings, "qc_tl_rgb");
+	src->tl_nits = obs_data_get_bool(settings, "qc_tl_nits");
+	src->tl_ext = obs_data_get_bool(settings, "qc_tl_ext");
 	const double window = (double)obs_data_get_int(settings, "qc_window");
 
 	pthread_mutex_lock(&src->mutex);
@@ -216,6 +234,12 @@ static void qc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "qc_border_px", 4);
 	obs_data_set_default_int(settings, "qc_display", QC_DISPLAY_BOTH);
 	obs_data_set_default_int(settings, "qc_window", 300);
+	obs_data_set_default_bool(settings, "qc_tl_max", true);
+	obs_data_set_default_bool(settings, "qc_tl_apl", true);
+	obs_data_set_default_bool(settings, "qc_tl_min", true);
+	obs_data_set_default_bool(settings, "qc_tl_rgb", false);
+	obs_data_set_default_bool(settings, "qc_tl_nits", false);
+	obs_data_set_default_bool(settings, "qc_tl_ext", true);
 }
 
 static bool qc_reset_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -245,6 +269,15 @@ static obs_properties_t *qc_get_properties(void *data)
 	obs_property_list_add_int(win, "15 min", 900);
 	obs_property_list_add_int(win, "1 h", 3600);
 	obs_property_list_add_int(win, "4 h", 14400);
+
+	obs_properties_t *tl = obs_properties_create();
+	obs_properties_add_bool(tl, "qc_tl_max", obs_module_text("QC.TL.Max"));
+	obs_properties_add_bool(tl, "qc_tl_apl", obs_module_text("QC.TL.APL"));
+	obs_properties_add_bool(tl, "qc_tl_min", obs_module_text("QC.TL.Min"));
+	obs_properties_add_bool(tl, "qc_tl_rgb", obs_module_text("QC.TL.RGB"));
+	obs_properties_add_bool(tl, "qc_tl_nits", obs_module_text("QC.TL.Nits"));
+	obs_properties_add_bool(tl, "qc_tl_ext", obs_module_text("QC.TL.Ext"));
+	obs_properties_add_group(props, "qc_tl", obs_module_text("QC.TL"), OBS_GROUP_NORMAL, tl);
 
 	obs_properties_t *checks = obs_properties_create();
 	for (int i = 0; i < QC_N_CHECKS; i++)
@@ -352,7 +385,7 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 	const uint8_t hi = (uint8_t)fminf(src->luma_hi * 255.0f, 255.0f);
 	const uint8_t lo = (uint8_t)fmaxf(src->luma_lo * 255.0f, 0.0f);
 	uint64_t n = 0, n_clip = 0, n_crush = 0, n_rgb = 0, n_gamut = 0;
-	double sum_y = 0.0, sum_nits = 0.0;
+	double sum_y = 0.0, sum_nits = 0.0, sum_c[3] = {0.0, 0.0, 0.0};
 	uint8_t mn[4] = {255, 255, 255, 255}, mx[4] = {0, 0, 0, 0};
 	float cll = 0.0f;
 	uint64_t hash = 1469598103934665603ull;
@@ -368,6 +401,9 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 			const uint8_t b = rgb[0], g = rgb[1], r = rgb[2], l = yuv[1];
 			n++;
 			sum_y += l;
+			sum_c[0] += r;
+			sum_c[1] += g;
+			sum_c[2] += b;
 			const uint8_t v[4] = {r, g, b, l};
 			for (int c = 0; c < 4; c++) {
 				if (v[c] < mn[c])
@@ -425,6 +461,8 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 		f->max[c] = mx[c] / 255.0f;
 	}
 	f->apl = (float)(sum_y / n / 255.0);
+	for (int c = 0; c < 3; c++)
+		f->avg[c] = (float)(sum_c[c] / n / 255.0);
 	f->clip_share = (float)n_clip / n;
 	f->crush_share = (float)n_crush / n;
 	f->rgb_share = (float)n_rgb / n;
@@ -436,6 +474,7 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 	// the raw signal of a video source: legal codes, 16 is 0 % and 235 is 100 %
 	if (sd->ext_data) {
 		uint64_t n_ext = 0, n_legal = 0;
+		double sum_ext = 0.0;
 		int ymin = 255, ymax = 0;
 		for (uint32_t y = 0; y < sd->height; y++) {
 			const uint8_t *e = sd->ext_data + (size_t)sd->ext_linesize * y;
@@ -444,6 +483,7 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 				if (!rgb[3])
 					continue;
 				n_ext++;
+				sum_ext += e[3];
 				if (e[3] < ymin)
 					ymin = e[3];
 				if (e[3] > ymax)
@@ -458,6 +498,7 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 			f->legal_share = (float)n_legal / n_ext;
 			f->ext_ymin = (ymin - 16) / 219.0f;
 			f->ext_ymax = (ymax - 16) / 219.0f;
+			f->ext_apl = (float)((sum_ext / n_ext - 16.0) / 219.0);
 		}
 	}
 }
@@ -672,6 +713,20 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 		}
 		b->apl_sum += f.apl;
 		b->cll = fmaxf(b->cll, f.cll);
+		b->fall_sum += f.fall;
+		for (int c = 0; c < 3; c++)
+			b->rgb_sum[c] += f.avg[c];
+		if (f.ext) {
+			if (!b->n_ext) {
+				b->eymin = f.ext_ymin;
+				b->eymax = f.ext_ymax;
+			} else {
+				b->eymin = fminf(b->eymin, f.ext_ymin);
+				b->eymax = fmaxf(b->eymax, f.ext_ymax);
+			}
+			b->eapl_sum += f.ext_apl;
+			b->n_ext++;
+		}
 		b->n++;
 		for (int i = 0; i < QC_N_CHECKS; i++)
 			if (src->active[i] && src->enabled[i])
@@ -735,7 +790,6 @@ static void polyline(const float *xs, const float *ys, const bool *valid, int n,
 static void render_timeline(struct qc_source *src, const struct text_scale *ts, const struct qc_bucket *hist, int head,
 			    double window, int colorspace, float top, float height)
 {
-	UNUSED_PARAMETER(src);
 	const float W = (float)QC_W;
 	const float px = 11.0f;
 	const float x0 = 40.0f * ts->ux, x1 = W - 8.0f * ts->ux;
@@ -752,18 +806,53 @@ static void render_timeline(struct qc_source *src, const struct text_scale *ts, 
 		snprintf(buf, sizeof(buf), "%s  %d min", obs_module_text("QC.Timeline"), minutes);
 	text_draw(ts, buf, 8.0f * ts->ux, top + 5.0f * ts->uy, px, COLOR_DIM, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 	const bool hdr = cm_cs_is_hdr(colorspace);
-	text_draw(ts, hdr ? "max  APL  min  CLL" : "max  APL  min", W - 8.0f * ts->ux, top + 5.0f * ts->uy, px,
-		  COLOR_DIM, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+	const bool nits = hdr && src->tl_nits;
+	// the raw signal anywhere in the timeline: the scale runs from -7 % to 109 %
+	bool ext = false;
+	for (int i = 0; i < QC_HIST && src->tl_ext && !nits; i++)
+		ext |= hist[i].n_ext > 0;
+	const float lo = ext ? -0.073f : 0.0f, hi = ext ? 1.091f : 1.0f;
+	const float nits_max = colorspace == CM_CS_2100_PQ ? 4000.0f : 1000.0f;
+	// which lines, in their colors
+	{
+		char legend[64] = "";
+		if (nits) {
+			snprintf(legend, sizeof(legend), "CLL  FALL  (nits)");
+		} else {
+			if (src->tl_max)
+				strncat(legend, "max  ", sizeof(legend) - strlen(legend) - 1);
+			if (src->tl_apl)
+				strncat(legend, "APL  ", sizeof(legend) - strlen(legend) - 1);
+			if (src->tl_min)
+				strncat(legend, "min  ", sizeof(legend) - strlen(legend) - 1);
+			if (src->tl_rgb)
+				strncat(legend, "R G B  ", sizeof(legend) - strlen(legend) - 1);
+			if (hdr)
+				strncat(legend, "CLL", sizeof(legend) - strlen(legend) - 1);
+			if (ext)
+				strncat(legend, "  RAW", sizeof(legend) - strlen(legend) - 1);
+		}
+		text_draw(ts, legend, W - 8.0f * ts->ux, top + 5.0f * ts->uy, px, COLOR_DIM, TEXT_ALIGN_RIGHT,
+			  TEXT_VALIGN_TOP);
+	}
+#define TL_Y(v) (y1 - (y1 - y0) * (((v) - lo) / (hi - lo)))
 
 	fill_rect(x0, y0, x1, y1, 0xFF17171B);
 	for (int i = 0; i <= 4; i++) {
-		const float y = y1 - (y1 - y0) * i / 4.0f;
-		fill_rect(x0, y, x1, y + 1.0f * ts->uy, 0x30FFFFFF);
-		snprintf(buf, sizeof(buf), "%d%%", i * 25);
+		const float v = i / 4.0f;
+		const float y = nits ? y1 - (y1 - y0) * v : TL_Y(v);
+		// with the raw signal, 0 % and 100 % stand out
+		const uint32_t c = ext && (i == 0 || i == 4) ? 0x70FFD060 : 0x30FFFFFF;
+		fill_rect(x0, y, x1, y + 1.0f * ts->uy, c);
+		if (nits)
+			snprintf(buf, sizeof(buf), "%d", (int)(nits_max * v));
+		else
+			snprintf(buf, sizeof(buf), "%d%%", i * 25);
 		text_draw(ts, buf, x0 - 4.0f * ts->ux, y, px - 1.0f, COLOR_DIM, TEXT_ALIGN_RIGHT, TEXT_VALIGN_MIDDLE);
 	}
 
-	static float xs[QC_HIST], ymax[QC_HIST], ymin[QC_HIST], apl[QC_HIST], cll[QC_HIST];
+	static float xs[QC_HIST], ymax[QC_HIST], ymin[QC_HIST], apl[QC_HIST], cll[QC_HIST], fall[QC_HIST];
+	static float ys_rgb[3][QC_HIST];
 	static bool valid[QC_HIST];
 	const float bw = (x1 - x0) / QC_HIST;
 	int band_start = -1;
@@ -772,10 +861,15 @@ static void render_timeline(struct qc_source *src, const struct text_scale *ts, 
 		xs[i] = x0 + bw * (i + 0.5f);
 		valid[i] = b->n > 0;
 		if (valid[i]) {
-			ymax[i] = y1 - (y1 - y0) * b->ymax;
-			ymin[i] = y1 - (y1 - y0) * b->ymin;
-			apl[i] = y1 - (y1 - y0) * (b->apl_sum / b->n);
-			cll[i] = y1 - (y1 - y0) * fminf(b->cll / 1000.0f, 1.0f);
+			const bool e = ext && b->n_ext > 0;
+			ymax[i] = TL_Y(e ? b->eymax : b->ymax);
+			ymin[i] = TL_Y(e ? b->eymin : b->ymin);
+			apl[i] = TL_Y(e ? b->eapl_sum / b->n_ext : b->apl_sum / b->n);
+			for (int c = 0; c < 3; c++)
+				ys_rgb[c][i] = TL_Y(b->rgb_sum[c] / b->n);
+			cll[i] = nits ? y1 - (y1 - y0) * fminf(b->cll / nits_max, 1.0f)
+				      : TL_Y(lo + (hi - lo) * fminf(b->cll / 1000.0f, 1.0f));
+			fall[i] = y1 - (y1 - y0) * fminf(b->fall_sum / b->n / nits_max, 1.0f);
 		}
 		// red bands where a check failed
 		const bool bad = b->flags != 0;
@@ -787,11 +881,58 @@ static void render_timeline(struct qc_source *src, const struct text_scale *ts, 
 			band_start = -1;
 		}
 	}
-	polyline(xs, ymin, valid, QC_HIST, 0xFF9A9AA2);
-	polyline(xs, apl, valid, QC_HIST, COLOR_OK);
-	polyline(xs, ymax, valid, QC_HIST, 0xFFF0F0F0);
-	if (hdr)
+	if (nits) {
+		polyline(xs, fall, valid, QC_HIST, COLOR_OK);
 		polyline(xs, cll, valid, QC_HIST, 0xFFFF9F40);
+	} else {
+		if (src->tl_rgb) {
+			polyline(xs, ys_rgb[0], valid, QC_HIST, 0xC0FF6060);
+			polyline(xs, ys_rgb[1], valid, QC_HIST, 0xC060E060);
+			polyline(xs, ys_rgb[2], valid, QC_HIST, 0xC06090FF);
+		}
+		if (src->tl_min)
+			polyline(xs, ymin, valid, QC_HIST, 0xFF9A9AA2);
+		if (src->tl_apl)
+			polyline(xs, apl, valid, QC_HIST, COLOR_OK);
+		if (src->tl_max)
+			polyline(xs, ymax, valid, QC_HIST, 0xFFF0F0F0);
+		if (hdr)
+			polyline(xs, cll, valid, QC_HIST, 0xFFFF9F40);
+	}
+
+	// the pointer over the timeline: the time and values there
+	const float hx = src->hover_x, hy = src->hover_y;
+	if (hx >= x0 && hx <= x1 && hy >= top && hy <= top + height) {
+		const int i = (int)((hx - x0) / bw);
+		const struct qc_bucket *b = hist + (head + 1 + (i < 0 ? 0 : i >= QC_HIST ? QC_HIST - 1 : i)) % QC_HIST;
+		fill_rect(hx, y0, hx + 1.0f * ts->ux, y1, 0xA0FFFFFF);
+		const double ago = window * (QC_HIST - 1 - i) / QC_HIST;
+		char t[24];
+		if (ago >= 3600.0)
+			snprintf(t, sizeof(t), "-%d:%02d:%02d", (int)(ago / 3600), (int)(ago / 60) % 60, (int)ago % 60);
+		else
+			snprintf(t, sizeof(t), "-%d:%02d", (int)(ago / 60), (int)ago % 60);
+		char v[96];
+		if (!b->n) {
+			snprintf(v, sizeof(v), "%s", t);
+		} else if (nits) {
+			snprintf(v, sizeof(v), "%s  CLL %.0f  FALL %.0f nits", t, b->cll, b->fall_sum / b->n);
+		} else {
+			const bool e = ext && b->n_ext > 0;
+			snprintf(v, sizeof(v), "%s  max %.0f%%  APL %.0f%%  min %.0f%%", t,
+				 100.0f * (e ? b->eymax : b->ymax),
+				 100.0f * (e ? b->eapl_sum / b->n_ext : b->apl_sum / b->n),
+				 100.0f * (e ? b->eymin : b->ymin));
+		}
+		const float tw = text_width(ts, v, px);
+		float lx = hx + 6.0f * ts->ux;
+		if (lx + tw + 8.0f * ts->ux > x1)
+			lx = hx - 6.0f * ts->ux - tw - 8.0f * ts->ux;
+		fill_rect(lx, y0 + 2.0f * ts->uy, lx + tw + 8.0f * ts->ux, y0 + (px + 8.0f) * ts->uy, 0xE0101013);
+		text_draw(ts, v, lx + 4.0f * ts->ux, y0 + 6.0f * ts->uy, px, COLOR_TEXT, TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_TOP);
+	}
+#undef TL_Y
 
 	// time axis
 	for (int i = 0; i <= 4; i++) {
@@ -988,10 +1129,18 @@ static void qc_render(void *data, gs_effect_t *effect)
 	}
 }
 
+static void qc_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
+{
+	struct qc_source *src = data;
+	src->hover_x = mouse_leave ? -1.0f : (float)event->x;
+	src->hover_y = mouse_leave ? -1.0f : (float)event->y;
+}
+
 const struct obs_source_info colormonitor_qc = {
 	.id = ID_PREFIX "qc_source",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION,
+	.mouse_move = qc_mouse_move,
 	.get_name = qc_get_name,
 	.create = qc_create,
 	.destroy = qc_destroy,

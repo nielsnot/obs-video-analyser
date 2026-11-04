@@ -29,6 +29,7 @@ struct lp_source
 	uint8_t values[4][LP_MAX_SAMPLES]; // R, G, B, Y
 	uint8_t valid[LP_MAX_SAMPLES];
 	uint32_t n;
+	volatile bool ext; // the values are legal codes of the raw signal (16 is 0 %, 235 is 100 %)
 
 	float line; // 0..1 from the top
 	int components;
@@ -48,7 +49,7 @@ static void *lp_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct lp_source *src = bzalloc(sizeof(struct lp_source));
 	pthread_mutex_init(&src->mutex, NULL);
-	src->cm.flags = CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV;
+	src->cm.flags = CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV | CM_FLAG_EXT;
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, lp_surface_cb, src);
 	lp_update(src, settings);
@@ -119,15 +120,26 @@ static void lp_surface_cb(void *data, struct cm_surface_data *sd)
 	const uint8_t *yuv = sd->yuv_data + (size_t)sd->linesize * row;
 	const uint32_t n = sd->width < LP_MAX_SAMPLES ? sd->width : LP_MAX_SAMPLES;
 
+	const uint8_t *ext = sd->ext_data ? sd->ext_data + (size_t)sd->ext_linesize * row : NULL;
+
 	pthread_mutex_lock(&src->mutex);
 	for (uint32_t x = 0; x < n; x++) {
-		src->values[0][x] = rgb[x * 4 + 2];
-		src->values[1][x] = rgb[x * 4 + 1];
-		src->values[2][x] = rgb[x * 4 + 0];
-		src->values[3][x] = yuv[x * 4 + 1];
+		if (ext) {
+			// the raw signal: B, G, R, Y as legal codes
+			src->values[0][x] = ext[x * 4 + 2];
+			src->values[1][x] = ext[x * 4 + 1];
+			src->values[2][x] = ext[x * 4 + 0];
+			src->values[3][x] = ext[x * 4 + 3];
+		} else {
+			src->values[0][x] = rgb[x * 4 + 2];
+			src->values[1][x] = rgb[x * 4 + 1];
+			src->values[2][x] = rgb[x * 4 + 0];
+			src->values[3][x] = yuv[x * 4 + 1];
+		}
 		src->valid[x] = rgb[x * 4 + 3] ? 1 : 0;
 	}
 	src->n = n;
+	src->ext = ext != NULL;
 	pthread_mutex_unlock(&src->mutex);
 }
 
@@ -194,10 +206,13 @@ static void lp_render(void *data, gs_effect_t *effect)
 	if (src->graticule) {
 		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x60FFBF00);
+		// with the raw signal the height runs from -7 % to 109 % (legal codes 0..255)
+		const bool ext = src->ext;
+#define LP_Y(level) ((float)LP_H * (1.0f - (ext ? (16.0f + 219.0f * (level)) / 255.0f : (level))))
 		while (gs_effect_loop(solid, "Solid")) {
 			gs_render_start(false);
 			for (int i = 0; i <= 4; i++) {
-				const float y = LP_H * i / 4.0f;
+				const float y = LP_Y(1.0f - i / 4.0f);
 				gs_vertex2f(0.0f, y);
 				gs_vertex2f((float)LP_W, y);
 			}
@@ -205,8 +220,15 @@ static void lp_render(void *data, gs_effect_t *effect)
 		}
 		const struct text_scale ts = text_scale_from_viewport((float)LP_W, (float)LP_H);
 		const float m = 3.0f * ts.ux;
-		text_draw(&ts, "100%", m, 0.0f, 10.0f, 0xC0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
-		text_draw(&ts, "50%", m, LP_H * 0.5f, 10.0f, 0xC0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+		text_draw(&ts, "100%", m, LP_Y(1.0f), 10.0f, 0xC0FFD060, TEXT_ALIGN_LEFT,
+			  ext ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
+		text_draw(&ts, "50%", m, LP_Y(0.5f), 10.0f, 0xC0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+		if (ext) {
+			text_draw(&ts, "0%", m, LP_Y(0.0f), 10.0f, 0xC0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+			text_draw(&ts, "RAW", LP_W - m, (float)LP_H, 10.0f, 0xC0F0D060, TEXT_ALIGN_RIGHT,
+				  TEXT_VALIGN_BOTTOM);
+		}
+#undef LP_Y
 		char buf[32];
 		snprintf(buf, sizeof(buf), "line %.1f%%", src->line * 100.0f);
 		text_draw(&ts, buf, LP_W - m, 0.0f, 10.0f, 0xC0FFFFFF, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);

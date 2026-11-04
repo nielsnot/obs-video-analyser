@@ -142,6 +142,25 @@ float4 PSDrawFalseColor2020(VertInOut vert_in) : TARGET
 		return float4(0.9, 0.2, 0.0, 1.0); // red
 }
 
+// The raw signal of a video source: the image holds the legal luma code (16 is 0 %, 235 is 100 %) and the
+// selection in alpha; the table holds a color per code, with sub-black and superwhite beyond the legal range.
+float4 PSDrawFalseColorRaw(VertInOut vert_in) : TARGET
+{
+	float4 rgba = image.Sample(lut_sampler, vert_in.uv);
+	if (mask_outside > 0.5 && rgba.a < 0.5)
+		return outside_selection(rgba);
+	return lut.Sample(lut_sampler, float2((rgba.r * 255.0 + 0.5) / 256.0, 0.5));
+}
+
+technique DrawFalseColorRaw
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawFalseColorRaw(vert_in);
+	}
+}
+
 technique DrawFalseColor601
 {
 	pass

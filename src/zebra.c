@@ -33,6 +33,9 @@ enum show_key_e {
  * has y_max above 1 and holds 100 % and over. A color of 0 shows the luma as grey. */
 #define FC_MAX_BANDS 12
 #define FC_GREY 0x00000000
+// raw signal of a video source: two more bands beyond the legal range
+#define FC_SUBBLACK 0xFF00E5FF   // below 0 %: cyan
+#define FC_SUPERWHITE 0xFFFFFFFF // above 100 %: white
 
 struct fc_band
 {
@@ -121,6 +124,9 @@ struct zb_source
 	int n_bands;
 	gs_texture_t *scheme_lut; // 256x1 color per luma, built from the bands
 	volatile bool scheme_dirty;
+	gs_texture_t *scheme_lut_raw; // 256x1 color per legal code (16 is 0 %, 235 is 100 %)
+	gs_texture_t *key_tex_raw;
+	bool raw_dirty;
 };
 
 struct zbs_source
@@ -129,10 +135,25 @@ struct zbs_source
 	struct zb_source zb;
 
 	// share of the analyzed pixels in each false color band, for the table
-	float coverage[2][FC_MAX_BANDS];
+	float coverage[2][FC_MAX_BANDS + 2]; // with the raw signal: then sub-black and superwhite
 	volatile int w_coverage;
 	bool has_coverage;
+
+	// the raw signal of a video source, as legal codes (B = G = R = code, A = selection)
+	pthread_mutex_t ext_mutex;
+	uint8_t *ext_img;
+	uint32_t ext_w, ext_h;
+	bool ext_new;
+	volatile uint64_t ext_seen; // ns
+	volatile bool cov_raw;      // the coverage was measured on the raw signal
+	gs_texture_t *ext_tex;
+	uint32_t ext_tex_w, ext_tex_h;
 };
+
+static inline bool fcs_raw_active(const struct zbs_source *src)
+{
+	return !src->zb.falsecolor_lut.texture && os_gettime_ns() - src->ext_seen < 500000000ULL;
+}
 
 static inline bool zb_has_table(const struct zb_source *zb)
 {
@@ -147,9 +168,9 @@ static void fcs_surface_cb(void *data, struct cm_surface_data *surface_data)
 	if (!yuv || !surface_data->width)
 		return;
 
-	// Luma code values 0..255 to band index, built once per call.
-	const int n_bands = src->zb.n_bands;
-	if (n_bands <= 0)
+	// Luma code values 0..255 to band index, built once per call. Zebra has no bands: it only keeps the raw signal.
+	const int n_bands = src->zb.is_falsecolor ? src->zb.n_bands : 0;
+	if (n_bands <= 0 && !(surface_data->ext_data && !src->zb.is_falsecolor))
 		return;
 	uint8_t band_of[256];
 	for (int v = 0, b = 0; v < 256; v++) {
@@ -159,8 +180,54 @@ static void fcs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		band_of[v] = (uint8_t)b;
 	}
 
-	uint32_t counts[FC_MAX_BANDS] = {0};
+	uint32_t counts[FC_MAX_BANDS + 2] = {0};
 	uint32_t total = 0;
+	const uint8_t *ext = surface_data->ext_data;
+	if (ext) {
+		// the raw signal: keep it for the picture, and count the two bands beyond the legal range
+		const uint32_t w = surface_data->width, h = surface_data->height;
+		pthread_mutex_lock(&src->ext_mutex);
+		if (src->ext_w != w || src->ext_h != h || !src->ext_img) {
+			bfree(src->ext_img);
+			src->ext_img = bmalloc((size_t)w * h * 4);
+			src->ext_w = w;
+			src->ext_h = h;
+		}
+		for (uint32_t y = 0; y < h; y++) {
+			const uint8_t *e = ext + (size_t)surface_data->ext_linesize * y;
+			const uint8_t *p = yuv + (size_t)surface_data->linesize * y;
+			uint8_t *o = src->ext_img + (size_t)w * 4 * y;
+			for (uint32_t x = 0; x < w; x++, e += 4, p += 4, o += 4) {
+				o[0] = o[1] = o[2] = e[3];
+				o[3] = p[3] ? 255 : 0;
+				if (!p[3] || n_bands <= 0)
+					continue;
+				const float level = (e[3] - 16) / 219.0f;
+				if (level < 0.0f)
+					counts[n_bands]++;
+				else if (e[3] > 235)
+					counts[n_bands + 1]++;
+				else {
+					int b = 0;
+					while (b < n_bands - 1 && level >= src->zb.bands[b].y_max)
+						b++;
+					counts[b]++;
+				}
+				total++;
+			}
+		}
+		src->ext_new = true;
+		pthread_mutex_unlock(&src->ext_mutex);
+		src->ext_seen = os_gettime_ns();
+		float *out = src->coverage[src->w_coverage];
+		for (int b = 0; b < n_bands + 2; b++)
+			out[b] = total ? (float)counts[b] / (float)total : 0.0f;
+		src->cov_raw = true;
+		src->w_coverage ^= 1;
+		src->has_coverage = true;
+		return;
+	}
+	src->cov_raw = false;
 	for (uint32_t y = 0; y < surface_data->height; y++) {
 		const uint8_t *p = yuv + (size_t)surface_data->linesize * y;
 		for (uint32_t x = 0; x < surface_data->width; x++, p += 4) {
@@ -210,9 +277,11 @@ static void zb_init(struct zb_source *src)
 static void *zbs_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct zbs_source *src = bzalloc(sizeof(struct zbs_source));
+	pthread_mutex_init(&src->ext_mutex, NULL);
 
 	src->cm.flags = CM_FLAG_RAW_TEXTURE;
 	cm_create(&src->cm, settings, source);
+	cm_request(&src->cm, fcs_surface_cb, src); // the raw signal of a video source
 	zb_init(&src->zb);
 
 	zbs_update(src, settings);
@@ -235,6 +304,7 @@ static void *zbf_create(obs_data_t *settings, obs_source_t *source)
 static void *fcs_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct zbs_source *src = bzalloc(sizeof(struct zbs_source));
+	pthread_mutex_init(&src->ext_mutex, NULL);
 	src->zb.is_falsecolor = true;
 
 	src->cm.flags = CM_FLAG_RAW_TEXTURE;
@@ -279,11 +349,11 @@ static void zb_destroy(struct zb_source *src)
 		obs_leave_graphics();
 	}
 
-	if (src->scheme_lut) {
-		obs_enter_graphics();
-		gs_texture_destroy(src->scheme_lut);
-		obs_leave_graphics();
-	}
+	obs_enter_graphics();
+	gs_texture_destroy(src->scheme_lut);
+	gs_texture_destroy(src->scheme_lut_raw);
+	gs_texture_destroy(src->key_tex_raw);
+	obs_leave_graphics();
 
 	if (src->is_falsecolor) {
 		falsecolor_lut_unload(src);
@@ -297,6 +367,11 @@ static void zbs_destroy(void *data)
 
 	cm_destroy(&src->cm);
 	zb_destroy(&src->zb);
+	obs_enter_graphics();
+	gs_texture_destroy(src->ext_tex);
+	obs_leave_graphics();
+	pthread_mutex_destroy(&src->ext_mutex);
+	bfree(src->ext_img);
 	bfree(src);
 }
 
@@ -334,6 +409,7 @@ static void fc_set_bands(struct zb_source *src, const struct fc_preset_band *pre
 	memcpy(src->bands, bands, sizeof(bands));
 	src->n_bands = (int)n;
 	src->scheme_dirty = true;
+	src->raw_dirty = true;
 }
 
 /* OBS stores colors as 0xAABBGGRR; the bands use 0xAARRGGBB. */
@@ -395,6 +471,7 @@ static void fc_load_scheme(struct zb_source *src, obs_data_t *settings)
 	memcpy(src->bands, bands, sizeof(bands));
 	src->n_bands = n;
 	src->scheme_dirty = true;
+	src->raw_dirty = true;
 }
 
 /* Builds the 256-entry color table the false color shader samples by luma. Graphics thread. */
@@ -425,6 +502,51 @@ static void fc_update_scheme_lut(struct zb_source *src)
 		src->scheme_lut = gs_texture_create(256, 1, GS_BGRA, 1, &data, GS_DYNAMIC);
 	else
 		gs_texture_set_image(src->scheme_lut, buf, 256 * 4, false);
+}
+
+/* The color table for the raw signal, by legal code: sub-black below 16, superwhite above 235. */
+static void fc_update_scheme_lut_raw(struct zb_source *src)
+{
+	if (!src->raw_dirty && src->scheme_lut_raw)
+		return;
+	src->raw_dirty = false;
+	uint8_t buf[256 * 4];
+	for (int i = 0; i < 256; i++) {
+		const float level = (i - 16) / 219.0f;
+		uint32_t c;
+		if (i < 16) {
+			c = FC_SUBBLACK;
+		} else if (i > 235) {
+			c = FC_SUPERWHITE;
+		} else {
+			int b = 0;
+			while (b < src->n_bands - 1 && level >= src->bands[b].y_max)
+				b++;
+			c = src->n_bands ? src->bands[b].color : FC_GREY;
+		}
+		uint8_t *t = buf + i * 4;
+		if (c == FC_GREY) {
+			const float g = fminf(fmaxf(level, 0.0f), 1.0f) * 255.0f;
+			t[0] = t[1] = t[2] = (uint8_t)g;
+		} else {
+			t[0] = c & 0xFF;
+			t[1] = (c >> 8) & 0xFF;
+			t[2] = (c >> 16) & 0xFF;
+		}
+		t[3] = 0xFF;
+	}
+	const uint8_t *data = buf;
+	if (!src->scheme_lut_raw)
+		src->scheme_lut_raw = gs_texture_create(256, 1, GS_BGRA, 1, &data, GS_DYNAMIC);
+	else
+		gs_texture_set_image(src->scheme_lut_raw, buf, 256 * 4, false);
+	if (!src->key_tex_raw) {
+		uint8_t k[256 * 4];
+		for (int i = 0; i < 256; i++)
+			k[i * 4] = k[i * 4 + 1] = k[i * 4 + 2] = (uint8_t)i, k[i * 4 + 3] = 255;
+		const uint8_t *kd = k;
+		src->key_tex_raw = gs_texture_create(256, 1, GS_BGRA, 1, &kd, 0);
+	}
 }
 
 static void zb_update(struct zb_source *src, obs_data_t *settings)
@@ -461,7 +583,8 @@ static void zbs_update(void *data, obs_data_t *settings)
 	zb_update(&src->zb, settings);
 
 	// The table's percentages need luma on the CPU.
-	src->cm.flags = CM_FLAG_RAW_TEXTURE | (zb_has_table(&src->zb) ? CM_FLAG_CONVERT_YUV : 0);
+	// False color also takes the raw signal of a video source, which needs the captured luma on the CPU too.
+	src->cm.flags = CM_FLAG_RAW_TEXTURE | CM_FLAG_CONVERT_YUV | CM_FLAG_EXT;
 }
 
 static void zbf_update(void *data, obs_data_t *settings)
@@ -696,6 +819,15 @@ static const char *draw_name(int colorspace, bool is_falsecolor)
 		return "DrawZebra709";
 }
 
+static void set_effect_params_raw(struct zb_source *src, bool mask_outside)
+{
+	gs_effect_t *e = src->effect;
+	fc_update_scheme_lut_raw(src);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "mask_outside"), mask_outside ? 1.0f : 0.0f);
+	gs_effect_set_bool(gs_effect_get_param_by_name(e, "use_lut"), true);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "lut"), src->scheme_lut_raw);
+}
+
 static void set_effect_params(struct zb_source *src, bool mask_outside)
 {
 	gs_effect_t *e = src->effect;
@@ -743,7 +875,7 @@ static void zb_create_key_tex(struct zb_source *src)
 	}
 }
 
-static void zb_render_key(struct zb_source *src, const char *draw, uint32_t width, uint32_t height)
+static void zb_render_key(struct zb_source *src, const char *draw, uint32_t width, uint32_t height, bool raw)
 {
 	struct key_def_s
 	{
@@ -860,8 +992,14 @@ static void zb_render_key(struct zb_source *src, const char *draw, uint32_t widt
 	effect = src->effect;
 	if (!effect)
 		return;
-	gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), src->key_tex);
-	set_effect_params(src, false);
+	if (raw) {
+		set_effect_params_raw(src, false);
+		draw = "DrawFalseColorRaw";
+	} else {
+		set_effect_params(src, false);
+	}
+	gs_texture_t *key = raw ? src->key_tex_raw : src->key_tex;
+	gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), key);
 
 	gs_matrix_push();
 	struct matrix4 tran;
@@ -877,7 +1015,7 @@ static void zb_render_key(struct zb_source *src, const char *draw, uint32_t widt
 	gs_matrix_mul(&tran);
 
 	while (gs_effect_loop(effect, draw)) {
-		gs_draw_sprite(src->key_tex, 0, 0, 0);
+		gs_draw_sprite(key, 0, 0, 0);
 	}
 
 	gs_matrix_pop();
@@ -895,13 +1033,13 @@ static void zb_render_key(struct zb_source *src, const char *draw, uint32_t widt
 		int img_cx, img_cy;
 		if (def->is_vertical) {
 			x = width * def->x0;
-			y = height * (def->yk + def->cyk * 256 * i / 10);
+			y = height * (def->yk + def->cyk * 256 * (raw ? (16.0f + 21.9f * i) / 255.0f : i / 10.0f));
 			w = width * (def->xk - def->x0);
 			h = height * fabsf(def->cyk * 256) / 10;
 			img_cx = src->key_label_img.cx * 55; // cx
 			img_cy = src->key_label_img.cy * 2;  // cy * 2 / 55
 		} else {
-			x = width * (def->xk + def->cxk * 256 * i / 10);
+			x = width * (def->xk + def->cxk * 256 * (raw ? (16.0f + 21.9f * i) / 255.0f : i / 10.0f));
 			y = height * def->yk;
 			w = width * def->cxk * 256 / 11;
 			h = height * (def->y1 - def->yk);
@@ -948,21 +1086,49 @@ static void fill_rect(float x0, float y0, float x1, float y1, uint32_t color)
 
 /* Table beside the picture: one row per band with its color, luma range, meaning and,
  * when known, the share of the picture in that band. Drawn at x0..x0+tw over the height. */
-static void fc_band_range(const struct zb_source *src, int b, char *buf, size_t size)
+static void fc_band_range(const struct fc_band *bands, int b, char *buf, size_t size)
 {
-	const int lo = b == 0 ? 0 : (int)lroundf(src->bands[b - 1].y_max * 100.0f);
-	if (src->bands[b].y_max > 1.0f)
+	const int lo = b == 0 ? 0 : (int)lroundf(bands[b - 1].y_max * 100.0f);
+	if (bands[b].y_max < 0.0f) {
+		snprintf(buf, size, "<0%%");
+		return;
+	}
+	if (bands[b].y_max > 1.5f && lo >= 100) {
+		snprintf(buf, size, ">100%%");
+		return;
+	}
+	if (bands[b].y_max > 1.0f)
 		snprintf(buf, size, lo >= 100 ? ">100%%" : "%d%%+", lo);
 	else
-		snprintf(buf, size, "%d-%d%%", lo, (int)lroundf(src->bands[b].y_max * 100.0f));
+		snprintf(buf, size, "%d-%d%%", lo, (int)lroundf(bands[b].y_max * 100.0f));
 }
 
 static void zb_render_table(const struct zb_source *src, float x0, float tw, float height, float total_width,
-			    const float *coverage)
+			    const float *cov_in, bool raw)
 {
-	const int n = src->n_bands;
-	if (n <= 0)
+	// with the raw signal: sub-black below the first band and superwhite above the last
+	struct fc_band bands[FC_MAX_BANDS + 2];
+	float cov[FC_MAX_BANDS + 2];
+	const float *coverage = cov_in ? cov : NULL;
+	int n = 0;
+	if (src->n_bands <= 0)
 		return;
+	if (raw) {
+		bands[n] = (struct fc_band){-1.0f, FC_SUBBLACK, ""};
+		snprintf(bands[n].label, sizeof(bands[n].label), "%s", obs_module_text("FC.Band.SubBlack"));
+		cov[n++] = cov_in ? cov_in[src->n_bands] : 0.0f;
+	}
+	for (int b = 0; b < src->n_bands; b++) {
+		bands[n] = src->bands[b];
+		if (raw && bands[n].y_max > 1.0f)
+			bands[n].y_max = 1.0f;
+		cov[n++] = cov_in ? cov_in[b] : 0.0f;
+	}
+	if (raw) {
+		bands[n] = (struct fc_band){2.0f, FC_SUPERWHITE, ""};
+		snprintf(bands[n].label, sizeof(bands[n].label), "%s", obs_module_text("FC.Band.SuperWhite"));
+		cov[n++] = cov_in ? cov_in[src->n_bands + 1] : 0.0f;
+	}
 	const struct text_scale ts = text_scale_from_viewport(total_width, height);
 	const float row_h = height / n;
 	const float row_px = row_h / ts.uy;
@@ -990,20 +1156,25 @@ static void zb_render_table(const struct zb_source *src, float x0, float tw, flo
 
 		if (present)
 			fill_rect(x0, y_top, x0 + tw, y_top + row_h, 0xFF1E1E1E);
-		if (src->bands[b].color == FC_GREY) {
+		if (bands[b].color == FC_GREY) {
 			// a band shown as grey: half dark, half light
 			const float xm = x_sw + sw * 0.5f;
 			fill_rect(x_sw, y_top + pad_y, xm, y_top + row_h - pad_y, 0xFF404040);
 			fill_rect(xm, y_top + pad_y, x_sw + sw, y_top + row_h - pad_y, 0xFFB0B0B0);
 		} else {
-			fill_rect(x_sw, y_top + pad_y, x_sw + sw, y_top + row_h - pad_y, src->bands[b].color);
+			fill_rect(x_sw, y_top + pad_y, x_sw + sw, y_top + row_h - pad_y, bands[b].color);
 		}
 
 		const uint32_t text_color = !coverage || present ? 0xFFE6E6E6 : 0xFF707070;
 		char range[24];
-		fc_band_range(src, b, range, sizeof(range));
+		if (raw && b == 0)
+			snprintf(range, sizeof(range), "<0%%");
+		else if (raw && b == 1)
+			snprintf(range, sizeof(range), "0-%d%%", (int)lroundf(bands[1].y_max * 100.0f));
+		else
+			fc_band_range(bands, b, range, sizeof(range));
 		text_draw(&ts, range, x_range, y_mid, font_px, text_color, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
-		text_draw(&ts, src->bands[b].label, x_label, y_mid, font_px, text_color, TEXT_ALIGN_LEFT,
+		text_draw(&ts, bands[b].label, x_label, y_mid, font_px, text_color, TEXT_ALIGN_LEFT,
 			  TEXT_VALIGN_MIDDLE);
 		if (coverage) {
 			char pct[16];
@@ -1036,18 +1207,56 @@ static void zbs_render(void *data, gs_effect_t *effect)
 		uint32_t cx = cm_bypass_get_width(&src->cm);
 		uint32_t cy = cm_bypass_get_height(&src->cm);
 
-		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
-		set_effect_params(&src->zb, true);
+		// the raw signal of a video source, when it matches the captured picture
+		bool raw = false;
+		if (fcs_raw_active(src)) {
+			pthread_mutex_lock(&src->ext_mutex);
+			if (src->ext_img && src->ext_w == cx && src->ext_h == cy) {
+				if (src->ext_new || !src->ext_tex) {
+					if (src->ext_tex && (src->ext_tex_w != cx || src->ext_tex_h != cy)) {
+						gs_texture_destroy(src->ext_tex);
+						src->ext_tex = NULL;
+					}
+					if (!src->ext_tex) {
+						const uint8_t *d = src->ext_img;
+						src->ext_tex = gs_texture_create(cx, cy, GS_BGRA, 1, &d, GS_DYNAMIC);
+						src->ext_tex_w = cx;
+						src->ext_tex_h = cy;
+					} else {
+						gs_texture_set_image(src->ext_tex, src->ext_img, cx * 4, false);
+					}
+					src->ext_new = false;
+				}
+				raw = src->ext_tex != NULL;
+			}
+			pthread_mutex_unlock(&src->ext_mutex);
+		}
 		const char *draw = draw_name(cm_get_colorspace(&src->cm), src->zb.is_falsecolor);
-		while (gs_effect_loop(e, draw))
-			gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
+		if (raw && !src->zb.is_falsecolor) {
+			// zebra: the picture as it is, the stripes from the raw luma
+			gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
+			gs_effect_set_texture(gs_effect_get_param_by_name(e, "raw"), src->ext_tex);
+			set_effect_params(&src->zb, true);
+			while (gs_effect_loop(e, "DrawZebraRaw"))
+				gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
+		} else if (raw) {
+			gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->ext_tex);
+			set_effect_params_raw(&src->zb, true);
+			while (gs_effect_loop(e, "DrawFalseColorRaw"))
+				gs_draw_sprite_subregion(src->ext_tex, 0, 0, 0, cx, cy);
+		} else {
+			gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), tex);
+			set_effect_params(&src->zb, true);
+			while (gs_effect_loop(e, draw))
+				gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
+		}
 
-		zb_render_key(&src->zb, draw, cx, cy);
+		zb_render_key(&src->zb, draw, cx, cy, raw && src->zb.is_falsecolor);
 
 		if (zb_has_table(&src->zb)) {
 			const float tw = cy * 3.0f / 4.0f;
 			const float *cov = src->has_coverage ? src->coverage[src->w_coverage ^ 1] : NULL;
-			zb_render_table(&src->zb, (float)cx, tw, (float)cy, cx + tw, cov);
+			zb_render_table(&src->zb, (float)cx, tw, (float)cy, cx + tw, cov, raw && src->cov_raw);
 		}
 	}
 
@@ -1078,10 +1287,10 @@ static void zbf_render(void *data, gs_effect_t *effect)
 	if (target) {
 		uint32_t cx = obs_source_get_base_width(target);
 		uint32_t cy = obs_source_get_base_height(target);
-		zb_render_key(&src->zb, draw, cx, cy);
+		zb_render_key(&src->zb, draw, cx, cy, false);
 		if (zb_has_table(&src->zb)) {
 			const float tw = cy * 3.0f / 4.0f;
-			zb_render_table(&src->zb, (float)cx, tw, (float)cy, cx + tw, NULL);
+			zb_render_table(&src->zb, (float)cx, tw, (float)cy, cx + tw, NULL, false);
 		}
 	}
 

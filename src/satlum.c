@@ -17,6 +17,7 @@
 struct sl_source
 {
 	struct cm_source cm;
+	volatile bool ext; // luma from the raw signal: legal codes, 16 is 0 %, 235 is 100 %
 
 	gs_texture_t *tex;
 	uint8_t *tex_buf[2];
@@ -40,7 +41,7 @@ static const char *sl_get_name(void *unused)
 static void *sl_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct sl_source *src = bzalloc(sizeof(struct sl_source));
-	src->cm.flags = CM_FLAG_CONVERT_YUV;
+	src->cm.flags = CM_FLAG_CONVERT_YUV | CM_FLAG_EXT;
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, sl_surface_cb, src);
 
@@ -116,13 +117,15 @@ static void sl_surface_cb(void *data, struct cm_surface_data *sd)
 	uint8_t *dbuf = src->tex_buf[src->w_tex_buf];
 	memset(dbuf, 0, SL_SIZE * SL_SIZE);
 
+	const bool ext = sd->ext_data != NULL;
 	for (uint32_t y = 0; y < sd->height; y++) {
 		const uint8_t *p = sd->yuv_data + (size_t)sd->linesize * y;
+		const uint8_t *e = ext ? sd->ext_data + (size_t)sd->ext_linesize * y : NULL;
 		for (uint32_t x = 0; x < sd->width; x++, p += 4) {
 			if (!p[3])
 				continue;
 			// p: V, Y, U (BGRA order of the conversion: z=U in B, y=Y in G, x=V in R)
-			const int u = p[0] - 128, v = p[2] - 128, l = p[1];
+			const int u = p[0] - 128, v = p[2] - 128, l = e ? e[x * 4 + 3] : p[1];
 			int s = (int)(sqrtf((float)(u * u + v * v)) * 2.0f); // 127 -> 254
 			if (s > 255)
 				s = 255;
@@ -131,10 +134,11 @@ static void sl_surface_cb(void *data, struct cm_surface_data *sd)
 				++*c;
 		}
 	}
+	src->ext = ext;
 	src->w_tex_buf ^= 1;
 }
 
-static void sl_render_graticule(void)
+static void sl_render_graticule(bool ext)
 {
 	const uint32_t color = 0x80FFBF00;
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
@@ -143,10 +147,20 @@ static void sl_render_graticule(void)
 		gs_render_start(false);
 		for (int i = 1; i < 4; i++) {
 			const float t = SL_SIZE * i / 4.0f;
-			gs_vertex2f(0.0f, t);
-			gs_vertex2f((float)SL_SIZE, t);
+			// luma: with the raw signal the height runs from -7 % to 109 %
+			const float ty = ext ? SL_SIZE * (1.0f - (16.0f + 219.0f * (1.0f - i / 4.0f)) / 255.0f) : t;
+			gs_vertex2f(0.0f, ty);
+			gs_vertex2f((float)SL_SIZE, ty);
 			gs_vertex2f(t, 0.0f);
 			gs_vertex2f(t, (float)SL_SIZE);
+		}
+		if (ext) {
+			// 0 % and 100 %
+			for (int i = 0; i < 2; i++) {
+				const float ty = SL_SIZE * (1.0f - (16.0f + 219.0f * i) / 255.0f);
+				gs_vertex2f(0.0f, ty);
+				gs_vertex2f((float)SL_SIZE, ty);
+			}
 		}
 		gs_render_stop(GS_LINES);
 	}
@@ -154,7 +168,10 @@ static void sl_render_graticule(void)
 	const float px = 10.0f, m = 3.0f * ts.ux;
 	text_draw(&ts, "Luma", m, m, px, 0xE0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
 	text_draw(&ts, "Saturation", SL_SIZE - m, SL_SIZE - m, px, 0xE0FFD060, TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
-	text_draw(&ts, "50%", m, SL_SIZE * 0.5f, px, 0xA0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+	text_draw(&ts, "50%", m, ext ? SL_SIZE * (1.0f - 125.5f / 255.0f) : SL_SIZE * 0.5f, px, 0xA0FFD060,
+		  TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
+	if (ext)
+		text_draw(&ts, "RAW", SL_SIZE - m, m, px, 0xC0F0D060, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
 	text_draw(&ts, "50%", SL_SIZE * 0.5f + m, SL_SIZE - m, px, 0xA0FFD060, TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
 }
 
@@ -197,7 +214,7 @@ static void sl_render(void *data, gs_effect_t *effect)
 			gs_draw_sprite(src->tex, 0, SL_SIZE, SL_SIZE);
 	}
 	if (src->graticule)
-		sl_render_graticule();
+		sl_render_graticule(src->ext);
 }
 
 const struct obs_source_info colormonitor_satlum = {
