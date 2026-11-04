@@ -98,5 +98,73 @@ class ChartTest(obstest.OBSTest):
         self.assertLessEqual(worst, 8, 'the patches are not measured as drawn')
 
 
+
+GRID = [(200, 40, 40), (40, 180, 60), (50, 70, 210), (128, 128, 128), (230, 200, 40), (30, 30, 30)]
+
+
+class ChartGridTest(obstest.OBSTest):
+    'A chart of 3 x 2 patches of your own'
+
+    def setUp(self, config_name='saved-config', run=True):
+        super().setUp(run=False, config_name=config_name)
+        path = self.obs.config.get_scenecollection_file()
+        if not os.path.exists(path) and os.path.exists(path + '.json'):
+            path += '.json'
+        with open(path, encoding='utf-8') as fr:
+            collection = json.load(fr)
+        data = dock_data()
+        data['docks'][0]['views'][0]['state']['scopes'][0]['prop'] = {
+            'target_scale': 2, 'chart_type': 2, 'chart_cols': 3, 'chart_rows': 2, 'chart_ref_kind': 0}
+        collection.setdefault('modules', {})[DOCK_KEY] = data
+        with open(path, 'w', encoding='utf-8') as fw:
+            json.dump(collection, fw)
+        self.obs.run()
+
+    def test_grid(self):
+        'Every patch of the grid is measured close to its color'
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        os.makedirs('screenshots', exist_ok=True)
+        png = os.path.abspath('screenshots/grid-chart.png')
+        chart = Image.new('RGB', (600, 400))
+        for i, color in enumerate(GRID):
+            chart.paste(color, ((i % 3) * 200, (i // 3) * 200, (i % 3) * 200 + 200, (i // 3) * 200 + 200))
+        chart.save(png)
+        cl = self.obs.get_obsws()
+        video = cl.send('GetVideoSettings')
+        res = cl.send('CreateInput', {
+            'sceneName': 'Scene', 'inputName': 'Grid picture', 'inputKind': 'image_source',
+            'inputSettings': {'file': png},
+        })
+        cl.send('SetSceneItemTransform', {
+            'sceneName': 'Scene', 'sceneItemId': res.scene_item_id,
+            'sceneItemTransform': {'boundsType': 'OBS_BOUNDS_STRETCH', 'boundsWidth': video.base_width,
+                                   'boundsHeight': video.base_height, 'positionX': 0, 'positionY': 0},
+        })
+        name = [i['inputName'] for i in cl.send('GetInputList').inputs
+                if i['inputKind'].startswith(PREFIX + 'chart_source')][0]
+        worst = 999
+        img = None
+        for _ in range(60):
+            try:
+                data = cl.send('GetSourceScreenshot', {'sourceName': name, 'imageFormat': 'png',
+                                                       'imageWidth': 1200, 'imageHeight': 520}).image_data
+            except Exception:  # pylint: disable=broad-except
+                time.sleep(0.1)
+                continue
+            img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
+            # without a reference the live color fills the cell: 200 x 200 from 8, 8
+            worst = 0
+            for i, color in enumerate(GRID):
+                got = img.getpixel((8 + (i % 3) * 200 + 60, 8 + (i // 3) * 200 + 60))
+                worst = max(worst, max(abs(a - b) for a, b in zip(got, color)))
+            if worst <= 8:
+                break
+            time.sleep(0.1)
+        if img:
+            img.save('screenshots/chart-grid.png')
+        notice(f'chart grid 3 x 2: largest patch difference {worst} code values')
+        self.assertLessEqual(worst, 8, 'the patches of the grid are not measured as drawn')
+
+
 if __name__ == '__main__':
     unittest.main()

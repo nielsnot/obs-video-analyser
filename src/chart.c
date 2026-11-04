@@ -1,5 +1,6 @@
 /*
- * Color chart: measures the 24 patches of a ColorChecker-style chart (6 x 4) in the dock selection
+ * Color chart: measures the patches of a color chart in the dock selection: the 24 of a ColorChecker Classic
+ * (6 x 4, with published values), or any grid of columns x rows for other charts,
  * and compares them with a reference: the same chart as one camera saw it ("Set reference"), or the
  * published values of the chart. Draw a rectangle around the patches in the ROI view; the scope samples
  * the middle of every cell, so the gaps between the patches do not count.
@@ -22,7 +23,14 @@
 
 #define CH_W 1200
 #define CH_H 520
-#define N_PATCH 24
+#define N_PATCH 24 // ColorChecker Classic
+#define PATCH_MAX (14 * 12)
+
+enum chart_type_e {
+	CHART_CLASSIC = 0, // ColorChecker Classic 24, 6 x 4: published values and named primaries
+	CHART_14X10 = 1,   // 140 patches, 14 x 10 (for example a ColorChecker SG)
+	CHART_CUSTOM = 2,  // columns x rows of your own
+};
 
 enum chart_layout_e {
 	LAYOUT_6X4 = 0,     // as printed, white patch bottom left
@@ -62,17 +70,22 @@ struct chart_source
 	struct cm_source cm;
 
 	pthread_mutex_t mutex;
-	struct patch live[N_PATCH];
+	struct patch live[PATCH_MAX];
+	struct patch work[PATCH_MAX]; // the pipeline thread's measurement
 	bool live_valid;
 	uint32_t live_w, live_h;
+	int live_n; // patches in live
 
-	struct patch ref[N_PATCH];
+	struct patch ref[PATCH_MAX];
 	bool ref_valid;
 	volatile bool want_ref, want_clear;
 	volatile bool store_ref;
 
 	int layout;
 	int ref_kind;
+	int type;       // chart_type_e
+	int cols, rows; // the grid as printed
+	int n_patch;    // cols x rows
 	bool advice;
 	unsigned out_flags; // rows outside their tolerance, with a little hysteresis (render thread)
 };
@@ -124,11 +137,24 @@ static void chart_update(void *data, obs_data_t *settings)
 	src->layout = (int)obs_data_get_int(settings, "chart_layout");
 	src->ref_kind = (int)obs_data_get_int(settings, "chart_ref_kind");
 	src->advice = obs_data_get_bool(settings, "chart_advice");
+	src->type = (int)obs_data_get_int(settings, "chart_type");
+	int cols = 6, rows = 4;
+	if (src->type == CHART_14X10) {
+		cols = 14, rows = 10;
+	} else if (src->type == CHART_CUSTOM) {
+		cols = (int)obs_data_get_int(settings, "chart_cols");
+		rows = (int)obs_data_get_int(settings, "chart_rows");
+		cols = cols < 1 ? 1 : cols > 14 ? 14 : cols;
+		rows = rows < 1 ? 1 : rows > 12 ? 12 : rows;
+	}
+	// published values only exist for the ColorChecker Classic
+	if (src->type != CHART_CLASSIC)
+		src->ref_kind = REF_CAPTURED;
 
 	const char *s = obs_data_get_string(settings, "chart_ref");
-	struct patch ref[N_PATCH] = {0};
+	struct patch *ref = bzalloc(sizeof(struct patch) * PATCH_MAX);
 	int n = 0;
-	while (s && *s && n < N_PATCH * 3) {
+	while (s && *s && n < PATCH_MAX * 3) {
 		char *end = NULL;
 		const double v = strtod(s, &end);
 		if (end == s)
@@ -138,10 +164,15 @@ static void chart_update(void *data, obs_data_t *settings)
 		s = end;
 	}
 	pthread_mutex_lock(&src->mutex);
-	src->ref_valid = n == N_PATCH * 3;
+	src->cols = cols;
+	src->rows = rows;
+	src->n_patch = cols * rows;
+	// a reference of another chart does not count
+	src->ref_valid = n == src->n_patch * 3;
 	if (src->ref_valid)
-		memcpy(src->ref, ref, sizeof(ref));
+		memcpy(src->ref, ref, sizeof(ref[0]) * src->n_patch);
 	pthread_mutex_unlock(&src->mutex);
+	bfree(ref);
 }
 
 static bool set_ref_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -166,6 +197,19 @@ static void chart_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "chart_layout", LAYOUT_6X4);
 	obs_data_set_default_int(settings, "chart_ref_kind", REF_CAPTURED);
 	obs_data_set_default_bool(settings, "chart_advice", true);
+	obs_data_set_default_int(settings, "chart_type", CHART_CLASSIC);
+	obs_data_set_default_int(settings, "chart_cols", 6);
+	obs_data_set_default_int(settings, "chart_rows", 4);
+}
+
+static bool chart_type_changed(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(p);
+	const int type = (int)obs_data_get_int(settings, "chart_type");
+	obs_property_set_visible(obs_properties_get(props, "chart_cols"), type == CHART_CUSTOM);
+	obs_property_set_visible(obs_properties_get(props, "chart_rows"), type == CHART_CUSTOM);
+	obs_property_set_visible(obs_properties_get(props, "chart_ref_kind"), type == CHART_CLASSIC);
+	return true;
 }
 
 static obs_properties_t *chart_get_properties(void *data)
@@ -173,8 +217,16 @@ static obs_properties_t *chart_get_properties(void *data)
 	struct chart_source *src = data;
 	obs_properties_t *props = obs_properties_create();
 	cm_get_properties(&src->cm, props);
-	obs_property_t *prop = obs_properties_add_list(props, "chart_layout", obs_module_text("Chart.Layout"),
+	obs_property_t *prop = obs_properties_add_list(props, "chart_type", obs_module_text("Chart.Type"),
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("Chart.Type.Classic"), CHART_CLASSIC);
+	obs_property_list_add_int(prop, obs_module_text("Chart.Type.14x10"), CHART_14X10);
+	obs_property_list_add_int(prop, obs_module_text("Chart.Type.Custom"), CHART_CUSTOM);
+	obs_property_set_modified_callback(prop, chart_type_changed);
+	obs_properties_add_int_slider(props, "chart_cols", obs_module_text("Chart.Cols"), 1, 14, 1);
+	obs_properties_add_int_slider(props, "chart_rows", obs_module_text("Chart.Rows"), 1, 12, 1);
+	prop = obs_properties_add_list(props, "chart_layout", obs_module_text("Chart.Layout"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(prop, obs_module_text("Chart.Layout.6x4"), LAYOUT_6X4);
 	obs_property_list_add_int(prop, obs_module_text("Chart.Layout.6x4.180"), LAYOUT_6X4_180);
 	obs_property_list_add_int(prop, obs_module_text("Chart.Layout.4x6.CW"), LAYOUT_4X6_CW);
@@ -201,22 +253,22 @@ static uint32_t chart_get_height(void *data)
 	return src->cm.bypass ? cm_bypass_get_height(&src->cm) : CH_H;
 }
 
-/* Where patch i (as printed: 6 across, 4 down, dark skin top left) is in the picture, in cells. */
-static void patch_cell(int layout, int i, int *col, int *row, int *cols, int *rows)
+/* Where patch i (as printed: pc across, pr down, first patch top left) is in the picture, in cells. */
+static void patch_cell(int layout, int pc, int pr, int i, int *col, int *row, int *cols, int *rows)
 {
-	const int c = i % 6, r = i / 6;
+	const int c = i % pc, r = i / pc;
 	switch (layout) {
 	case LAYOUT_6X4_180:
-		*cols = 6, *rows = 4, *col = 5 - c, *row = 3 - r;
+		*cols = pc, *rows = pr, *col = pc - 1 - c, *row = pr - 1 - r;
 		break;
 	case LAYOUT_4X6_CW:
-		*cols = 4, *rows = 6, *col = 3 - r, *row = c;
+		*cols = pr, *rows = pc, *col = pr - 1 - r, *row = c;
 		break;
 	case LAYOUT_4X6_CCW:
-		*cols = 4, *rows = 6, *col = r, *row = 5 - c;
+		*cols = pr, *rows = pc, *col = r, *row = pc - 1 - c;
 		break;
 	default:
-		*cols = 6, *rows = 4, *col = c, *row = r;
+		*cols = pc, *rows = pr, *col = c, *row = r;
 		break;
 	}
 }
@@ -237,10 +289,11 @@ static void chart_surface_cb(void *data, struct cm_surface_data *sd)
 	if (!sd->rgb_data || sd->width < 12 || sd->height < 12)
 		return;
 
-	struct patch live[N_PATCH];
-	for (int i = 0; i < N_PATCH; i++) {
+	struct patch *live = src->work; // this source's pipeline thread only
+	const int np = src->n_patch, pc = src->cols, pr = src->rows;
+	for (int i = 0; i < np; i++) {
 		int col, row, cols, rows;
-		patch_cell(src->layout, i, &col, &row, &cols, &rows);
+		patch_cell(src->layout, pc, pr, i, &col, &row, &cols, &rows);
 		const uint32_t x0 = (uint32_t)((col + 0.3f) / cols * sd->width);
 		const uint32_t x1 = (uint32_t)((col + 0.7f) / cols * sd->width);
 		const uint32_t y0 = (uint32_t)((row + 0.3f) / rows * sd->height);
@@ -271,15 +324,16 @@ static void chart_surface_cb(void *data, struct cm_surface_data *sd)
 
 	pthread_mutex_lock(&src->mutex);
 	// steady numbers: each patch follows the picture over a few frames instead of jumping
-	if (src->live_valid && sd->width == src->live_w && sd->height == src->live_h) {
-		for (int i = 0; i < N_PATCH; i++) {
+	if (src->live_valid && sd->width == src->live_w && sd->height == src->live_h && src->live_n == np) {
+		for (int i = 0; i < np; i++) {
 			for (int k = 0; k < 3; k++)
 				src->live[i].rgb[k] += (live[i].rgb[k] - src->live[i].rgb[k]) * 0.25f;
 			src->live[i].spread = live[i].spread;
 		}
 	} else {
-		memcpy(src->live, live, sizeof(live));
+		memcpy(src->live, live, sizeof(live[0]) * np);
 	}
+	src->live_n = np;
 	src->live_valid = true;
 	src->live_w = sd->width;
 	src->live_h = sd->height;
@@ -292,15 +346,16 @@ static void chart_tick(void *data, float seconds)
 	cm_tick(&src->cm, seconds);
 
 	if (src->want_ref || src->want_clear) {
-		char buf[N_PATCH * 3 * 8 + 1] = "";
+		static char buf[PATCH_MAX * 3 * 8 + 1];
+		buf[0] = 0;
 		pthread_mutex_lock(&src->mutex);
-		if (src->want_ref && src->live_valid) {
+		const bool set = src->want_ref && src->live_valid && src->live_n == src->n_patch;
+		if (set) {
 			size_t n = 0;
-			for (int i = 0; i < N_PATCH; i++)
+			for (int i = 0; i < src->n_patch; i++)
 				for (int k = 0; k < 3; k++)
 					n += snprintf(buf + n, sizeof(buf) - n, "%.1f ", src->live[i].rgb[k]);
 		}
-		const bool set = src->want_ref && src->live_valid;
 		src->want_ref = false;
 		const bool clear = src->want_clear;
 		src->want_clear = false;
@@ -493,38 +548,43 @@ static void chart_render(void *data, gs_effect_t *effect)
 	}
 	fill(0.0f, 0.0f, W, H, 0xFF101013);
 
-	struct patch live[N_PATCH];
-	struct patch ref_captured[N_PATCH];
+	static struct patch live[PATCH_MAX];
+	static struct patch ref_captured[PATCH_MAX];
 	pthread_mutex_lock(&src->mutex);
-	const bool have_live = src->live_valid;
+	const int np = src->n_patch, pc = src->cols, pr = src->rows;
+	const bool classic = src->type == CHART_CLASSIC;
+	const bool have_live = src->live_valid && src->live_n == np;
 	const bool have_captured = src->ref_valid;
-	memcpy(live, src->live, sizeof(live));
-	memcpy(ref_captured, src->ref, sizeof(ref_captured));
+	memcpy(live, src->live, sizeof(live[0]) * np);
+	memcpy(ref_captured, src->ref, sizeof(ref_captured[0]) * np);
 	pthread_mutex_unlock(&src->mutex);
 
-	float ref[N_PATCH][3];
+	static float ref[PATCH_MAX][3];
 	bool have_ref = false;
 	const char *ref_name = "reference";
-	if (src->ref_kind == REF_PUBLISHED) {
+	if (src->ref_kind == REF_PUBLISHED && classic) {
 		for (int i = 0; i < N_PATCH; i++)
 			for (int k = 0; k < 3; k++)
 				ref[i][k] = published[i][k];
 		have_ref = true;
 		ref_name = "published values";
 	} else if (have_captured) {
-		for (int i = 0; i < N_PATCH; i++)
+		for (int i = 0; i < np; i++)
 			for (int k = 0; k < 3; k++)
 				ref[i][k] = ref_captured[i].rgb[k];
 		have_ref = true;
 	}
 
-	// the patches as printed, 6 x 4: the reference on top, live below, the difference in the middle
+	// the patches as printed: the reference on top, live below, the difference in the middle
 	const float m = 8.0f;
 	const float gw = 600.0f, gh = 400.0f;
-	const float cw = gw / 6.0f, chh = gh / 4.0f;
-	for (int i = 0; i < N_PATCH; i++) {
-		const float x0 = m + (i % 6) * cw, y0 = m + (i / 6) * chh;
-		const float x1 = x0 + cw - 4.0f, y1 = y0 + chh - 4.0f;
+	const float cw = gw / pc, chh = gh / pr;
+	const float gap = fminf(4.0f, fminf(cw, chh) * 0.08f);
+	// the Delta E number fits small cells too, or is left out for a colored dot
+	const float de_px = fminf(12.0f, fminf(chh * 0.3f / ts.uy, cw * 0.28f / ts.ux));
+	for (int i = 0; i < np; i++) {
+		const float x0 = m + (i % pc) * cw, y0 = m + (i / pc) * chh;
+		const float x1 = x0 + cw - gap, y1 = y0 + chh - gap;
 		const float ym = (y0 + y1) * 0.5f;
 		if (have_ref)
 			fill(x0, y0, x1, ym, argb(ref[i]));
@@ -537,10 +597,17 @@ static void chart_render(void *data, gs_effect_t *effect)
 			char buf[16];
 			snprintf(buf, sizeof(buf), "%.1f", d);
 			const uint32_t c = d < 3.0f ? 0xFF6FCF86 : d < 6.0f ? 0xFFFFA040 : 0xFFFF5A5A;
-			const float tw = text_width(&ts, buf, 12.0f);
-			fill((x0 + x1) * 0.5f - tw * 0.5f - 3.0f * ts.ux, ym - 8.0f * ts.uy,
-			     (x0 + x1) * 0.5f + tw * 0.5f + 3.0f * ts.ux, ym + 8.0f * ts.uy, 0xC0000000);
-			text_draw(&ts, buf, (x0 + x1) * 0.5f, ym, 12.0f, c, TEXT_ALIGN_CENTER, TEXT_VALIGN_MIDDLE);
+			if (de_px >= 7.0f) {
+				const float tw = text_width(&ts, buf, de_px);
+				const float hh = (de_px * 0.5f + 2.0f) * ts.uy;
+				fill((x0 + x1) * 0.5f - tw * 0.5f - 3.0f * ts.ux, ym - hh,
+				     (x0 + x1) * 0.5f + tw * 0.5f + 3.0f * ts.ux, ym + hh, 0xC0000000);
+				text_draw(&ts, buf, (x0 + x1) * 0.5f, ym, de_px, c, TEXT_ALIGN_CENTER,
+					  TEXT_VALIGN_MIDDLE);
+			} else {
+				const float r = fminf(cw, chh) * 0.12f;
+				fill((x0 + x1) * 0.5f - r, ym - r, (x0 + x1) * 0.5f + r, ym + r, c);
+			}
 		}
 	}
 	text_draw(&ts, have_ref ? obs_module_text("Chart.Legend") : obs_module_text("Chart.LegendLive"), m,
@@ -556,9 +623,9 @@ static void chart_render(void *data, gs_effect_t *effect)
 	}
 	// a patch with a lot of detail is probably not a patch: the rectangle is off
 	int busy = 0;
-	for (int i = 0; i < N_PATCH; i++)
+	for (int i = 0; i < np; i++)
 		busy += live[i].spread > 12.0f;
-	if (busy > 4) {
+	if (busy > np / 6) {
 		y = wrapped(&ts, obs_module_text("Chart.Misaligned"), x, y, text_w, 12.0f, 0xFFFFC040, H - m);
 		y += 6.0f * ts.uy;
 	}
@@ -581,25 +648,52 @@ static void chart_render(void *data, gs_effect_t *effect)
 
 	// the numbers
 	float de_sum = 0.0f, de_max = 0.0f;
-	for (int i = 0; i < N_PATCH; i++) {
+	for (int i = 0; i < np; i++) {
 		const float d = delta_e(live[i].rgb, ref[i]);
 		de_sum += d;
 		de_max = fmaxf(de_max, d);
 	}
-	float gl = 0, gr = 0, rl = 0, rr = 0, bl = 0, br = 0;
-	for (int i = 19; i <= 22; i++) { // the middle greys, which do not clip
-		const float *a = live[i].rgb, *b = ref[i];
-		gl += (0.2126f * a[0] + 0.7152f * a[1] + 0.0722f * a[2]) / 2.55f / 4.0f;
-		gr += (0.2126f * b[0] + 0.7152f * b[1] + 0.0722f * b[2]) / 2.55f / 4.0f;
-		rl += a[0] / fmaxf(a[1], 1.0f) * 25.0f;
-		rr += b[0] / fmaxf(b[1], 1.0f) * 25.0f;
-		bl += a[2] / fmaxf(a[1], 1.0f) * 25.0f;
-		br += b[2] / fmaxf(b[1], 1.0f) * 25.0f;
+	// The greys and the colored patches: on the Classic the middle greys (which do not clip) and the first
+	// 18; on any other chart the patches that are grey or colored in the reference.
+	static bool is_grey[PATCH_MAX], is_color[PATCH_MAX];
+	int n_grey = 0, n_color = 0;
+	for (int i = 0; i < np; i++) {
+		if (classic) {
+			is_grey[i] = i >= 19 && i <= 22;
+			is_color[i] = i < 18;
+		} else {
+			const float *b = ref[i];
+			const float l = (0.2126f * b[0] + 0.7152f * b[1] + 0.0722f * b[2]) / 2.55f;
+			is_grey[i] = chroma(b) < 5.0f && l > 8.0f && l < 92.0f;
+			is_color[i] = chroma(b) > 15.0f;
+		}
+		n_grey += is_grey[i];
+		n_color += is_color[i];
 	}
-	float cl = 0, cr = 0;
-	for (int i = 0; i < 18; i++) {
-		cl += chroma(live[i].rgb) / 18.0f;
-		cr += chroma(ref[i]) / 18.0f;
+	float gl = 0, gr = 0, rl = 0, rr = 0, bl = 0, br = 0;
+	for (int i = 0; i < np; i++) {
+		if (!is_grey[i])
+			continue;
+		const float *a = live[i].rgb, *b = ref[i];
+		gl += (0.2126f * a[0] + 0.7152f * a[1] + 0.0722f * a[2]) / 2.55f / n_grey;
+		gr += (0.2126f * b[0] + 0.7152f * b[1] + 0.0722f * b[2]) / 2.55f / n_grey;
+		rl += a[0] / fmaxf(a[1], 1.0f) * 100.0f / n_grey;
+		rr += b[0] / fmaxf(b[1], 1.0f) * 100.0f / n_grey;
+		bl += a[2] / fmaxf(a[1], 1.0f) * 100.0f / n_grey;
+		br += b[2] / fmaxf(b[1], 1.0f) * 100.0f / n_grey;
+	}
+	float cl = 0, cr = 0, hue_sum = 0, hue_max = 0;
+	int n_hue = 0;
+	for (int i = 0; i < np; i++) {
+		if (!is_color[i])
+			continue;
+		cl += chroma(live[i].rgb) / n_color;
+		cr += chroma(ref[i]) / n_color;
+		const float dh = wrap180(hue_deg(live[i].rgb) - hue_deg(ref[i]));
+		hue_sum += dh;
+		if (fabsf(dh) > fabsf(hue_max))
+			hue_max = dh;
+		n_hue++;
 	}
 	const float stops = gl > 0.5f && gr > 0.5f ? 2.4f * log2f(gl / gr) : 0.0f;
 
@@ -610,29 +704,43 @@ static void chart_render(void *data, gs_effect_t *effect)
 		float ref, live, diff, tol;
 		const char *fmt_val, *fmt_diff;
 	} rows[13] = {
-		{"Delta E average", false, 0, 0, de_sum / N_PATCH, 3.0f, "", "%.1f"},
+		{"Delta E average", false, 0, 0, de_sum / np, 3.0f, "", "%.1f"},
 		{"Delta E largest", false, 0, 0, de_max, 6.0f, "", "%.1f"},
 		{"Greys luma", true, gr, gl, gl - gr, 3.0f, "%.1f%%", "%+.1f%%"},
 		{"Red / green", true, rr, rl, rl - rr, 2.0f, "%.1f%%", "%+.1f%%"},
 		{"Blue / green", true, br, bl, bl - br, 2.0f, "%.1f%%", "%+.1f%%"},
 		{"Saturation", true, cr, cl, (cl / fmaxf(cr, 0.01f) - 1.0f) * 100.0f, 5.0f, "%.1f", "%+.0f%%"},
 	};
+	// rows 2..4 need greys, row 5 colored patches; without them they show a dash
+	const bool has_grey = n_grey > 0, has_color = n_color > 0;
 	int nrows = 6;
-	for (int i = 12; i < 18; i++) {
-		const float hr = hue_deg(ref[i]), hl = hue_deg(live[i].rgb);
-		rows[nrows++] = (struct row){patch_names[i], true,           hr, hl, wrap180(hl - hr), 4.0f,
-					     "%.0f\xc2\xb0", "%+.1f\xc2\xb0"};
+	if (classic) {
+		for (int i = 12; i < 18; i++) {
+			const float hr = hue_deg(ref[i]), hl = hue_deg(live[i].rgb);
+			rows[nrows++] = (struct row){patch_names[i], true,           hr, hl, wrap180(hl - hr), 4.0f,
+						     "%.0f\xc2\xb0", "%+.1f\xc2\xb0"};
+		}
+	} else if (n_hue) {
+		rows[nrows++] = (struct row){"Hue, average", false, 0, 0, hue_sum / n_hue, 3.0f, "", "%+.1f\xc2\xb0"};
+		rows[nrows++] = (struct row){"Hue, largest", false, 0, 0, hue_max, 8.0f, "", "%+.1f\xc2\xb0"};
 	}
 	bool any_out = false;
 	bool out[13];
 	for (int k = 0; k < nrows; k++) {
 		const struct row *w = rows + k;
+		const bool missing = (k >= 2 && k <= 4 && !has_grey) || (k == 5 && !has_color);
 		// Delta E has no sign: it is out above its limit
-		out[k] = outside(&src->out_flags, k, k < 2 ? fmaxf(w->diff, 0.0f) : w->diff, w->tol);
+		out[k] = !missing && outside(&src->out_flags, k, k < 2 ? fmaxf(w->diff, 0.0f) : w->diff, w->tol);
 		any_out |= out[k];
 		if (k % 2 == 0)
 			fill(x, y - 2.0f * ts.uy, x + text_w, y + lh - 3.0f * ts.uy, 0xFF17171B);
 		text_draw(&ts, w->label, x + 4.0f * ts.ux, y, px, c_dim, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		if (missing) {
+			// this chart has no grey (or colored) patches to measure it with
+			text_draw(&ts, "\xe2\x80\x94", col_diff, y, px, c_head, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+			y += lh;
+			continue;
+		}
 		if (w->has_values) {
 			snprintf(buf, sizeof(buf), w->fmt_val, w->ref);
 			text_draw(&ts, buf, col_ref, y, px, c_val, TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
@@ -704,13 +812,19 @@ static void chart_render(void *data, gs_effect_t *effect)
 		for (int k = 6; k < nrows; k++) {
 			if (!out[k])
 				continue;
-			ADD("%s%s toward %s", hue_head ? ", " : "Hue: ", rows[k].label,
-			    rows[k].diff > 0.0f ? "the next color counter-clockwise" : "the next color clockwise");
+			if (classic)
+				ADD("%s%s toward %s", hue_head ? ", " : "Hue: ", rows[k].label,
+				    rows[k].diff > 0.0f ? "the next color counter-clockwise"
+							: "the next color clockwise");
+			else
+				ADD("%s%s the colors turn %s",
+				    hue_head ? ", " : "Hue: ", k == 6 ? "on average" : "at most",
+				    rows[k].diff > 0.0f ? "counter-clockwise" : "clockwise");
 			hue_head = true;
 		}
 		if (hue_head)
 			ADD(" on the vectorscope. ");
-		if (src->advice && (de_sum / N_PATCH > 6.0f || fabsf(stops) > 0.7f))
+		if (src->advice && (de_sum / np > 6.0f || fabsf(stops) > 0.7f))
 			ADD("Clearly different from the %s. ", ref_name);
 	}
 #undef ADD

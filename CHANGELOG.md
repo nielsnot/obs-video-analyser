@@ -9,6 +9,10 @@
 - **QC, preferred range:** the check of the raw signal now uses the preferred range of EBU R103 v3, -5 % to 105 % for
   luma and R, G, B (10-bit codes 20 to 984), the same for SDR, HLG and PQ.
 - Tests with a 10-bit HLG clip in an HLG project, and an SDR clip in an HLG project.
+- **Color chart, any chart:** choose the chart in the options: the ColorChecker Classic (24 patches, with published
+  values), 140 patches (14 x 10, for example a ColorChecker SG), or columns x rows of your own (up to 14 x 12). On
+  other charts the grey and colored patches are found in the reference by themselves, for exposure, white balance and
+  saturation; the hue rows show the average and largest hue shift. Small cells show the Delta E as a colored dot.
 
 ## 0.8.1
 

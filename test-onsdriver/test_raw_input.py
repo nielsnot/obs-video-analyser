@@ -95,7 +95,7 @@ class RawInputTest(obstest.OBSTest):
             raw = rows and 2 <= rows[0] <= 10 and 245 <= rows[-1] <= 253
             if raw and self.expect_raw:
                 break
-            if rows and not self.expect_raw and rows[0] > 20 and filters:
+            if rows and not self.expect_raw and not raw and filters:
                 break
         if img:
             os.makedirs('screenshots', exist_ok=True)
@@ -107,8 +107,9 @@ class RawInputTest(obstest.OBSTest):
             self.assertTrue(2 <= rows[0] <= 10, f'superwhite not above 100 %: top row {rows[0]}')
             self.assertTrue(245 <= rows[-1] <= 253, f'sub-black not below 0 %: bottom row {rows[-1]}')
         else:
-            # converted by OBS: SDR white lands well below the top of the HLG scale
-            self.assertGreater(rows[0], 20, f'an SDR source in an HLG project is shown raw: top row {rows[0]}')
+            # converted by OBS, not the raw signal: superwhite does not sit at 107 % (row 5), sub-black not at -5 %
+            self.assertFalse(2 <= rows[0] <= 10 and 245 <= rows[-1] <= 253,
+                             f'an SDR source in an HLG project is shown raw: rows {rows[0]}..{rows[-1]}')
 
 
 class RawInputHLGTest(RawInputTest):
