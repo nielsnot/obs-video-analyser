@@ -47,6 +47,7 @@ struct his_source
 {
 	struct cm_source cm;
 	bool hdr_ref;      // HDR: lines at 26, 203 and 1000 nits
+	bool vertical;     // levels up (dark at the bottom), counts to the right
 	volatile bool ext; // levels of the raw signal as legal codes (16 is 0 %, 235 is 100 %)
 	bool ext_prev;
 
@@ -154,6 +155,7 @@ static void his_update(void *data, obs_data_t *settings)
 
 	src->level_height = (int)obs_data_get_int(settings, "level_height");
 	src->hdr_ref = obs_data_get_bool(settings, "hdr_ref");
+	src->vertical = obs_data_get_bool(settings, "vertical");
 
 	bool logscale = obs_data_get_bool(settings, "logscale");
 	if (logscale != src->logscale) {
@@ -294,6 +296,7 @@ static obs_properties_t *his_get_properties(void *data)
 
 	obs_properties_add_int(props, "level_height", obs_module_text("Height"), 50, 2048, 1);
 	obs_properties_add_bool(props, "hdr_ref", obs_module_text("Prop.HdrRef"));
+	obs_properties_add_bool(props, "vertical", obs_module_text("Histogram.Vertical"));
 	obs_properties_add_bool(props, "logscale", obs_module_text("Log scale"));
 
 	prop = obs_properties_add_list(props, "level_mode", obs_module_text("Level mode"), OBS_COMBO_TYPE_LIST,
@@ -338,14 +341,23 @@ static inline uint32_t n_components(const struct his_source *src)
 	return c;
 }
 
+/* The size as drawn lying down (levels across), before turning it for the vertical layout. */
+static uint32_t his_width_h(const struct his_source *src)
+{
+	return src->display == DISP_PARADE ? HI_SIZE * n_components(src) : HI_SIZE;
+}
+
+static uint32_t his_height_h(const struct his_source *src)
+{
+	return src->display == DISP_STACK ? src->level_height * n_components(src) : (uint32_t)src->level_height;
+}
+
 static uint32_t his_get_width(void *data)
 {
 	struct his_source *src = data;
 	if (src->cm.bypass)
 		return cm_bypass_get_width(&src->cm);
-	if (src->display == DISP_PARADE)
-		return HI_SIZE * n_components(src);
-	return HI_SIZE;
+	return src->vertical ? his_height_h(src) : his_width_h(src);
 }
 
 static uint32_t his_get_height(void *data)
@@ -353,9 +365,7 @@ static uint32_t his_get_height(void *data)
 	struct his_source *src = data;
 	if (src->cm.bypass)
 		return cm_bypass_get_height(&src->cm);
-	if (src->display == DISP_STACK)
-		return src->level_height * n_components(src);
-	return src->level_height;
+	return src->vertical ? his_width_h(src) : his_height_h(src);
 }
 
 static inline void inc_uint16(uint16_t *c)
@@ -708,7 +718,7 @@ static void his_mouse_move(void *data, const struct obs_mouse_event *event, bool
 {
 	struct his_source *src = data;
 	if (!mouse_leave && event && src->dragging)
-		src->drag_x1 = event->x;
+		src->drag_x1 = src->vertical ? (int)his_width_h(src) - event->y : event->x;
 }
 
 /* Drag over a hue or saturation histogram to qualify that range on the dock's ROI;
@@ -723,13 +733,13 @@ static void his_mouse_click(void *data, const struct obs_mouse_event *event, int
 
 	if (!mouse_up) {
 		src->dragging = true;
-		src->drag_x0 = src->drag_x1 = event->x;
+		src->drag_x0 = src->drag_x1 = src->vertical ? (int)his_width_h(src) - event->y : event->x;
 		return;
 	}
 	if (!src->dragging)
 		return;
 	src->dragging = false;
-	src->drag_x1 = event->x;
+	src->drag_x1 = src->vertical ? (int)his_width_h(src) - event->y : event->x;
 
 	int a = src->drag_x0 < src->drag_x1 ? src->drag_x0 : src->drag_x1;
 	int b = src->drag_x0 < src->drag_x1 ? src->drag_x1 : src->drag_x0;
@@ -830,6 +840,19 @@ static void his_render(void *data, gs_effect_t *effect)
 
 	cm_render_target(&src->cm);
 
+	// vertical: x' = H - y, y' = W - x (levels up with black at the bottom, counts to the right)
+	if (src->vertical) {
+		const float W = (float)his_width_h(src), H = (float)his_height_h(src);
+		struct matrix4 tr = {
+			{.ptr = {0.0f, -1.0f, 0.0f, 0.0f}},
+			{.ptr = {-1.0f, 0.0f, 0.0f, 0.0f}},
+			{.ptr = {0.0f, 0.0f, 1.0f, 0.0f}},
+			{.ptr = {H, W, 0.0f, 1.0f}},
+		};
+		gs_matrix_push();
+		gs_matrix_mul(&tr);
+	}
+
 	PROFILE_START(prof_draw_name);
 	int r_tex_buf = src->w_tex_buf ^ 1;
 	if (src->want_snapshot) {
@@ -865,6 +888,8 @@ static void his_render(void *data, gs_effect_t *effect)
 		his_render_selection(src);
 	else
 		his_render_hdr_reference(src);
+	if (src->vertical)
+		gs_matrix_pop();
 
 	PROFILE_END(prof_render_name);
 }

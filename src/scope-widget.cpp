@@ -97,6 +97,7 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "channelplot_source", "channelplot", "ChannelPlot", FIT_SQUARE},
 	{ID_PREFIX "data_source", "data", "DataAnalyser", FIT_ASPECT},
 	{ID_PREFIX "skintone_source", "skintone", "SkinTone", FIT_ASPECT},
+	{ID_PREFIX "cube_source", "hector", "HectorScope", FIT_SQUARE},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -1297,7 +1298,16 @@ void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 		}
 		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
 		act->setToolTip(scope_tip(scope_types[t].key));
-		connect(act, &QAction::triggered, this, [this, t]() { addScope(t); });
+		connect(act, &QAction::triggered, this, [this, t]() {
+			// the HectorScope is the 3D cube in Y'CbCr
+			if (!strcmp(scope_types[t].key, "hector")) {
+				OBSDataAutoRelease d = obs_data_create();
+				obs_data_set_int(d, "cube_model", 1);
+				addScope(t, d);
+			} else {
+				addScope(t);
+			}
+		});
 	}
 }
 

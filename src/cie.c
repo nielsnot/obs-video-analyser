@@ -33,7 +33,26 @@ struct cie_source
 
 	int intensity;
 	bool show_709, show_p3, show_2020, show_grid;
+	bool show_ap0, show_ap1, show_prophoto, show_adobe, show_planck;
+	bool uv; // CIE 1976 u'v' instead of 1931 xy
 };
+
+/* The scale of the u'v' diagram: the same on both axes */
+#define UV_MAX 0.65f
+
+/* xy to a position in the diagram (pixels), in xy or in u'v'. */
+static inline void to_screen(bool uv, float x, float y, float *px, float *py)
+{
+	if (uv) {
+		const float d = -2.0f * x + 12.0f * y + 3.0f;
+		const float u = d != 0.0f ? 4.0f * x / d : 0.0f, v = d != 0.0f ? 9.0f * y / d : 0.0f;
+		*px = u / UV_MAX * CIE_W;
+		*py = (1.0f - v / (UV_MAX * CIE_H / CIE_W)) * CIE_H;
+	} else {
+		*px = x / CIE_X_MAX * CIE_W;
+		*py = (1.0f - y / CIE_Y_MAX) * CIE_H;
+	}
+}
 
 static void cie_update(void *, obs_data_t *);
 static void cie_surface_cb(void *data, struct cm_surface_data *surface_data);
@@ -95,6 +114,12 @@ static void cie_update(void *data, obs_data_t *settings)
 	src->show_p3 = obs_data_get_bool(settings, "show_p3");
 	src->show_2020 = obs_data_get_bool(settings, "show_2020");
 	src->show_grid = obs_data_get_bool(settings, "show_graticule");
+	src->show_ap0 = obs_data_get_bool(settings, "show_ap0");
+	src->show_ap1 = obs_data_get_bool(settings, "show_ap1");
+	src->show_prophoto = obs_data_get_bool(settings, "show_prophoto");
+	src->show_adobe = obs_data_get_bool(settings, "show_adobe");
+	src->show_planck = obs_data_get_bool(settings, "show_planck");
+	src->uv = obs_data_get_bool(settings, "cie_uv");
 }
 
 static void cie_get_defaults(obs_data_t *settings)
@@ -117,6 +142,12 @@ static obs_properties_t *cie_get_properties(void *data)
 	obs_properties_add_bool(props, "show_709", obs_module_text("CIE.Prop.709"));
 	obs_properties_add_bool(props, "show_p3", obs_module_text("CIE.Prop.P3"));
 	obs_properties_add_bool(props, "show_2020", obs_module_text("CIE.Prop.2020"));
+	obs_properties_add_bool(props, "show_adobe", obs_module_text("CIE.Prop.Adobe"));
+	obs_properties_add_bool(props, "show_prophoto", obs_module_text("CIE.Prop.ProPhoto"));
+	obs_properties_add_bool(props, "show_ap1", obs_module_text("CIE.Prop.AP1"));
+	obs_properties_add_bool(props, "show_ap0", obs_module_text("CIE.Prop.AP0"));
+	obs_properties_add_bool(props, "show_planck", obs_module_text("CIE.Prop.Planck"));
+	obs_properties_add_bool(props, "cie_uv", obs_module_text("CIE.Prop.UV"));
 	obs_properties_add_bool(props, "show_graticule", obs_module_text("Graticule"));
 	return props;
 }
@@ -158,8 +189,9 @@ static void cie_draw(const struct cie_source *src, uint8_t *dbuf, const struct c
 			const float sum = X + Y + Z;
 			if (sum < 0.0005f)
 				continue; // black has no chromaticity
-			const int px = (int)(X / sum / CIE_X_MAX * CIE_W);
-			const int py = (int)((1.0f - Y / sum / CIE_Y_MAX) * CIE_H);
+			float fx, fy;
+			to_screen(src->uv, X / sum, Y / sum, &fx, &fy);
+			const int px = (int)fx, py = (int)fy;
 			if (px < 0 || px >= CIE_W || py < 0 || py >= CIE_H)
 				continue;
 			uint8_t *c = dbuf + py * CIE_W + px;
@@ -197,13 +229,20 @@ static const float spectral_locus[][2] = {
 	{0.7334f, 0.2666f}, {0.7340f, 0.2660f}, {0.7344f, 0.2656f}, {0.7346f, 0.2654f}, {0.7347f, 0.2653f},
 };
 
-static inline float sx(float x)
+/* The diagram being drawn is in u'v' (graphics thread only). */
+static bool g_uv;
+
+static inline float sx_y(float x, float y)
 {
-	return x / CIE_X_MAX * CIE_W;
+	float px, py;
+	to_screen(g_uv, x, y, &px, &py);
+	return px;
 }
-static inline float sy(float y)
+static inline float sy_x(float x, float y)
 {
-	return (1.0f - y / CIE_Y_MAX) * CIE_H;
+	float px, py;
+	to_screen(g_uv, x, y, &px, &py);
+	return py;
 }
 
 static void draw_lines(const float (*pts)[2], int n, bool closed, uint32_t color)
@@ -214,67 +253,161 @@ static void draw_lines(const float (*pts)[2], int n, bool closed, uint32_t color
 		gs_render_start(false);
 		for (int i = 0; i + 1 < n + (closed ? 1 : 0); i++) {
 			const int j = (i + 1) % n;
-			gs_vertex2f(sx(pts[i][0]), sy(pts[i][1]));
-			gs_vertex2f(sx(pts[j][0]), sy(pts[j][1]));
+			gs_vertex2f(sx_y(pts[i][0], pts[i][1]), sy_x(pts[i][0], pts[i][1]));
+			gs_vertex2f(sx_y(pts[j][0], pts[j][1]), sy_x(pts[j][0], pts[j][1]));
 		}
 		gs_render_stop(GS_LINES);
 	}
+}
+
+/* The Planckian locus (Kim et al. approximation), xy at a color temperature from 1667 to 25000 K. */
+static void planck_xy(float t, float *x, float *y)
+{
+	const double T = t;
+	double xc;
+	if (T < 4000.0)
+		xc = -0.2661239e9 / (T * T * T) - 0.2343589e6 / (T * T) + 0.8776956e3 / T + 0.179910;
+	else
+		xc = -3.0258469e9 / (T * T * T) + 2.1070379e6 / (T * T) + 0.2226347e3 / T + 0.240390;
+	double yc;
+	if (T < 2222.0)
+		yc = -1.1063814 * xc * xc * xc - 1.34811020 * xc * xc + 2.18555832 * xc - 0.20219683;
+	else if (T < 4000.0)
+		yc = -0.9549476 * xc * xc * xc - 1.37418593 * xc * xc + 2.09137015 * xc - 0.16748867;
+	else
+		yc = 3.0817580 * xc * xc * xc - 5.87338670 * xc * xc + 3.75112997 * xc - 0.37001483;
+	*x = (float)xc;
+	*y = (float)yc;
 }
 
 static void cie_render_graticule(const struct cie_source *src)
 {
 	const struct text_scale ts = text_scale_from_viewport((float)CIE_W, (float)CIE_H);
 	const float px = 11.0f;
+	g_uv = src->uv;
 
-	if (src->show_grid) {
+	if (src->show_grid && src->uv) {
+		// u'v' axes, every 0.1
+		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x40A0A0A0);
+		const float k = CIE_W / UV_MAX;
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			for (int i = 1; i <= 6; i++) {
+				gs_vertex2f(i * 0.1f * k, 0.0f);
+				gs_vertex2f(i * 0.1f * k, (float)CIE_H);
+				gs_vertex2f(0.0f, CIE_H - i * 0.1f * k);
+				gs_vertex2f((float)CIE_W, CIE_H - i * 0.1f * k);
+			}
+			gs_render_stop(GS_LINES);
+		}
+		for (int i = 1; i <= 6; i++) {
+			char buf[8];
+			snprintf(buf, sizeof(buf), "0.%d", i);
+			text_draw(&ts, buf, i * 0.1f * k, (float)CIE_H, px, 0x90C8C8C8, TEXT_ALIGN_CENTER,
+				  TEXT_VALIGN_BOTTOM);
+			text_draw(&ts, buf, 2.0f * ts.ux, CIE_H - i * 0.1f * k, px, 0x90C8C8C8, TEXT_ALIGN_LEFT,
+				  TEXT_VALIGN_MIDDLE);
+		}
+		text_draw(&ts, "u'v'", (float)CIE_W - 3.0f * ts.ux, 3.0f * ts.uy, px, 0xC0FFFFFF, TEXT_ALIGN_RIGHT,
+			  TEXT_VALIGN_TOP);
+	} else if (src->show_grid) {
 		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x40A0A0A0);
 		while (gs_effect_loop(solid, "Solid")) {
 			gs_render_start(false);
 			for (int i = 1; i <= 8; i++) {
-				gs_vertex2f(sx(i * 0.1f), 0.0f);
-				gs_vertex2f(sx(i * 0.1f), (float)CIE_H);
+				gs_vertex2f(i * 0.1f / CIE_X_MAX * CIE_W, 0.0f);
+				gs_vertex2f(i * 0.1f / CIE_X_MAX * CIE_W, (float)CIE_H);
 			}
 			for (int i = 1; i <= 9; i++) {
-				gs_vertex2f(0.0f, sy(i * 0.1f));
-				gs_vertex2f((float)CIE_W, sy(i * 0.1f));
+				gs_vertex2f(0.0f, (1.0f - i * 0.1f / CIE_Y_MAX) * CIE_H);
+				gs_vertex2f((float)CIE_W, (1.0f - i * 0.1f / CIE_Y_MAX) * CIE_H);
 			}
 			gs_render_stop(GS_LINES);
 		}
 		for (int i = 1; i <= 7; i++) {
 			char buf[8];
 			snprintf(buf, sizeof(buf), "0.%d", i);
-			text_draw(&ts, buf, sx(i * 0.1f), (float)CIE_H, px, 0x90C8C8C8, TEXT_ALIGN_CENTER,
-				  TEXT_VALIGN_BOTTOM);
-			text_draw(&ts, buf, 2.0f * ts.ux, sy(i * 0.1f), px, 0x90C8C8C8, TEXT_ALIGN_LEFT,
-				  TEXT_VALIGN_MIDDLE);
+			text_draw(&ts, buf, i * 0.1f / CIE_X_MAX * CIE_W, (float)CIE_H, px, 0x90C8C8C8,
+				  TEXT_ALIGN_CENTER, TEXT_VALIGN_BOTTOM);
+			text_draw(&ts, buf, 2.0f * ts.ux, (1.0f - i * 0.1f / CIE_Y_MAX) * CIE_H, px, 0x90C8C8C8,
+				  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
 		}
 	}
 
 	// spectral locus closed by the line of purples
 	draw_lines(spectral_locus, (int)(sizeof(spectral_locus) / sizeof(spectral_locus[0])), true, 0xC0E0E0E0);
 
+	// more gamuts
+	static const struct
+	{
+		float p[3][2];
+		const char *name;
+		uint32_t color;
+	} more[4] = {
+		{{{0.7347f, 0.2653f}, {0.0000f, 1.0000f}, {0.0001f, -0.0770f}}, "ACES AP0", 0x90FF80FF},
+		{{{0.7130f, 0.2930f}, {0.1650f, 0.8300f}, {0.1280f, 0.0440f}}, "ACES AP1", 0x90C0FF80},
+		{{{0.7347f, 0.2653f}, {0.1596f, 0.8404f}, {0.0366f, 0.0001f}}, "ProPhoto", 0x9080C0FF},
+		{{{0.6400f, 0.3300f}, {0.2100f, 0.7100f}, {0.1500f, 0.0600f}}, "Adobe RGB", 0x90FFA0A0},
+	};
+	const bool show_more[4] = {src->show_ap0, src->show_ap1, src->show_prophoto, src->show_adobe};
+	for (int k = 0; k < 4; k++) {
+		if (!show_more[k])
+			continue;
+		draw_lines(more[k].p, 3, true, more[k].color);
+		const float gx = more[k].p[1][0], gy = fminf(more[k].p[1][1], 0.88f);
+		text_draw(&ts, more[k].name, sx_y(gx, gy) + 4.0f * ts.ux, sy_x(gx, gy), px, more[k].color | 0xFF000000,
+			  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+	}
+	// the Planckian locus with a few color temperatures
+	if (src->show_planck) {
+		float pl[60][2];
+		int n = 0;
+		for (float t = 1667.0f; t <= 25000.0f && n < 60; t *= 1.05f, n++)
+			planck_xy(t, &pl[n][0], &pl[n][1]);
+		draw_lines((const float(*)[2])pl, n, false, 0xC0FFC080);
+		static const int temps[5] = {2000, 3200, 4300, 5600, 10000};
+		for (int k = 0; k < 5; k++) {
+			float x, y;
+			planck_xy((float)temps[k], &x, &y);
+			char buf[16];
+			snprintf(buf, sizeof(buf), "%dK", temps[k]);
+			const float qx = sx_y(x, y), qy = sy_x(x, y);
+			gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+			gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xE0FFC080);
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				gs_vertex2f(qx, qy - 2.5f);
+				gs_vertex2f(qx, qy + 2.5f);
+				gs_render_stop(GS_LINES);
+			}
+			text_draw(&ts, buf, qx, qy + 3.0f * ts.uy, px - 2.0f, 0xD0FFC080, TEXT_ALIGN_CENTER,
+				  TEXT_VALIGN_TOP);
+		}
+	}
+
 	static const float rec709[3][2] = {{0.640f, 0.330f}, {0.300f, 0.600f}, {0.150f, 0.060f}};
 	static const float p3[3][2] = {{0.680f, 0.320f}, {0.265f, 0.690f}, {0.150f, 0.060f}};
 	static const float rec2020[3][2] = {{0.708f, 0.292f}, {0.170f, 0.797f}, {0.131f, 0.046f}};
 	if (src->show_2020) {
 		draw_lines(rec2020, 3, true, 0xB0FFFFFF);
-		text_draw(&ts, "Rec.2020", sx(rec2020[1][0]) + 4.0f * ts.ux, sy(rec2020[1][1]), px, 0xB0FFFFFF,
-			  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+		text_draw(&ts, "Rec.2020", sx_y(rec2020[1][0], rec2020[1][1]) + 4.0f * ts.ux,
+			  sy_x(rec2020[1][0], rec2020[1][1]), px, 0xB0FFFFFF, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
 	}
 	if (src->show_p3) {
 		draw_lines(p3, 3, true, 0xB0FFC040);
-		text_draw(&ts, "P3", sx(p3[1][0]) + 4.0f * ts.ux, sy(p3[1][1]), px, 0xB0FFC040, TEXT_ALIGN_LEFT,
-			  TEXT_VALIGN_MIDDLE);
+		text_draw(&ts, "P3", sx_y(p3[1][0], p3[1][1]) + 4.0f * ts.ux, sy_x(p3[1][0], p3[1][1]), px, 0xB0FFC040,
+			  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
 	}
 	if (src->show_709) {
 		draw_lines(rec709, 3, true, 0xC060E0FF);
-		text_draw(&ts, "Rec.709", sx(rec709[1][0]) + 4.0f * ts.ux, sy(rec709[1][1]), px, 0xC060E0FF,
-			  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+		text_draw(&ts, "Rec.709", sx_y(rec709[1][0], rec709[1][1]) + 4.0f * ts.ux,
+			  sy_x(rec709[1][0], rec709[1][1]), px, 0xC060E0FF, TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
 	}
 
 	// D65 white point
-	const float wx = sx(0.3127f), wy = sy(0.3290f);
+	const float wx = sx_y(0.3127f, 0.3290f), wy = sy_x(0.3127f, 0.3290f);
 	const float d = 3.0f;
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xE0FFFFFF);

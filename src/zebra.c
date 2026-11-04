@@ -141,6 +141,7 @@ struct zb_source
 	gs_texture_t *key_tex_raw;
 	bool raw_dirty;
 	int gamut_mode; // false color: 0 levels, 1 outside Rec. 709, 2 outside DCI-P3
+	float opacity;  // false color over the picture: 1 is false color only
 };
 
 struct zbs_source
@@ -592,6 +593,7 @@ static void zb_update(struct zb_source *src, obs_data_t *settings)
 	if (src->is_falsecolor) {
 		fc_load_scheme(src, settings);
 		src->gamut_mode = (int)obs_data_get_int(settings, "fc_gamut");
+		src->opacity = (float)obs_data_get_double(settings, "fc_opacity") / 100.0f;
 	}
 }
 
@@ -651,6 +653,7 @@ static void zb_get_defaults(obs_data_t *settings)
 /* The false color scope shows its key below the picture by default. */
 static void fc_source_get_defaults(obs_data_t *settings)
 {
+	obs_data_set_default_double(settings, "fc_opacity", 100.0);
 	zb_get_defaults(settings);
 	obs_data_set_default_int(settings, "show_key", show_key_below);
 }
@@ -767,6 +770,50 @@ static obs_properties_t *zbf_get_properties(void *data)
 	return props;
 }
 
+/* Writes the color scheme as a 33-point 3D LUT (.cube): every R'G'B' to the color of its luma band. */
+static bool fc_export_cube(const struct zb_source *src, const char *path)
+{
+	FILE *fp = os_fopen(path, "w");
+	if (!fp)
+		return false;
+	fprintf(fp, "TITLE \"Video Analyser false color\"\nLUT_3D_SIZE 33\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n");
+	for (int b = 0; b < 33; b++) {
+		for (int g = 0; g < 33; g++) {
+			for (int r = 0; r < 33; r++) {
+				const float y = 0.2126f * r / 32.0f + 0.7152f * g / 32.0f + 0.0722f * b / 32.0f;
+				int k = 0;
+				while (k < src->n_bands - 1 && y >= src->bands[k].y_max)
+					k++;
+				const uint32_t c = src->n_bands ? src->bands[k].color : FC_GREY;
+				if (c == FC_GREY)
+					fprintf(fp, "%.6f %.6f %.6f\n", y, y, y);
+				else
+					fprintf(fp, "%.6f %.6f %.6f\n", ((c >> 16) & 0xFF) / 255.0f,
+						((c >> 8) & 0xFF) / 255.0f, (c & 0xFF) / 255.0f);
+			}
+		}
+	}
+	fclose(fp);
+	return true;
+}
+
+static bool fc_export_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	struct zbs_source *src = data;
+	obs_data_t *s = obs_source_get_settings(src->cm.self);
+	const char *path = obs_data_get_string(s, "fc_export_path");
+	if (path && *path) {
+		if (fc_export_cube(&src->zb, path))
+			blog(LOG_INFO, "[" PLUGIN_NAME "] false color exported to '%s'", path);
+		else
+			blog(LOG_WARNING, "[" PLUGIN_NAME "] could not write '%s'", path);
+	}
+	obs_data_release(s);
+	return false;
+}
+
 static obs_properties_t *fcs_get_properties(void *data)
 {
 	struct zbs_source *src = data;
@@ -775,6 +822,10 @@ static obs_properties_t *fcs_get_properties(void *data)
 
 	cm_get_properties(&src->cm, props);
 	zb_get_properties(props, true);
+	obs_properties_add_float_slider(props, "fc_opacity", obs_module_text("FC.Prop.Opacity"), 0.0, 100.0, 1.0);
+	obs_properties_add_path(props, "fc_export_path", obs_module_text("FC.Prop.ExportPath"), OBS_PATH_FILE_SAVE,
+				"Cube LUT (*.cube)", NULL);
+	obs_properties_add_button2(props, "fc_export", obs_module_text("FC.Prop.Export"), fc_export_clicked, src);
 
 	return props;
 }
@@ -1297,6 +1348,21 @@ static void zbs_render(void *data, gs_effect_t *effect)
 			set_effect_params(&src->zb, true);
 			while (gs_effect_loop(e, draw))
 				gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
+		}
+
+		// opacity: the picture shows through, false color times opacity plus the picture times the rest
+		if (src->zb.is_falsecolor && src->zb.opacity < 0.995f) {
+			const float k = 1.0f - fmaxf(src->zb.opacity, 0.0f);
+			gs_blend_state_push();
+			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+			fill_rect(0.0f, 0.0f, (float)cx, (float)cy, (uint32_t)(k * 255.0f) << 24);
+			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
+			gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), tex);
+			gs_effect_set_float(gs_effect_get_param_by_name(def, "multiplier"), k);
+			while (gs_effect_loop(def, "DrawMultiply"))
+				gs_draw_sprite_subregion(tex, 0, 0, 0, cx, cy);
+			gs_blend_state_pop();
 		}
 
 		zb_render_key(&src->zb, draw, cx, cy, raw && src->zb.is_falsecolor);
