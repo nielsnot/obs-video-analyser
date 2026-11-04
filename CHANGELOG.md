@@ -10,6 +10,8 @@
 - **Waveform, extended range:** with the raw signal the scale runs from -7 % to 109 %, so superwhite above 100 % and
   sub-black below 0 % are visible; graticule lines and labels continue above 100 %. The label at the bottom right
   says what arrives, for example "RAW 10-bit V210". For a Blackmagic, set its pixel format to 10-bit YUV.
+- **Waveform, drag the zoomed view:** zoomed in with the mouse wheel (for example into the blacks or the highlights),
+  drag the trace up or down to look at another part of the levels.
 - **Waveform, highest and lowest level:** two thin lines at the highest and lowest level in the picture, with their
   value (can be turned off).
 - **QC:** a new check, *Outside the legal range (raw signal, EBU R103)*: luma below -1 % or above 103 %, or R, G, B

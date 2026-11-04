@@ -81,6 +81,8 @@ struct wvs_source
 	volatile bool marker_edit; // markers can be moved with the mouse (Markers in the quick controls)
 	volatile int marker_sel;   // the marker last clicked or added, for Color and Delete
 	int gain;                  // zoom into the blacks, set from the options or quick controls
+	bool panning;              // dragging the zoomed view up or down
+	float pan_y, pan_off;      // pointer and view offset where the drag started
 
 	// extras: levels at the limits in orange, a histogram along the right edge, pixel positions
 	bool out_highlight;
@@ -1222,6 +1224,13 @@ static void wvs_mouse_click(void *data, const struct obs_mouse_event *event, int
 			    uint32_t click_count)
 {
 	struct wvs_source *src = data;
+	if (type == MOUSE_LEFT && !src->marker_edit) {
+		// zoomed in: drag the view up or down
+		src->panning = !mouse_up && click_count == 1 && zoom_active(src);
+		src->pan_y = (float)event->y;
+		src->pan_off = src->zoom_off;
+		return;
+	}
 	if (!src->marker_edit || type != MOUSE_LEFT || click_count > 1)
 		return;
 	if (!mouse_up) {
@@ -1262,6 +1271,17 @@ static void wvs_markers_proc(void *data, calldata_t *cd)
 static void wvs_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
 {
 	struct wvs_source *src = data;
+	if (src->panning) {
+		if (mouse_leave || !(event->modifiers & INTERACT_MOUSE_LEFT) || !zoom_active(src)) {
+			src->panning = false;
+			return;
+		}
+		const float h = (float)WV_SIZE;
+		float off = src->pan_off - ((float)event->y - src->pan_y) / src->zoom;
+		off = fmaxf(0.0f, fminf(off, h - h / src->zoom));
+		src->zoom_off = off;
+		return;
+	}
 	const int i = src->drag_marker;
 	if (i < 0 || mouse_leave || !(event->modifiers & INTERACT_MOUSE_LEFT))
 		return;
