@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.2
+
+- **Raw signal and HDR:** the label says the transfer of the source, for example `RAW 10-bit V210 HLG`. The raw signal
+  is used when the source has the transfer of the project (SDR, HLG or PQ). An SDR source in an HLG project (or HLG
+  in an SDR project) is converted by OBS, so the scopes measure the converted picture, as before; the filter has an
+  option to measure the source itself anyway.
+- **QC, preferred range:** the check of the raw signal now uses the preferred range of EBU R103 v3, -5 % to 105 % for
+  luma and R, G, B (10-bit codes 20 to 984), the same for SDR, HLG and PQ.
+- Tests with a 10-bit HLG clip in an HLG project, and an SDR clip in an HLG project.
+
 ## 0.8.1
 
 - **Raw signal of video sources:** when a dock or scope measures a video source (a capture card such as a Blackmagic

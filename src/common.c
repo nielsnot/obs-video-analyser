@@ -486,7 +486,7 @@ static void cm_pipeline_thread_loop(struct cm_surface_queue_item *item)
 			item->ext_size = size;
 		}
 		if (raw_input_fill(raw, item->ext, item->width, item->height, item->raw_x, item->raw_y, item->raw_w,
-				   item->raw_h, item->ext_desc, sizeof(item->ext_desc))) {
+				   item->raw_h, item->colorspace, item->ext_desc, sizeof(item->ext_desc))) {
 			surface_data.ext_data = item->ext;
 			surface_data.ext_linesize = item->width * 4;
 			surface_data.ext_desc = item->ext_desc;

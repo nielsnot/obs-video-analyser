@@ -17,12 +17,14 @@ obs_source_t *raw_input_find(obs_source_t *parent);
 /* Adds the raw input filter to an async video source that does not have one yet (on the UI thread). */
 void raw_input_ensure(obs_source_t *parent);
 
-/* Fills ext (width x height, 4 bytes per pixel: B, G, R, Y) with the raw signal as 8-bit legal codes, where
+/* colorspace is the scope's (CM_CS_*): the raw signal is used only when the source has the same transfer (SDR,
+ * HLG or PQ), unless the filter is set to measure it anyway.
+ * Fills ext (width x height, 4 bytes per pixel: B, G, R, Y) with the raw signal as 8-bit legal codes, where
  * 16 is 0 % and 235 is 100 %, so values above 100 % and below 0 % are kept up to 109 % and down to -7 %.
  * The picture is the region (x0, y0) of a capture of src_w x src_h pixels of the source.
  * desc gets a short description such as "RAW 10-bit V210". Returns false when there is no usable frame. */
 bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0,
-		    uint32_t src_w, uint32_t src_h, char *desc, size_t desc_size);
+		    uint32_t src_w, uint32_t src_h, int colorspace, char *desc, size_t desc_size);
 
 /* Frees what the module keeps; at unload. */
 void raw_input_free(void);

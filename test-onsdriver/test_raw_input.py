@@ -14,7 +14,9 @@ from onsdriver import obstest
 
 DOCK_KEY = 'obs-video-analyser-dock'
 PREFIX = 'obs-video-analyser.'
-CLIP = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'superwhite.mkv')
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+CLIP = os.path.join(ASSETS, 'superwhite.mkv')
+CLIP_HLG = os.path.join(ASSETS, 'superwhite-hlg.mkv')  # the same codes, tagged Rec. 2100 HLG
 SOURCE = 'Raw clip'
 
 
@@ -37,6 +39,9 @@ def dock_data():
 
 class RawInputTest(obstest.OBSTest):
     'The raw signal of a video source'
+    clip = CLIP
+    hdr_project = False
+    expect_raw = True
 
     def setUp(self, config_name='saved-config', run=True):
         super().setUp(run=False, config_name=config_name)
@@ -48,16 +53,23 @@ class RawInputTest(obstest.OBSTest):
         collection.setdefault('modules', {})[DOCK_KEY] = dock_data()
         with open(path, 'w', encoding='utf-8') as fw:
             json.dump(collection, fw)
+        if self.hdr_project:
+            profile = self.obs.config.get_profile()
+            video = profile['Video']
+            video['ColorSpace'] = '2100HLG'
+            video['ColorFormat'] = 'P010'
+            video['ColorRange'] = 'Partial'
+            profile.save()
         self.obs.run()
 
     def test_raw(self):
-        'The trace goes beyond 100 % and below 0 %'
+        'The trace goes beyond 100 % and below 0 % when the source has the transfer of the project'
         from PIL import Image  # pylint: disable=import-outside-toplevel
         cl = self.obs.get_obsws()
         try:
             cl.send('CreateInput', {
                 'sceneName': 'Scene', 'inputName': SOURCE, 'inputKind': 'ffmpeg_source',
-                'inputSettings': {'is_local_file': True, 'local_file': CLIP, 'looping': True,
+                'inputSettings': {'is_local_file': True, 'local_file': self.clip, 'looping': True,
                                   'restart_on_activate': True},
             })
         except Exception as e:  # pylint: disable=broad-except
@@ -80,16 +92,36 @@ class RawInputTest(obstest.OBSTest):
             rows = [y for y in range(img.height)
                     if any(sum(img.getpixel((x, y))) > 90 for x in range(0, img.width, 4))]
             # 107 % at code 250 of 255 (row 5), -5 % at code 5 (row 250); clipped would be rows 0 and 255
-            if rows and 2 <= rows[0] <= 10 and 245 <= rows[-1] <= 253:
+            raw = rows and 2 <= rows[0] <= 10 and 245 <= rows[-1] <= 253
+            if raw and self.expect_raw:
+                break
+            if rows and not self.expect_raw and rows[0] > 20 and filters:
                 break
         if img:
             os.makedirs('screenshots', exist_ok=True)
             img.save('screenshots/raw-input.png')
-        notice(f'raw input: filters {filters}; waveform rows {rows[:3]}..{rows[-3:]}')
+        notice(f'raw input ({type(self).__name__}): filters {filters}; waveform rows {rows[:3]}..{rows[-3:]}')
         self.assertIn(PREFIX + 'raw_input', filters, 'the raw input filter was not added')
         self.assertTrue(rows, 'the waveform draws nothing')
-        self.assertTrue(2 <= rows[0] <= 10, f'superwhite not above 100 %: top row {rows[0]}')
-        self.assertTrue(245 <= rows[-1] <= 253, f'sub-black not below 0 %: bottom row {rows[-1]}')
+        if self.expect_raw:
+            self.assertTrue(2 <= rows[0] <= 10, f'superwhite not above 100 %: top row {rows[0]}')
+            self.assertTrue(245 <= rows[-1] <= 253, f'sub-black not below 0 %: bottom row {rows[-1]}')
+        else:
+            # converted by OBS: SDR white lands well below the top of the HLG scale
+            self.assertGreater(rows[0], 20, f'an SDR source in an HLG project is shown raw: top row {rows[0]}')
+
+
+class RawInputHLGTest(RawInputTest):
+    'An HLG source in an HLG project: the raw signal is the HLG signal itself'
+    clip = CLIP_HLG
+    hdr_project = True
+
+
+class RawInputSDRinHLGTest(RawInputTest):
+    'An SDR source in an HLG project: OBS converts it, so the scopes measure the converted picture'
+    clip = CLIP
+    hdr_project = True
+    expect_raw = False
 
 
 if __name__ == '__main__':

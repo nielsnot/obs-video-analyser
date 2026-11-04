@@ -11,6 +11,7 @@
 #include <math.h>
 #include "plugin-macros.generated.h"
 #include "raw-input.h"
+#include "util.h"
 
 struct raw_frame
 {
@@ -22,6 +23,7 @@ struct raw_frame
 	enum video_format format;
 	bool full_range, flip;
 	float matrix[16];
+	int trc; // enum video_trc: SDR (default or sRGB), PQ or HLG
 	bool valid;
 };
 
@@ -31,6 +33,7 @@ struct raw_input
 	pthread_mutex_t mutex;
 	struct raw_frame frame;
 	volatile uint64_t last_use; // ns; frames are copied only while a scope uses them
+	bool any_transfer;          // also when the source's transfer differs from the project's
 };
 
 static const char *raw_input_get_name(void *unused)
@@ -39,13 +42,28 @@ static const char *raw_input_get_name(void *unused)
 	return obs_module_text("RawInput");
 }
 
+static void raw_input_update(void *data, obs_data_t *settings)
+{
+	struct raw_input *r = data;
+	r->any_transfer = obs_data_get_bool(settings, "any_transfer");
+}
+
 static void *raw_input_create(obs_data_t *settings, obs_source_t *source)
 {
-	UNUSED_PARAMETER(settings);
 	struct raw_input *r = bzalloc(sizeof(struct raw_input));
 	r->self = source;
 	pthread_mutex_init(&r->mutex, NULL);
+	raw_input_update(r, settings);
 	return r;
+}
+
+static obs_properties_t *raw_input_get_properties(void *data)
+{
+	UNUSED_PARAMETER(data);
+	obs_properties_t *props = obs_properties_create();
+	obs_properties_add_bool(props, "any_transfer", obs_module_text("RawInput.AnyTransfer"));
+	obs_properties_add_text(props, "note", obs_module_text("RawInput.Note"), OBS_TEXT_INFO);
+	return props;
 }
 
 static void raw_input_destroy(void *data)
@@ -181,6 +199,7 @@ static struct obs_source_frame *raw_input_filter_video(void *data, struct obs_so
 		f->full_range = frame->full_range;
 		f->flip = frame->flip;
 		memcpy(f->matrix, frame->color_matrix, sizeof(f->matrix));
+		f->trc = frame->trc;
 	}
 	pthread_mutex_unlock(&r->mutex);
 	return frame;
@@ -306,8 +325,13 @@ static inline uint8_t to_code(float v)
 	return (uint8_t)(c < 0.0f ? 0.0f : c > 255.0f ? 255.0f : c);
 }
 
+static const char *trc_desc(int trc)
+{
+	return trc == VIDEO_TRC_HLG ? "HLG" : trc == VIDEO_TRC_PQ ? "PQ" : "SDR";
+}
+
 bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0,
-		    uint32_t src_w, uint32_t src_h, char *desc, size_t desc_size)
+		    uint32_t src_w, uint32_t src_h, int colorspace, char *desc, size_t desc_size)
 {
 	struct raw_input *r = filter ? obs_obj_get_data(filter) : NULL;
 	if (!r || !width || !height || !src_w || !src_h)
@@ -317,6 +341,16 @@ bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t
 	pthread_mutex_lock(&r->mutex);
 	const struct raw_frame *f = &r->frame;
 	if (!f->valid) {
+		pthread_mutex_unlock(&r->mutex);
+		return false;
+	}
+	// The raw signal is only what the scopes show when the source has the transfer of the project: an SDR source
+	// in an HLG project is converted by OBS (SDR white lands near 75 %), and so is HLG in an SDR project.
+	const int project = colorspace == CM_CS_2100_HLG  ? VIDEO_TRC_HLG
+			    : colorspace == CM_CS_2100_PQ ? VIDEO_TRC_PQ
+							  : VIDEO_TRC_DEFAULT;
+	const int source = f->trc == VIDEO_TRC_HLG || f->trc == VIDEO_TRC_PQ ? f->trc : VIDEO_TRC_DEFAULT;
+	if (source != project && !r->any_transfer) {
 		pthread_mutex_unlock(&r->mutex);
 		return false;
 	}
@@ -353,7 +387,8 @@ bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t
 		}
 	}
 	if (desc && desc_size)
-		snprintf(desc, desc_size, "RAW %s%s", format_desc(f->format), f->full_range ? " full" : "");
+		snprintf(desc, desc_size, "RAW %s %s%s", format_desc(f->format), trc_desc(f->trc),
+			 f->full_range ? " full" : "");
 	pthread_mutex_unlock(&r->mutex);
 	return true;
 }
@@ -446,4 +481,6 @@ const struct obs_source_info colormonitor_raw_input = {
 	.create = raw_input_create,
 	.destroy = raw_input_destroy,
 	.filter_video = raw_input_filter_video,
+	.update = raw_input_update,
+	.get_properties = raw_input_get_properties,
 };

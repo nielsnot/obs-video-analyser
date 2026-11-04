@@ -55,7 +55,7 @@ enum qc_check_e {
 	QC_BLACK,
 	QC_FREEZE,
 	QC_DEADPIX,
-	QC_LEGAL, // the raw signal beyond EBU R103: luma -1 % to 103 %, R, G, B -5 % to 105 %
+	QC_LEGAL, // the raw signal beyond the preferred range of EBU R103 v3: -5 % to 105 % for luma and R, G, B
 	QC_N_CHECKS,
 };
 
@@ -488,8 +488,10 @@ static void measure(struct qc_source *src, const struct cm_surface_data *sd, str
 					ymin = e[3];
 				if (e[3] > ymax)
 					ymax = e[3];
-				if (e[3] < 14 || e[3] > 241 || e[0] < 5 || e[0] > 245 || e[1] < 5 || e[1] > 245 ||
-				    e[2] < 5 || e[2] > 245)
+				// EBU R103 v3: luma and R, G, B within the preferred range, 8-bit codes 5..246 (about
+				// -5 % to 105 %, 10-bit 20..984); the same for SDR, HLG and PQ
+				if (e[3] < 5 || e[3] > 246 || e[0] < 5 || e[0] > 246 || e[1] < 5 || e[1] > 246 ||
+				    e[2] < 5 || e[2] > 246)
 					n_legal++;
 			}
 		}

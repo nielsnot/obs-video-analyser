@@ -57,13 +57,31 @@ Install **Blackmagic Desktop Video** and add a **Blackmagic Device** source in O
 | Scope | With the raw signal |
 |---|---|
 | Waveform | scale from -7 % to 109 %, graticule and labels continue above 100 %; `RAW ...` label |
-| QC | check *Outside the legal range (raw signal, EBU R103)*: luma below -1 % or above 103 %, R, G, B below -5 % or above 105 %; the timeline shows -7 % to 109 % |
+| QC | check *Outside the preferred range (raw signal, EBU R103)*: luma or R, G, B below -5 % or above 105 % (10-bit codes 20 to 984, EBU R103 v3, the same for SDR, HLG and PQ); the timeline shows -7 % to 109 % |
 | False color | two more colors: **Sub-black** (cyan, below 0 %) and **Superwhite** (white, above 100 %), also in the key and the table with percentages |
 | Zebra | the stripes follow the raw luma; a high threshold of 100 % has no upper limit, so it also stripes superwhite |
 | Histogram | the levels beyond 0 % and 100 % have their own bins; the graticule marks 0 % and 100 % |
 | Line plot, Sat / Lum | the luma (and R, G, B) beyond 0 % and 100 % |
 | Gamut diamond | colors beyond the legal range land outside the diamonds |
 | Vectorscope, CIE, color chart, faces | unchanged: they measure color, not level |
+
+## HDR (HLG and PQ)
+
+The raw signal is used when the source has the **same transfer as the OBS project**:
+
+| Project | Source | What the scopes show |
+|---|---|---|
+| SDR (Rec. 709) | SDR camera | the raw signal, `RAW ... SDR` |
+| HLG (Rec. 2100) | HLG camera, for example a Blackmagic with an HLG signal | the raw HLG signal, `RAW ... HLG`: 75 % is reference white (BT.2408), superwhite above 100 % shows |
+| HLG | SDR camera | the picture as OBS converts it to HLG (SDR white near 75 %), no `RAW` label |
+| SDR | HLG camera | the picture as OBS converts it to SDR, no `RAW` label |
+
+When the transfers differ, OBS converts the source before it reaches the project, so the raw signal would not be
+what goes out. To see the source itself anyway, open the source's **Filters**, select **Video Analyser input** and
+turn on *Also measure the raw signal when the source is SDR in an HDR project*.
+
+The transfer comes from the source: a Blackmagic Device reports HLG or PQ when the signal carries that metadata,
+a media file from its tags. A source that reports nothing counts as SDR.
 
 ## Good to know
 
@@ -83,5 +101,6 @@ Install **Blackmagic Desktop Video** and add a **Blackmagic Device** source in O
 |---|---|
 | No `RAW` label | Is the dock measuring the source itself (step 1)? Is the source YUV (not BGRA or RGB)? |
 | `RAW 8-bit UYVY` from a Blackmagic | Set *Pixel format* to *10-bit YUV* in the Blackmagic source |
+| No `RAW` label in an HLG project | The source is SDR (or reports no transfer): see *HDR* above |
 | Everything is shifted up or down by about 7 % | Check *Color range* in the source: limited for normal video |
 | The filter is missing | It is added a second after a scope starts measuring the source; if you removed it, restart OBS |
