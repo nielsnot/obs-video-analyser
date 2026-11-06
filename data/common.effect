@@ -24,6 +24,7 @@ uniform float lut_apply = 0.0;
 uniform float lut_size = 33.0;
 uniform float3 lut_dmin = {0.0, 0.0, 0.0};
 uniform float3 lut_dmax = {1.0, 1.0, 1.0};
+uniform float ref_alpha = 1.0; // the snapshot in the ROI view: its weight in a blend
 
 sampler_state lut_sampler {
 	Filter   = Linear;
@@ -205,6 +206,17 @@ float4 PSDrawDimmed(VertInOut vert_in) : TARGET
 	return float4(rgb.rgb * k, rgb.a);
 }
 
+// The snapshot in the ROI view: shown like the live picture, through the LUT when it applies to the view.
+float4 PSDrawReference(VertInOut vert_in) : TARGET
+{
+	float4 c = image.Sample(cnv_sampler, vert_in.uv);
+	float4 rgb = to_display(c);
+	if (lut_apply > 0.5)
+		rgb = float4(apply_lut(to_signal(c).rgb), c.a);
+	rgb.rgb *= ref_alpha;
+	return rgb;
+}
+
 float4 PSDrawDisplay(VertInOut vert_in) : TARGET
 {
 	return to_display(image.Sample(cnv_sampler, vert_in.uv));
@@ -241,6 +253,15 @@ float4 PSConvertRGB_YUV2020(VertInOut vert_in) : TARGET
 	uv00.x = +0.439216 * rgb.x -0.403891 * rgb.y -0.035325 * rgb.z +0.5; // V
 	uv00.a = mask_value(vert_in.uv, rgb.rgb);
 	return uv00;
+}
+
+technique DrawReference
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDrawReference(vert_in);
+	}
 }
 
 technique DrawDisplay

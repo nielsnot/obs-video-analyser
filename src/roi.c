@@ -894,19 +894,25 @@ static void roi_render(void *data, gs_effect_t *effect)
 	// comparing: the reference frame fills the left half, with a divider line
 	const bool comparing = src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
 			       src->ref_h == src->cm.texrender_height;
-	// the HDR reference (linear float) cannot be blended here: it is wiped instead
-	const bool hdr_ref = comparing && gs_texture_get_color_format(src->ref_tex) == GS_RGBA16F && src->cm.effect;
-	const int cmode = comparing && src->compare_mode == 2 && hdr_ref ? 0 : src->compare_mode;
+	const bool hdr_ref = comparing && gs_texture_get_color_format(src->ref_tex) == GS_RGBA16F;
+	const int cmode = src->compare_mode;
 	const float cpos = fminf(fmaxf(src->compare_pos, 0.0f), 1.0f);
 	if (comparing) {
-		// the reference has the captured format: linear float for HDR, shown the same way as the live picture
-		gs_effect_t *def = hdr_ref ? src->cm.effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
-		if (hdr_ref) {
-			cm_set_signal_params(def,
-					     cm_cs_is_hdr(src->cm.colorspace) ? src->cm.colorspace : CM_CS_2100_HLG);
-			cm_set_lut_params(def, NULL, true);
+		// the reference is shown the way the live picture is: HDR as SDR, and through the LUT of the view
+		gs_effect_t *e = src->cm.effect;
+		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		const char *tech = e ? "DrawReference" : "Draw";
+		if (e) {
+			cm_set_signal_params(e, hdr_ref ? (cm_cs_is_hdr(src->cm.colorspace) ? src->cm.colorspace
+											    : CM_CS_2100_HLG)
+							: CM_CS_709);
+			cm_set_lut_params(e, &src->cm, true);
+			gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_alpha"), 1.0f);
+			gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->ref_tex);
+		} else {
+			e = def;
+			gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
 		}
-		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->ref_tex);
 		const struct text_scale ts = text_scale_from_viewport(w, h);
 		if (cmode == 2) {
 			// blend: the live picture times (1 - a), plus the snapshot times a
@@ -915,24 +921,34 @@ static void roi_render(void *data, gs_effect_t *effect)
 			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
 			fill_quad(0.0f, 0.0f, w, h, (uint32_t)(a * 255.0f) << 24);
 			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
-			gs_effect_set_float(gs_effect_get_param_by_name(def, "multiplier"), a);
-			while (gs_effect_loop(def, "DrawMultiply"))
+			if (e == def) {
+				gs_effect_set_float(gs_effect_get_param_by_name(def, "multiplier"), a);
+				tech = "DrawMultiply";
+			} else {
+				gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_alpha"), a);
+			}
+			while (gs_effect_loop(e, tech))
 				gs_draw_sprite(src->ref_tex, 0, src->ref_w, src->ref_h);
 			gs_blend_state_pop();
 		} else if (cmode == 1) {
 			// wipe: the snapshot above, live below
 			const uint32_t rows = (uint32_t)(cpos * src->ref_h);
 			if (rows)
-				while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
+				while (gs_effect_loop(e, tech))
 					gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, src->ref_w, rows);
 			fill_quad(0.0f, rows - 1.0f * ts.uy, w, rows + 1.0f * ts.uy, 0xFFFF59D9);
 		} else {
 			// wipe: the snapshot on the left, live on the right
 			const uint32_t cols = (uint32_t)(cpos * src->ref_w);
 			if (cols)
-				while (gs_effect_loop(def, hdr_ref ? "DrawDisplay" : "Draw"))
+				while (gs_effect_loop(e, tech))
 					gs_draw_sprite_subregion(src->ref_tex, 0, 0, 0, cols, src->ref_h);
 			fill_quad(cols - 1.0f * ts.ux, 0.0f, cols + 1.0f * ts.ux, h, 0xFFFF59D9);
+		}
+		if (src->cm.effect) {
+			// leave the shared effect as the live picture uses it
+			gs_effect_set_float(gs_effect_get_param_by_name(src->cm.effect, "ref_alpha"), 1.0f);
+			cm_set_signal_params(src->cm.effect, src->cm.colorspace);
 		}
 	}
 

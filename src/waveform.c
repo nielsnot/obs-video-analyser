@@ -69,8 +69,9 @@ struct wvs_source
 	uint32_t components;
 	int intensity;
 	int graticule_lines, graticule_lines_prev;
-	int scale_labels; // scale_labels_e
-	bool colorize;    // luma trace in the color of the pixels
+	int scale_labels;     // scale_labels_e
+	bool scale_all_parts; // labels in every part of a parade, not only the left one
+	bool colorize;        // luma trace in the color of the pixels
 
 	// vertical zoom with the mouse wheel; zoom_off is the top of the view in trace units
 	float zoom, zoom_off;
@@ -247,6 +248,7 @@ static void wvs_update(void *data, obs_data_t *settings)
 
 	src->graticule_lines = (int)obs_data_get_int(settings, "graticule_lines");
 	src->scale_labels = (int)obs_data_get_int(settings, "scale_labels");
+	src->scale_all_parts = obs_data_get_bool(settings, "scale_all_parts");
 }
 
 static void wvs_get_defaults(obs_data_t *settings)
@@ -254,7 +256,7 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "target_scale", 2);
 	obs_data_set_default_int(settings, "intensity", 51);
 	obs_data_set_default_int(settings, "components", COMP_RGB);
-	obs_data_set_default_int(settings, "graticule_lines", 4);
+	obs_data_set_default_int(settings, "graticule_lines", 10);
 	obs_data_set_default_int(settings, "scale_labels", SCALE_PERCENT);
 	obs_data_set_default_bool(settings, "out_highlight", true);
 	obs_data_set_default_double(settings, "out_hi", 100.0);
@@ -326,6 +328,7 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.8bit"), SCALE_8BIT);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.10bit"), SCALE_10BIT);
 	obs_property_list_add_int(prop, obs_module_text("WV.Prop.Scale.HLGNits"), SCALE_HLG_NITS);
+	obs_properties_add_bool(props, "scale_all_parts", obs_module_text("WV.Prop.ScaleAllParts"));
 	obs_properties_add_bool(props, "colorize", obs_module_text("WV.Prop.Colorize"));
 	obs_properties_add_bool(props, "side_histogram", obs_module_text("WV.Prop.SideHistogram"));
 	obs_properties_add_bool(props, "x_axis", obs_module_text("WV.Prop.XAxis"));
@@ -845,8 +848,11 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 	const float off = zoom_active(src) ? src->zoom_off : 0.0f;
 	const float px = 9.5f;
 	const float pad = 3.0f * ts.ux;
-	// in a parade every part has its own labels
-	const int n_par = src->display == DISP_PARADE ? (int)n_components(src) : 1;
+	// a parade has the labels on the left only, unless every part should have them
+	const int n_par = src->display == DISP_PARADE && src->scale_all_parts ? (int)n_components(src) : 1;
+	// with many lines on a small scope: a label on every second (or third) line, so they don't overlap
+	const float spacing = WV_SIZE * zoom / src->graticule_lines / (src->ext ? 1.16f : 1.0f);
+	const int step = (int)ceilf(px * ts.uy * 1.2f / fmaxf(spacing, 1e-3f));
 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	for (int pi = 0; pi < n_par; pi++)
@@ -856,6 +862,9 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 			const int n_above = src->ext ? src->graticule_lines : 0;
 			for (int i = -n_above; i <= src->graticule_lines; i++) {
 				const float level = 1.0f - (float)i / src->graticule_lines; // the 100 % line is i = 0
+				if (step > 1 && i != src->graticule_lines &&
+				    (i % step != 0 || src->graticule_lines - i < step))
+					continue; // the 0 % line always has its label
 				if (lvl(src, level) > 1.0f)
 					continue;
 				const float y = base + (WV_SIZE * (1.0f - lvl(src, level)) - off) * zoom;

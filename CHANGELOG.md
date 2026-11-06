@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1 (in progress)
+
+- Waveform: a graticule line every 10 % by default; in a parade the scale values are on the left only (an option puts
+  them in every part again); on a small scope the labels skip lines instead of overlapping.
+- Compare: the snapshot in the ROI view goes through the LUT of the view like the live picture, so both halves of a
+  wipe or a blend look the same; a blend now also works for HDR.
+
 ## 0.9.0
 
 A large update, inspired by what professional scope software offers. Everything new can be switched off; visual
