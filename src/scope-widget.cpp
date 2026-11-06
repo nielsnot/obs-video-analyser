@@ -2494,6 +2494,17 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 
 	fillLayoutMenu(popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.layouts"))));
 
+	// color pins: also removable without the picker tool
+	if (struct roi_source *r = widget_roi(data)) {
+		pthread_mutex_lock(&r->shapes_mutex);
+		const int npins = (int)r->pins.num;
+		pthread_mutex_unlock(&r->shapes_mutex);
+		if (npins) {
+			act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.clear_pins")).arg(npins));
+			connect(act, &QAction::triggered, this, [this]() { roi_clear_pins(widget_roi(data)); });
+		}
+	}
+
 	// guides over the ROI view, each on or off
 	if (data->roi) {
 		QMenu *guides = popup.addMenu(QString::fromUtf8(obs_module_text("ROI.Guides")));

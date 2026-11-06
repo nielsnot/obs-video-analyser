@@ -1263,6 +1263,17 @@ static void add_pin(struct roi_source *src, int x, int y)
 		return;
 	struct roi_pin pin = {.x = clamp01((float)x / w), .y = clamp01((float)y / h)};
 	pthread_mutex_lock(&src->shapes_mutex);
+	// a click on a pin removes it
+	const float reach = 12.0f / fmaxf(src->zoom, 1e-3f);
+	for (size_t i = 0; i < src->pins.num; i++) {
+		const float dx = (src->pins.array[i].x - pin.x) * w, dy = (src->pins.array[i].y - pin.y) * h;
+		if (dx * dx + dy * dy <= reach * reach) {
+			da_erase(src->pins, i);
+			pthread_mutex_unlock(&src->shapes_mutex);
+			shapes_store(src);
+			return;
+		}
+	}
 	if (src->pins.num >= ROI_MAX_PINS)
 		da_erase(src->pins, 0); // the oldest pin makes room
 	da_push_back(src->pins, &pin);

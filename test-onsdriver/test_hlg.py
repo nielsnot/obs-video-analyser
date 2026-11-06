@@ -170,6 +170,40 @@ class HLGProjectTest(HLGTestBase):
         color = self.measure(cl, 'HLG project, Auto')
         self.assertTrue(near(color, HIGHLIGHT), f'white is not at the HLG level of SDR white: {color}')
 
+    def wv_top(self, cl):
+        'The highest lit row of the waveform (256 rows, 100 % at the top).'
+        wv = self.screenshot(cl, self.source_of(cl, 'waveform_source'), repeat=20, size=(256, 256))
+        for y in range(wv.height):
+            if any(sum(wv.getpixel((x, y))) > 90 for x in range(0, wv.width, 4)):
+                return y
+        return wv.height
+
+    def test_lut_on_scopes(self):
+        'A LUT on the scopes moves luma and R, G, B alike; a LUT on the view only moves nothing'
+        cl = self.obs.get_obsws()
+        self.add_white(cl)
+        # a LUT that maps everything to 25 %
+        lut = os.path.abspath('flat25.cube')
+        with open(lut, 'w', encoding='utf-8') as fw:
+            fw.write('LUT_3D_SIZE 2\n' + '0.25 0.25 0.25\n' * 8)
+        roi = self.source_of(cl, 'roi')
+        wv = self.source_of(cl, 'waveform_source')
+        before = self.wv_top(cl)
+        cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'lut_file': lut, 'lut_mode': 2}})
+        time.sleep(1.0)
+        y_lut = self.wv_top(cl)
+        cl.send('SetInputSettings', {'inputName': wv, 'inputSettings': {'components': 0x07}})
+        time.sleep(1.0)
+        rgb_lut = self.wv_top(cl)
+        cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'lut_mode': 1}})
+        time.sleep(1.0)
+        rgb_view = self.wv_top(cl)
+        notice(f'LUT: top row without {before}, Y with LUT on scopes {y_lut}, RGB with LUT on scopes {rgb_lut}, '
+               f'RGB with LUT on the view only {rgb_view} (25 % is about 192)')
+        self.assertLess(abs(y_lut - 192), 12, 'luma does not follow the LUT on the scopes')
+        self.assertLess(abs(rgb_lut - 192), 12, 'R, G, B do not follow the LUT on the scopes')
+        self.assertLess(abs(rgb_view - before), 6, 'a LUT on the view only changed the scopes')
+
 
 if __name__ == '__main__':
     unittest.main()
