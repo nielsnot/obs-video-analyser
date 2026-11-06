@@ -557,21 +557,6 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		}
 	}
 
-	{
-		// diagnostics: the first pixel of each part, every few seconds
-		static uint64_t last_px;
-		const uint64_t now = os_gettime_ns();
-		if (now - last_px > 3000000000ULL) {
-			last_px = now;
-			const uint8_t *r = surface_data->rgb_data, *y = surface_data->yuv_data;
-			blog(LOG_INFO,
-			     "[" PLUGIN_NAME
-			     "] waveform diag: components 0x%x cs %d, rgb %d,%d,%d,%d yuv %d,%d,%d,%d ext %p",
-			     src->components, surface_data->colorspace, r ? r[2] : -1, r ? r[1] : -1, r ? r[0] : -1,
-			     r ? r[3] : -1, y ? y[2] : -1, y ? y[1] : -1, y ? y[0] : -1, y ? y[3] : -1,
-			     (void *)surface_data->ext_data);
-		}
-	}
 	const bool ext = surface_data->ext_data && !(src->components & COMP_UV);
 	if (ext)
 		snprintf(src->ext_desc, sizeof(src->ext_desc), "%s",

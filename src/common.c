@@ -244,50 +244,43 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 			}
 			cm_set_signal_params(src->effect, src->colorspace);
 			cm_set_lut_params(src->effect, src, false);
-			{
-				static uint64_t last_cv;
-				const uint64_t now2 = os_gettime_ns();
-				if (now2 - last_cv > 3000000000ULL) {
-					last_cv = now2;
-					blog(LOG_INFO,
-					     "[" PLUGIN_NAME
-					     "] convert diag: '%s' flags 0x%x cs %d lut %d/%d tex fmt %d",
-					     obs_source_get_name(src->self), item->flags, src->colorspace,
-					     src->lut_mode, src->lut_tex != NULL,
-					     (int)gs_texture_get_color_format(tex));
-				}
+		}
+
+		if (item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_RAW_TEXTURE)) {
+			gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
+			while (gs_effect_loop(src->effect, "MaskRGB")) {
+				gs_draw_sprite_subregion(tex, 0, x, y, item->width, item->height);
 			}
 
-			if (item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_RAW_TEXTURE)) {
-				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
-				while (gs_effect_loop(src->effect, "MaskRGB")) {
-					gs_draw_sprite_subregion(tex, 0, x, y, item->width, item->height);
-				}
+			offset += item->height;
+		}
 
-				offset += item->height;
+		if (item->flags & CM_FLAG_CONVERT_YUV) {
+			if (offset) {
+				gs_matrix_translate3f(0.0f, (float)offset, 0.0f);
 			}
 
-			if (item->flags & CM_FLAG_CONVERT_YUV) {
-				if (offset) {
-					gs_matrix_translate3f(0.0f, (float)offset, 0.0f);
-				}
-
-				const char *conversion = src->colorspace == CM_CS_601    ? "ConvertRGB_YUV601"
-							 : cm_cs_is_hdr(src->colorspace) ? "ConvertRGB_YUV2020"
-											 : "ConvertRGB_YUV709";
-				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
-				while (gs_effect_loop(src->effect, conversion)) {
-					gs_draw_sprite_subregion(tex, 0, x, y, item->width, item->height);
-				}
+			// OBS clears every parameter of an effect when a technique ends: set them again for this pass,
+			// or it runs with the defaults (no HDR signal, no LUT, no selection)
+			cm_set_mask_params(src->effect, src->mask);
+			cm_set_signal_params(src->effect, src->colorspace);
+			cm_set_lut_params(src->effect, src, false);
+			const char *conversion = src->colorspace == CM_CS_601    ? "ConvertRGB_YUV601"
+						 : cm_cs_is_hdr(src->colorspace) ? "ConvertRGB_YUV2020"
+										 : "ConvertRGB_YUV709";
+			gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
+			while (gs_effect_loop(src->effect, conversion)) {
+				gs_draw_sprite_subregion(tex, 0, x, y, item->width, item->height);
 			}
 		}
-		gs_blend_state_pop();
-		gs_texrender_end(item->texrender);
-		gs_projection_pop();
-		PROFILE_END(prof_convert_yuv_name);
 	}
+	gs_blend_state_pop();
+	gs_texrender_end(item->texrender);
+	gs_projection_pop();
+	PROFILE_END(prof_convert_yuv_name);
+}
 
-	return true;
+return true;
 }
 
 /* The raw input filter of the target (a new reference), looked up once a second; adds one when missing. */

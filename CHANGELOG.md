@@ -8,6 +8,10 @@
   wipe or a blend look the same; a blend now also works for HDR.
 - False color: a Football preset with the target at 50 %: on target (48-52 %) in green, slightly under or over in
   cyan and yellow, further off in blue and orange, the rest grey, clipping at both ends.
+- Fix: luma, Y'CbCr and every scope that measures them (waveform in Y, YUV and YRGB, vectorscope, histogram...)
+  ignored the HDR signal, the LUT and the selection whenever the dock also captured R'G'B' (for example with false
+  color or an RGB waveform in the dock). OBS clears effect parameters after each pass; they are now set again. This
+  also explains an SDR source in an HLG project that measured 100 % in luma instead of about 81 %.
 - LUT on the scopes: the scopes no longer read the raw signal of a capture card then (it comes before the LUT), so
   every scope measures the picture through the LUT.
 - Raw signal on Program and Preview: when the scene shows one video source alone, filling the picture exactly,

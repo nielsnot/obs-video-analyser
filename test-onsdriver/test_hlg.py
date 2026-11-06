@@ -204,12 +204,6 @@ class HLGProjectTest(HLGTestBase):
         cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'lut_mode': 1}})
         time.sleep(1.0)
         rgb_view = self.wv_top(cl)
-        log = self.obs.get_logfile()
-        if log:
-            with open(log, encoding='utf-8', errors='replace') as fr:
-                diag = [l.strip()[:220] for l in fr if 'diag' in l]
-            for l in diag[-12:]:
-                notice(l)
         notice(f'LUT: top row without {before}, Y with LUT on scopes {y_lut}, RGB with LUT on scopes {rgb_lut}, '
                f'RGB with LUT on the view only {rgb_view} (25 % is about 192)')
         self.assertLess(abs(y_lut - 192), 12, 'luma does not follow the LUT on the scopes')
