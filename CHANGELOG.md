@@ -6,6 +6,9 @@
   them in every part again); on a small scope the labels skip lines instead of overlapping.
 - Compare: the snapshot in the ROI view goes through the LUT of the view like the live picture, so both halves of a
   wipe or a blend look the same; a blend now also works for HDR.
+- False color: a Football preset with the target at 50 %: on target (48-52 %) in green, slightly under or over in
+  cyan and yellow, further off in blue and orange, the rest grey, clipping at both ends.
+- CI: macOS builds on macOS 15 (the macOS 14 runners are gone).
 
 ## 0.9.0
 

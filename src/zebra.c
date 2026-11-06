@@ -59,6 +59,7 @@ enum fc_preset_e {
 	FC_PRESET_CUSTOM = 4,
 	FC_PRESET_HLG = 5,
 	FC_PRESET_PQ = 6,
+	FC_PRESET_FOOTBALL = 7,
 };
 
 static const struct fc_preset_band fc_preset_exposure[] = {
@@ -110,6 +111,16 @@ static const struct fc_preset_band fc_preset_pq[] = {
 	{0.574f, 0xFFB3B3B3, "FC.Band.Bright"},    {0.587f, 0xFF40E060, "FC.Band.RefWhitePQ"},
 	{0.677f, 0xFF9A9A60, "FC.Band.Highlight"}, {0.740f, 0xFFFFFF00, "FC.Band.Above500"},
 	{0.752f, 0xFFE68000, "FC.Band.NearPeak"},  {2.000f, 0xFFE63300, "FC.Band.Above1000"},
+};
+
+/* Football: the pitch and the players around 50 %. Exactly on target in green, a little under or over in cyan and
+ * yellow, further off in blue and orange; the rest grey so the target stands out, clipping at both ends. */
+static const struct fc_preset_band fc_preset_football[] = {
+	{0.02f, 0xFFD938FF, "FC.Band.BlackClip"}, {0.40f, FC_GREY, "FC.Band.Dark"},
+	{0.45f, 0xFF2060FF, "FC.Band.Under50"},   {0.48f, 0xFF00D8E8, "FC.Band.SlightlyUnder50"},
+	{0.52f, 0xFF20E020, "FC.Band.Target50"},  {0.55f, 0xFFFFE000, "FC.Band.SlightlyOver50"},
+	{0.60f, 0xFFFF8000, "FC.Band.Over50"},    {0.98f, FC_GREY, "FC.Band.Bright"},
+	{2.00f, 0xFFFF2020, "FC.Band.Clip"},
 };
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
@@ -450,6 +461,9 @@ static void fc_load_scheme(struct zb_source *src, obs_data_t *settings)
 		return;
 	case FC_PRESET_PQ:
 		fc_set_bands(src, fc_preset_pq, ARRAY_LEN(fc_preset_pq));
+		break;
+	case FC_PRESET_FOOTBALL:
+		fc_set_bands(src, fc_preset_football, ARRAY_LEN(fc_preset_football));
 		return;
 	case FC_PRESET_CUSTOM:
 		break;
@@ -703,6 +717,7 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Spectrum"), FC_PRESET_SPECTRUM);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.HLG"), FC_PRESET_HLG);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.PQ"), FC_PRESET_PQ);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Football"), FC_PRESET_FOOTBALL);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Custom"), FC_PRESET_CUSTOM);
 		obs_property_set_modified_callback(prop, fc_scheme_props_changed);
 
