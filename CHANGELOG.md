@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.1 (in progress)
+## 0.9.1
 
 - Waveform: a graticule line every 10 % by default; in a parade the scale values are on the left only (an option puts
   them in every part again); on a small scope the labels skip lines instead of overlapping.
