@@ -8,6 +8,8 @@
   wipe or a blend look the same; a blend now also works for HDR.
 - False color: a Football preset with the target at 50 %: on target (48-52 %) in green, slightly under or over in
   cyan and yellow, further off in blue and orange, the rest grey, clipping at both ends.
+- LUT on the scopes: the scopes no longer read the raw signal of a capture card then (it comes before the LUT), so
+  every scope measures the picture through the LUT.
 - CI: macOS builds on macOS 15 (the macOS 14 runners are gone).
 
 ## 0.9.0

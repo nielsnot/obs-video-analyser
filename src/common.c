@@ -392,7 +392,11 @@ void cm_render_target(struct cm_source *src)
 
 	// the raw signal, when the target is a video source of the same size as its frames
 	obs_source_release(item->raw_filter);
-	item->raw_filter = (has_rgb || has_yuv) && (src->flags & CM_FLAG_EXT) ? raw_filter_for(src, target) : NULL;
+	// not with a LUT on the scopes: the raw signal comes before it, the scopes then measure the picture through it
+	const bool lut_on_scopes = src->lut_tex && src->lut_size >= 2 && src->lut_mode == CM_LUT_SCOPES;
+	item->raw_filter = (has_rgb || has_yuv) && (src->flags & CM_FLAG_EXT) && !lut_on_scopes
+				   ? raw_filter_for(src, target)
+				   : NULL;
 	item->raw_x = x;
 	item->raw_y = y;
 	item->raw_w = scaled_width;
