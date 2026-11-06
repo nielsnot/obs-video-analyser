@@ -4387,26 +4387,37 @@ QString ScopeWidget::signalPathHtml()
 	// the raw signal
 	QString raw;
 	bool rawUsed = false;
-	if (!target || !async) {
-		raw = T("SignalPath.Raw.NotVideo");
+	obs_source_t *video = nullptr; // the source whose raw signal is read
+	if (target && async) {
+		video = obs_source_get_ref(target);
+	} else if (!target || obs_scene_from_source(target) || obs_group_from_source(target)) {
+		OBSDataAutoRelease rs = obs_source_get_settings(data->roi);
+		if (!obs_data_get_bool(rs, "raw_no_scene"))
+			video = cm_scene_video(target);
+	}
+	if (!video) {
+		raw = T(target && !obs_scene_from_source(target) ? "SignalPath.Raw.NotVideo" : "SignalPath.Raw.Scene");
 	} else {
-		obs_source_t *filter = raw_input_find(target);
+		if (video != target)
+			raw = esc(QString::fromUtf8(obs_source_get_name(video))) + QStringLiteral(": ");
+		obs_source_t *filter = raw_input_find(video);
 		if (!filter) {
-			raw = T("SignalPath.Raw.NoFilter");
+			raw += T("SignalPath.Raw.NoFilter");
 		} else if (!obs_source_enabled(filter)) {
-			raw = T("SignalPath.Raw.Off");
+			raw += T("SignalPath.Raw.Off");
 		} else {
 			char desc[160] = "";
 			bool usable = false;
 			if (raw_input_describe(filter, r->cm.colorspace, desc, sizeof(desc), &usable)) {
-				raw = esc(QString::fromUtf8(desc)) + QStringLiteral("<br>") +
-				      T(usable ? "SignalPath.Raw.Used" : "SignalPath.Raw.Transfer");
+				raw += esc(QString::fromUtf8(desc)) + QStringLiteral("<br>") +
+				       T(usable ? "SignalPath.Raw.Used" : "SignalPath.Raw.Transfer");
 				rawUsed = usable;
 			} else {
-				raw = T("SignalPath.Raw.NoFrame");
+				raw += T("SignalPath.Raw.NoFrame");
 			}
 		}
 		obs_source_release(filter);
+		obs_source_release(video);
 	}
 	row(T("SignalPath.Raw"), raw);
 	obs_source_release(target);

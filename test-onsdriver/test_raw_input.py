@@ -25,7 +25,7 @@ def notice(msg):
     print(f'::notice::{msg}', flush=True)
 
 
-def dock_data():
+def dock_data(target=SOURCE):
     'A dock on the clip with a luma waveform, without graticule, labels or min/max lines.'
     scopes = [{'type': 'waveform', 'label': 'Waveform', 'show_label': False, 'use_roi': True, 'target': '',
                'prop': {'target_scale': 2, 'components': 0x20, 'display': 0, 'intensity': 255,
@@ -33,7 +33,7 @@ def dock_data():
                         'ext_guides': False}}]
     return {'docks': [{
         'name': 'Raw', 'toolbar': True, 'active_view': 0,
-        'roi-prop': {'target_name': SOURCE, 'interleave': 0, 'target_scale': 2, 'shapes': []},
+        'roi-prop': {'target_name': target, 'interleave': 0, 'target_scale': 2, 'shapes': []},
         'views': [{'name': 'View 1', 'state': {'layout': 0, 'roi-shown': True, 'scopes': scopes}}],
     }]}
 
@@ -43,6 +43,7 @@ class RawInputTest(obstest.OBSTest):
     clip = CLIP
     hdr_project = False
     expect_raw = True
+    target = SOURCE
 
     def setUp(self, config_name='saved-config', run=True):
         super().setUp(run=False, config_name=config_name)
@@ -51,7 +52,7 @@ class RawInputTest(obstest.OBSTest):
             path += '.json'
         with open(path, encoding='utf-8') as fr:
             collection = json.load(fr)
-        collection.setdefault('modules', {})[DOCK_KEY] = dock_data()
+        collection.setdefault('modules', {})[DOCK_KEY] = dock_data(self.target)
         with open(path, 'w', encoding='utf-8') as fw:
             json.dump(collection, fw)
         if self.hdr_project:
@@ -76,6 +77,12 @@ class RawInputTest(obstest.OBSTest):
         except Exception as e:  # pylint: disable=broad-except
             print(f'::warning::raw input: no media source ({e})', flush=True)
             self.skipTest('no media source')
+        # the clip fills the picture exactly (a dock on Program then reads its raw signal too)
+        video = cl.send('GetVideoSettings')
+        item = cl.send('GetSceneItemId', {'sceneName': 'Scene', 'sourceName': SOURCE}).scene_item_id
+        cl.send('SetSceneItemTransform', {'sceneName': 'Scene', 'sceneItemId': item, 'sceneItemTransform': {
+            'positionX': 0, 'positionY': 0, 'boundsType': 'OBS_BOUNDS_STRETCH',
+            'boundsWidth': video.base_width, 'boundsHeight': video.base_height}})
         name = [i['inputName'] for i in cl.send('GetInputList').inputs
                 if i['inputKind'].startswith(PREFIX + 'waveform_source')][0]
         rows = []
@@ -111,6 +118,11 @@ class RawInputTest(obstest.OBSTest):
             # converted by OBS, not the raw signal: superwhite does not sit at 107 % (row 5), sub-black not at -5 %
             self.assertFalse(2 <= rows[0] <= 10 and 245 <= rows[-1] <= 253,
                              f'an SDR source in an HLG project is shown raw: rows {rows[0]}..{rows[-1]}')
+
+
+class RawInputProgramTest(RawInputTest):
+    'A dock on Program: the clip alone fills the scene, so its raw signal is read'
+    target = ''
 
 
 class RawInputHLGTest(RawInputTest):

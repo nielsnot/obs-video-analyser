@@ -7,7 +7,8 @@ signal you see them again, from -7 % to 109 %.
 
 ## In short
 
-1. Measure a **video source** (a capture card, camera, webcam or media file), not a scene or the program.
+1. Measure a **video source** (a capture card, camera, webcam or media file), or Program/Preview while the scene
+   shows that one source alone, filling the picture.
 2. That's it: the plugin puts the filter **Video Analyser input (raw signal)** on that source by itself.
 3. The waveform shows **RAW ...** at the bottom right, for example `RAW 10-bit V210`, and its scale now runs from
    -7 % to 109 %.
@@ -17,8 +18,13 @@ signal you see them again, from -7 % to 109 %.
 ### 1. Point the dock at the source
 
 Right-click the ROI view of the dock, open the options and set **Source** to your camera or capture card
-(for example *Blackmagic Device*), not *Program*, *Preview* or a scene. A scene is composed in OBS as 8-bit
-R'G'B', so there is no raw signal to measure there.
+(for example *Blackmagic Device*).
+
+*Program* and *Preview* work too (from 0.9.1) while the scene shows one video source **alone**, filling the
+picture exactly: no crop, no other visible sources (graphics, a second camera), no transition running. Then the
+scopes read the raw signal of that source. As soon as something else is in the picture, they measure the picture
+OBS made, because the raw signal would not show it. The ROI option *Program and Preview: don't use the raw signal
+of a full-screen source* turns this off. **Signal path** (right-click the dock) shows which source is read.
 
 Scopes that measure their own source instead of the dock selection: set their **Source** the same way.
 
@@ -71,7 +77,8 @@ With *Data levels* set to *Full* in Resolve, nothing goes beyond 0 % and 100 %: 
 | Video Capture Device (webcam, USB capture) | yes (YUY2, NV12, ... and RGB); a webcam is usually full range, so nothing goes beyond 0 % and 100 % |
 | Media Source (files) | yes, for YUV video files, 8- and 10-bit |
 | NDI | yes (UYVY or BGRA) |
-| Scenes, Program, Preview, browser, game or window capture | no: these are R'G'B' only |
+| Program, Preview, a scene | only while one video source alone fills the picture (see step 1) |
+| Browser, game or window capture | no: these are R'G'B' only |
 
 ## What uses the raw signal
 
@@ -120,7 +127,7 @@ a media file from its tags. A source that reports nothing counts as SDR.
 
 | You see | Do this |
 |---|---|
-| No `RAW` label | Is the dock measuring the source itself (step 1)? In an HDR project: see *HDR* |
+| No `RAW` label | Is the dock measuring the source itself, or a scene with only that source filling it (step 1)? In an HDR project: see *HDR* |
 | `RAW 8-bit UYVY` from a Blackmagic | Set *Pixel format* to *10-bit YUV* in the Blackmagic source |
 | No `RAW` label in an HLG project | The source is SDR (or reports no transfer): see *HDR* above |
 | Everything is shifted up or down by about 7 % | Check *Color range* in the source: limited for normal video |

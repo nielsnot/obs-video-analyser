@@ -7,6 +7,7 @@
 #include "util.h"
 #include "roi.h"
 #include "lut.h"
+#include <graphics/matrix4.h>
 #include "raw-input.h"
 
 #ifdef ENABLE_PROFILE
@@ -99,6 +100,7 @@ void cm_update(struct cm_source *src, obs_data_t *settings)
 		src->target_scale = 1;
 
 	src->bypass = obs_data_get_bool(settings, "bypass");
+	src->raw_scene = !obs_data_get_bool(settings, "raw_no_scene");
 
 	src->lut_mode = (int)obs_data_get_int(settings, "lut_mode");
 	const char *lut_path = obs_data_get_string(settings, "lut_file");
@@ -276,24 +278,113 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 }
 
 /* The raw input filter of the target (a new reference), looked up once a second; adds one when missing. */
+/* A matrix that maps a w x h source exactly onto the whole canvas: no rotation, no crop, no offset. */
+static bool fills_canvas(obs_sceneitem_t *item, uint32_t w, uint32_t h, uint32_t cw, uint32_t ch)
+{
+	struct obs_sceneitem_crop crop;
+	obs_sceneitem_get_crop(item, &crop);
+	if (crop.left || crop.top || crop.right || crop.bottom || !w || !h)
+		return false;
+	struct matrix4 m;
+	obs_sceneitem_get_draw_transform(item, &m);
+	const float tol = 0.5f;
+	return fabsf(m.x.x * w - cw) < tol && fabsf(m.y.y * h - ch) < tol && fabsf(m.x.y * w) < tol &&
+	       fabsf(m.y.x * h) < tol && fabsf(m.t.x) < tol && fabsf(m.t.y) < tol;
+}
+
+struct only_item
+{
+	obs_sceneitem_t *item;
+	int visible;
+};
+
+static bool only_item_enum(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct only_item *o = param;
+	if (obs_sceneitem_visible(item)) {
+		o->visible++;
+		o->item = item;
+	}
+	return o->visible < 2;
+}
+
+/* The video source that is the whole picture of a scene: the only visible item, filling the canvas exactly
+ * (also through nested scenes and groups). Anything else in the picture (a graphic, a second camera, a
+ * transition) would not be in its raw signal, so then there is none. A new reference, or NULL. */
+static obs_source_t *scene_video(obs_source_t *source, int depth)
+{
+	if (!source || depth > 4)
+		return NULL;
+	if (obs_source_get_type(source) == OBS_SOURCE_TYPE_TRANSITION) {
+		const float t = obs_transition_get_time(source);
+		if (t > 0.0f && t < 1.0f)
+			return NULL; // in the middle of a transition
+		obs_source_t *active = obs_transition_get_active_source(source);
+		obs_source_t *v = scene_video(active, depth + 1);
+		obs_source_release(active);
+		return v;
+	}
+	obs_scene_t *scene = obs_scene_from_source(source);
+	if (!scene)
+		scene = obs_group_from_source(source);
+	if (!scene)
+		return NULL;
+	struct obs_video_info ovi;
+	if (!obs_get_video_info(&ovi))
+		return NULL;
+	struct only_item o = {0};
+	obs_scene_enum_items(scene, only_item_enum, &o);
+	if (o.visible != 1)
+		return NULL;
+	obs_source_t *child = obs_sceneitem_get_source(o.item);
+	if (!child || !fills_canvas(o.item, obs_source_get_width(child), obs_source_get_height(child), ovi.base_width,
+				    ovi.base_height))
+		return NULL;
+	if (obs_source_get_output_flags(child) & OBS_SOURCE_ASYNC_VIDEO)
+		return obs_source_get_ref(child);
+	return scene_video(child, depth + 1); // a nested scene or group
+}
+
+obs_source_t *cm_scene_video(obs_source_t *target)
+{
+	obs_source_t *scene = target ? obs_source_get_ref(target) : obs_get_output_source(0);
+	obs_source_t *video = scene_video(scene, 0);
+	obs_source_release(scene);
+	return video;
+}
+
 static obs_source_t *raw_filter_for(struct cm_source *src, obs_source_t *target)
 {
-	if (!target || !(obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO))
+	const bool direct = target && (obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO);
+	if (!direct && !src->raw_scene)
 		return NULL;
 	const uint64_t now = os_gettime_ns();
-	const bool same = src->raw_checked && obs_weak_source_references_source(src->raw_checked, target);
-	if (!same || now - src->raw_check_ns > 1000000000ULL) {
+	bool recheck = now - src->raw_check_ns > 1000000000ULL;
+	if (direct)
+		recheck = recheck || !src->raw_checked || !obs_weak_source_references_source(src->raw_checked, target);
+	if (recheck) {
 		src->raw_check_ns = now;
+		obs_source_t *video = NULL;
+		if (direct) {
+			video = obs_source_get_ref(target);
+		} else {
+			// Program (no target) or a scene: the one video source that fills it
+			video = cm_scene_video(target);
+		}
 		obs_weak_source_release(src->raw_checked);
-		src->raw_checked = obs_source_get_weak_source(target);
+		src->raw_checked = video ? obs_source_get_weak_source(video) : NULL;
 		obs_weak_source_release(src->raw_filter);
 		src->raw_filter = NULL;
-		obs_source_t *f = raw_input_find(target);
-		if (f) {
-			src->raw_filter = obs_source_get_weak_source(f);
-			obs_source_release(f);
-		} else {
-			raw_input_ensure(target);
+		if (video) {
+			obs_source_t *f = raw_input_find(video);
+			if (f) {
+				src->raw_filter = obs_source_get_weak_source(f);
+				obs_source_release(f);
+			} else {
+				raw_input_ensure(video);
+			}
+			obs_source_release(video);
 		}
 	}
 	return src->raw_filter ? obs_weak_source_get_source(src->raw_filter) : NULL;

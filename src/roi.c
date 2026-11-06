@@ -289,6 +289,8 @@ static obs_properties_t *roi_get_properties(void *data)
 	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Pointer"), ROI_ZOOM_POINTER);
 	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Center"), ROI_ZOOM_CENTER);
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
+	obs_property_t *rns = obs_properties_add_bool(props, "raw_no_scene", obs_module_text("ROI.RawNoScene"));
+	obs_property_set_long_description(rns, obs_module_text("ROI.RawNoScene.Tip"));
 
 	obs_properties_t *gp = obs_properties_create();
 	obs_properties_add_bool(gp, "guide_title", obs_module_text("ROI.Guide.Title"));

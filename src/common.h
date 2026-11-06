@@ -113,6 +113,7 @@ struct cm_source
 	obs_weak_source_t *raw_filter;
 	obs_weak_source_t *raw_checked; // the target it was looked up for
 	uint64_t raw_check_ns;
+	bool raw_scene; // also the raw signal of the one video source that fills a scene (Program, Preview)
 
 	// optional selection mask, owned by the ROI source
 	const struct cm_mask *mask;
@@ -173,6 +174,10 @@ static inline bool cm_is_roi(const struct cm_source *src)
 }
 
 bool is_roi_source_name(const char *name);
+
+/* The one video source that fills a scene (target), or Program when target is NULL; a new reference or NULL.
+ * The scopes read its raw signal then. */
+obs_source_t *cm_scene_video(obs_source_t *target);
 
 /* Pause: every scope keeps what it shows now and stops capturing, until resumed (dock button or hotkey). */
 void cm_set_paused(bool paused);

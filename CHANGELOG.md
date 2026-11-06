@@ -10,6 +10,9 @@
   cyan and yellow, further off in blue and orange, the rest grey, clipping at both ends.
 - LUT on the scopes: the scopes no longer read the raw signal of a capture card then (it comes before the LUT), so
   every scope measures the picture through the LUT.
+- Raw signal on Program and Preview: when the scene shows one video source alone, filling the picture exactly,
+  the scopes read its raw signal, as when the dock watches that source. A ROI option turns it off; Signal path
+  shows which source is read.
 - Color pins: a click on a pin with the Picker removes it; the dock menu removes all pins, also without the Picker.
 - CI: macOS builds on macOS 15 (the macOS 14 runners are gone).
 
