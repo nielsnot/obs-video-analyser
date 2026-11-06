@@ -173,6 +173,12 @@ class HLGProjectTest(HLGTestBase):
     def wv_top(self, cl):
         'The highest lit row of the waveform (256 rows, 100 % at the top).'
         wv = self.screenshot(cl, self.source_of(cl, 'waveform_source'), repeat=20, size=(256, 256))
+        lit = []
+        for y in range(wv.height):
+            px = [wv.getpixel((x, y)) for x in range(0, wv.width, 4)]
+            if any(sum(p) > 30 for p in px):
+                lit.append(f'{y}:{max(px, key=sum)}')
+        notice(f'waveform rows (row:brightest pixel): {lit[:12]}')
         for y in range(wv.height):
             if any(sum(wv.getpixel((x, y))) > 90 for x in range(0, wv.width, 4)):
                 return y
