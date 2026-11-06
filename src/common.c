@@ -354,7 +354,7 @@ static obs_source_t *scene_video(obs_source_t *source, int depth)
 	if (!child || !fills_canvas(o.item, obs_source_get_width(child), obs_source_get_height(child), ovi.base_width,
 				    ovi.base_height))
 		return NULL;
-	if (obs_source_get_output_flags(child) & OBS_SOURCE_ASYNC_VIDEO)
+	if ((obs_source_get_output_flags(child) & OBS_SOURCE_ASYNC_VIDEO) == OBS_SOURCE_ASYNC_VIDEO)
 		return obs_source_get_ref(child);
 	return scene_video(child, depth + 1); // a nested scene or group
 }
@@ -369,7 +369,8 @@ obs_source_t *cm_scene_video(obs_source_t *target)
 
 static obs_source_t *raw_filter_for(struct cm_source *src, obs_source_t *target)
 {
-	const bool direct = target && (obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO);
+	const bool direct = target &&
+			    ((obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO) == OBS_SOURCE_ASYNC_VIDEO);
 	if (!direct && !src->raw_scene)
 		return NULL;
 	const uint64_t now = os_gettime_ns();

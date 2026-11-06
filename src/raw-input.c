@@ -614,7 +614,7 @@ static DARRAY(char *) added;
 
 void raw_input_ensure(obs_source_t *parent)
 {
-	if (!parent || !(obs_source_get_output_flags(parent) & OBS_SOURCE_ASYNC_VIDEO))
+	if (!parent || (obs_source_get_output_flags(parent) & OBS_SOURCE_ASYNC_VIDEO) != OBS_SOURCE_ASYNC_VIDEO)
 		return;
 	if (obs_source_get_type(parent) != OBS_SOURCE_TYPE_INPUT)
 		return;
