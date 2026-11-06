@@ -244,6 +244,19 @@ static bool render_rgb_yuv(struct cm_source *src, struct cm_surface_queue_item *
 			}
 			cm_set_signal_params(src->effect, src->colorspace);
 			cm_set_lut_params(src->effect, src, false);
+			{
+				static uint64_t last_cv;
+				const uint64_t now2 = os_gettime_ns();
+				if (now2 - last_cv > 3000000000ULL) {
+					last_cv = now2;
+					blog(LOG_INFO,
+					     "[" PLUGIN_NAME
+					     "] convert diag: '%s' flags 0x%x cs %d lut %d/%d tex fmt %d",
+					     obs_source_get_name(src->self), item->flags, src->colorspace,
+					     src->lut_mode, src->lut_tex != NULL,
+					     (int)gs_texture_get_color_format(tex));
+				}
+			}
 
 			if (item->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_RAW_TEXTURE)) {
 				gs_effect_set_texture(gs_effect_get_param_by_name(src->effect, "image"), tex);
