@@ -2550,6 +2550,14 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 		scope_docks_update_pause();
 	});
 
+	QMenu *resetMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.reset")));
+	act = resetMenu->addAction(QString::fromUtf8(obs_module_text("dock.menu.reset.dock")));
+	connect(act, &QAction::triggered, this, &ScopeWidget::clearDock, Qt::QueuedConnection);
+	act = resetMenu->addAction(QString::fromUtf8(obs_module_text("dock.menu.reset.all")));
+	connect(
+		act, &QAction::triggered, this, [this]() { scope_docks_factory_reset_dialog(this); },
+		Qt::QueuedConnection);
+
 	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.help")));
 	connect(act, &QAction::triggered, this, [this]() { showHelp(-1); }, Qt::QueuedConnection);
 
@@ -4525,4 +4533,31 @@ void ScopeWidget::openSignalPath()
 	update();
 	dlg->resize(620, 420);
 	dlg->show();
+}
+
+/* Empties this dock: one empty view with the ROI view, no scopes, no selection or pins, compare off. The source of
+ * the dock stays. */
+void ScopeWidget::clearDock()
+{
+	if (QMessageBox::question(this, QString::fromUtf8(obs_module_text("dock.menu.reset")),
+				  QString::fromUtf8(obs_module_text("dock.reset.dock.confirm"))) != QMessageBox::Yes)
+		return;
+	if (btnCompare && btnCompare->isChecked())
+		btnCompare->setChecked(false);
+	struct roi_source *r = widget_roi(data);
+	roi_clear_shapes(r);
+	roi_clear_pins(r);
+
+	OBSDataAutoRelease state = obs_data_create();
+	OBSDataArrayAutoRelease empty = obs_data_array_create();
+	obs_data_set_array(state, "scopes", empty);
+	obs_data_set_bool(state, "roi-shown", true);
+	data->views.clear();
+	data->views.push_back(
+		{QString::fromUtf8(obs_module_text("dock.view.default_name")).arg(1).toStdString(), state.Get()});
+	data->active_view = 0;
+	data->layout = SCOPE_LAYOUT_AUTO;
+	setArranging(false);
+	loadActive(state);
+	rebuildTabs();
 }

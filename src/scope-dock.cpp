@@ -343,6 +343,24 @@ static void factory_reset()
 	cm_set_paused(false);
 }
 
+/* The dialogs hang on the main window: a dock that asks is removed by the reset itself. */
+void scope_docks_factory_reset_dialog(QWidget *)
+{
+	auto *parent = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	auto T = [](const char *k) { return QString::fromUtf8(obs_module_text(k)); };
+	if (QMessageBox::warning(parent, T("Settings.Title"), T("Settings.Reset.Confirm"),
+				 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+		return;
+	const QString file = write_backup("before reset");
+	if (file.isEmpty() &&
+	    QMessageBox::warning(parent, T("Settings.Title"), T("Settings.Reset.NoBackup"),
+				 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+		return;
+	factory_reset();
+	QMessageBox::information(parent, T("Settings.Title"),
+				 T("Settings.Reset.Done").arg(QDir::toNativeSeparators(file)));
+}
+
 static void open_settings_dialog()
 {
 	auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -403,20 +421,7 @@ static void open_settings_dialog()
 	QObject::connect(btnBackups, &QPushButton::clicked, dlg, []() {
 		QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(backup_dir())));
 	});
-	QObject::connect(btnReset, &QPushButton::clicked, dlg, [dlg, T]() {
-		if (QMessageBox::warning(dlg, T("Settings.Title"), T("Settings.Reset.Confirm"),
-					 QMessageBox::Yes | QMessageBox::Cancel,
-					 QMessageBox::Cancel) != QMessageBox::Yes)
-			return;
-		const QString file = write_backup("before reset");
-		if (file.isEmpty() && QMessageBox::warning(dlg, T("Settings.Title"), T("Settings.Reset.NoBackup"),
-							   QMessageBox::Yes | QMessageBox::Cancel,
-							   QMessageBox::Cancel) != QMessageBox::Yes)
-			return;
-		factory_reset();
-		QMessageBox::information(dlg, T("Settings.Title"),
-					 T("Settings.Reset.Done").arg(QDir::toNativeSeparators(file)));
-	});
+	QObject::connect(btnReset, &QPushButton::clicked, dlg, [dlg]() { scope_docks_factory_reset_dialog(dlg); });
 	QObject::connect(btnClose, &QPushButton::clicked, dlg, &QDialog::close);
 	dlg->resize(420, 300);
 	dlg->show();

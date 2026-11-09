@@ -99,6 +99,7 @@ public slots:
 	void openSnapshotLibrary();
 	void openSignalPath();
 	void loadReference(const QString &file);
+	void clearDock();
 
 public:
 	ScopeWidget(QWidget *parent);

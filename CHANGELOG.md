@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2 (in progress)
+
+- Reset in the dock menu: *Clear this dock* (all views and scopes, the selection and the pins; the source stays) and
+  *Reset everything*, the factory reset with a backup first, now also from the dock instead of only from Tools.
+
 ## 0.9.1
 
 - Waveform: a graticule line every 10 % by default; in a parade the scale values are on the left only (an option puts
