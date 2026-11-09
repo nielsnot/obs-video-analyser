@@ -970,8 +970,9 @@ static void wvs_render_out_of_range(struct wvs_source *src, float width)
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_DSTCOLOR, GS_BLEND_ZERO);
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFF1A8CFF); // ABGR: orange
 	for (int k = 0; k < n_stack; k++) {
+		// set for every pass: OBS clears effect parameters when a technique ends
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFF1A8CFF); // ABGR: orange
 		const float base = (float)(WV_SIZE * k);
 		// rows with a level at or above out_hi, and at or below out_lo (row 0 is 100 %)
 		const float hi_rows = WV_SIZE * (1.0f - lvl(src, src->out_hi)) + 1.0f;
@@ -1073,10 +1074,10 @@ static void wvs_render_x_axis(struct wvs_source *src, float width, float height)
 	const float seg_w = width / segments;
 	const struct text_scale ts = text_scale_from_viewport(width, height);
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x80FFFFFF);
 	const int divisions = seg_w / ts.ux > 500.0f ? 10 : 4;
 	for (int sgm = 0; sgm < segments; sgm++) {
 		const float x0 = seg_w * sgm;
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x80FFFFFF); // cleared after each pass
 		while (gs_effect_loop(solid, "Solid")) {
 			gs_render_start(false);
 			for (int i = 0; i <= divisions * 2; i++) {
