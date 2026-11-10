@@ -45,6 +45,18 @@ def dock_data(colorspace):
             'prop': {'components': 0x20, 'display': 0, 'graticule_lines': 0, 'scale_labels': 0, 'minmax': False, 'hdr_ref': False,
                      'intensity': 255, 'target_scale': 2},
         },
+        {
+            'type': 'vectorscope',
+            'label': 'VS', 'show_label': False, 'use_roi': True, 'target': '',
+            'prop': {'intensity': 255, 'graticule': 0, 'ring_scale': False, 'hue_ring': False, 'skin_band': 0,
+                     'sat_alert': 0, 'sat_max_ring': False, 'targets_100': False, 'target_scale': 2},
+        },
+        {
+            'type': 'histogram',
+            'label': 'HIS', 'show_label': False, 'use_roi': True, 'target': '',
+            'prop': {'components': 0x20, 'hdr_ref': False, 'graticule_vertical_lines': 0, 'vertical': False,
+                     'target_scale': 2},
+        },
     ]
     return {
         'docks': [{
@@ -143,6 +155,49 @@ class HLGTestBase(obstest.OBSTest):
         })
 
 
+    def histogram_level(self, cl):
+        'Where the tallest histogram bar is, 0..1 across the width.'
+        img = self.screenshot(cl, self.source_of(cl, 'histogram_source'), repeat=20, size=(256, 128))
+        counts = [sum(1 for y in range(img.height) if sum(img.getpixel((x, y))) > 90) for x in range(img.width)]
+        best = max(range(img.width), key=lambda x: counts[x])
+        return best / (img.width - 1), counts[best]
+
+    def check_yuv_scopes(self, cl, white_level):
+        'Vectorscope and histogram (both from the Y\'CbCr capture) follow the signal and a LUT on the scopes.'
+        from PIL import ImageChops  # pylint: disable=import-outside-toplevel
+        self.add_white(cl)
+        roi = self.source_of(cl, 'roi')
+        vs = self.source_of(cl, 'vectorscope_source')
+        level, count = self.histogram_level(cl)
+        notice(f'histogram: white at {level:.2f} ({count} px), expected {white_level:.2f}')
+        self.assertLess(abs(level - white_level), 0.08, 'luma histogram: white not at the level of the signal')
+        vs_white = self.screenshot(cl, vs, repeat=20, size=(256, 256))
+
+        flat = os.path.abspath('flat25.cube')
+        with open(flat, 'w', encoding='utf-8') as fw:
+            fw.write('LUT_3D_SIZE 2\n' + '0.25 0.25 0.25\n' * 8)
+        cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'lut_file': flat, 'lut_mode': 2}})
+        time.sleep(1.0)
+        level, count = self.histogram_level(cl)
+        notice(f'histogram with a 25 % LUT on the scopes: {level:.2f} ({count} px)')
+        self.assertLess(abs(level - 0.25), 0.08, 'luma histogram does not follow the LUT on the scopes')
+
+        red = os.path.abspath('red.cube')
+        with open(red, 'w', encoding='utf-8') as fw:
+            fw.write('LUT_3D_SIZE 2\n' + '0.6 0.1 0.1\n' * 8)
+        cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'lut_file': red, 'lut_mode': 2}})
+        time.sleep(1.0)
+        vs_red = self.screenshot(cl, vs, repeat=20, size=(256, 256))
+        diff = ImageChops.subtract(vs_red, vs_white)
+        pts = [(x, y) for y in range(0, 256, 2) for x in range(0, 256, 2) if sum(diff.getpixel((x, y))) > 90]
+        self.assertTrue(pts, 'vectorscope does not change with a red LUT on the scopes')
+        cx = sum(p[0] for p in pts) / len(pts) - 128
+        cy = sum(p[1] for p in pts) / len(pts) - 128
+        notice(f'vectorscope with a red LUT: new trace at ({cx:.0f}, {cy:.0f}) from the middle, {len(pts)} px')
+        self.assertGreater((cx * cx + cy * cy) ** 0.5, 20, 'vectorscope: the red trace is not away from the middle')
+        self.assertLess(cx, 0, 'vectorscope: red should be on the left half')
+
+
 class SDRProjectTest(HLGTestBase):
     'SDR project: Rec. 709 versus HLG chosen for the dock'
 
@@ -156,6 +211,23 @@ class SDRProjectTest(HLGTestBase):
         cl.send('SetInputSettings', {'inputName': self.source_of(cl, 'roi'), 'inputSettings': {'colorspace': 3}})
         color = self.measure(cl, 'SDR project, HLG chosen')
         self.assertTrue(near(color, HIGHLIGHT), f'white is not at the HLG level of SDR white: {color}')
+
+
+class SDRYUVScopesTest(HLGTestBase):
+    'Vectorscope and histogram in an SDR project'
+
+    def test_yuv_scopes(self):
+        'White at 100 %, and both follow a LUT on the scopes'
+        self.check_yuv_scopes(self.obs.get_obsws(), 1.0)
+
+
+class HLGYUVScopesTest(HLGTestBase):
+    'Vectorscope and histogram in an HLG project'
+    hdr_project = True
+
+    def test_yuv_scopes(self):
+        'SDR white at about 81 % HLG, and both follow a LUT on the scopes'
+        self.check_yuv_scopes(self.obs.get_obsws(), 0.81)
 
 
 class HLGProjectTest(HLGTestBase):
