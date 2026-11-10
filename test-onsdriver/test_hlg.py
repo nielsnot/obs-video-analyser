@@ -188,9 +188,15 @@ class HLGTestBase(obstest.OBSTest):
         cl.send('SetInputSettings', {'inputName': roi, 'inputSettings': {'lut_file': red, 'lut_mode': 2}})
         time.sleep(1.0)
         vs_red = self.screenshot(cl, vs, repeat=20, size=(256, 256))
-        diff = ImageChops.subtract(vs_red, vs_white)
-        pts = [(x, y) for y in range(0, 256, 2) for x in range(0, 256, 2) if sum(diff.getpixel((x, y))) > 90]
+        # a single color is a small dot: compare every pixel
+        diff = ImageChops.difference(vs_red, vs_white)
+        pts = [(x, y) for y in range(256) for x in range(256) if sum(diff.getpixel((x, y))) > 60]
+        bright = lambda img: max(((x, y) for y in range(256) for x in range(256)),  # noqa: E731
+                                 key=lambda p: sum(img.getpixel(p)))
+        notice(f'vectorscope: brightest pixel white {bright(vs_white)}, red {bright(vs_red)}, changed {len(pts)} px')
         self.assertTrue(pts, 'vectorscope does not change with a red LUT on the scopes')
+        moved = ImageChops.subtract(vs_red, vs_white)
+        pts = [(x, y) for y in range(256) for x in range(256) if sum(moved.getpixel((x, y))) > 60] or pts
         cx = sum(p[0] for p in pts) / len(pts) - 128
         cy = sum(p[1] for p in pts) / len(pts) - 128
         notice(f'vectorscope with a red LUT: new trace at ({cx:.0f}, {cy:.0f}) from the middle, {len(pts)} px')
