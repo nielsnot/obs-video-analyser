@@ -4,6 +4,8 @@
 
 - Reset in the dock menu: *Clear this dock* (all views and scopes, the selection and the pins; the source stays) and
   *Reset everything*, the factory reset with a backup first, now also from the dock instead of only from Tools.
+- A floating dock has maximize, dock-back and close buttons in its title bar, like any window; double click on the
+  title maximizes it too, a second time restores the size. Docked, the dock keeps OBS's own title bar.
 - Waveform: the orange limit tint in the second and third part of a stack, and the pixel ticks along the top in
   the later parts of a parade, lost their color (the same OBS parameter reset as the luma fix in 0.9.1).
 - Tests: the vectorscope and the luma histogram in SDR and HLG projects, with and without a LUT on the scopes.

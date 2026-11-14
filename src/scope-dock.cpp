@@ -5,6 +5,12 @@
 #include <QDockWidget>
 #include <QVBoxLayout>
 #include <QDialog>
+#include <QDockWidget>
+#include <QHBoxLayout>
+#include <QToolButton>
+#include <QStyle>
+#include <QScreen>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QLabel>
 #include <QFileDialog>
@@ -42,6 +48,119 @@ static inline bool is_program_dock(obs_data_t *props)
 
 static void scope_dock_show(ScopeWidget *w);
 
+/* ---------- a floating dock: maximize and restore like any window ---------- */
+
+static void toggle_maximized(QDockWidget *d)
+{
+	auto *btn = d->titleBarWidget() ? d->titleBarWidget()->findChild<QToolButton *>("VideoAnalyserMaximize")
+					: nullptr;
+	if (!d->property("va_maximized").toBool()) {
+		QScreen *screen = d->screen();
+		if (!screen)
+			return;
+		d->setProperty("va_normal_geometry", d->geometry());
+		d->setGeometry(screen->availableGeometry());
+		d->setProperty("va_maximized", true);
+		if (btn) {
+			btn->setIcon(d->style()->standardIcon(QStyle::SP_TitleBarNormalButton, nullptr, d));
+			btn->setToolTip(QString::fromUtf8(obs_module_text("dock.window.restore")));
+		}
+	} else {
+		const QRect g = d->property("va_normal_geometry").toRect();
+		if (g.isValid())
+			d->setGeometry(g);
+		d->setProperty("va_maximized", false);
+		if (btn) {
+			btn->setIcon(d->style()->standardIcon(QStyle::SP_TitleBarMaxButton, nullptr, d));
+			btn->setToolTip(QString::fromUtf8(obs_module_text("dock.window.maximize")));
+		}
+	}
+}
+
+/* Double click on the title of a floating dock maximizes it, as on any window (instead of docking it again). */
+class TitleDoubleClick : public QObject {
+public:
+	explicit TitleDoubleClick(QDockWidget *dock) : QObject(dock), d(dock) {}
+
+protected:
+	bool eventFilter(QObject *obj, QEvent *event) override
+	{
+		if (event->type() == QEvent::MouseButtonDblClick) {
+			toggle_maximized(d);
+			return true;
+		}
+		return QObject::eventFilter(obj, event);
+	}
+
+private:
+	QDockWidget *d;
+};
+
+/* While floating, the dock gets a title bar with maximize, dock and close buttons; docked, OBS's own again. */
+static void floating_title(QDockWidget *d, bool floating)
+{
+	QWidget *old = d->titleBarWidget();
+	if (!floating) {
+		d->setProperty("va_maximized", false);
+		if (old) {
+			d->setTitleBarWidget(nullptr);
+			old->deleteLater();
+		}
+		return;
+	}
+	if (old)
+		return;
+	auto T = [](const char *k) { return QString::fromUtf8(obs_module_text(k)); };
+	auto *bar = new QWidget(d);
+	bar->setObjectName("VideoAnalyserFloatingTitle");
+	auto *h = new QHBoxLayout(bar);
+	h->setContentsMargins(8, 2, 2, 2);
+	h->setSpacing(2);
+	auto *title = new QLabel(d->windowTitle(), bar);
+	QObject::connect(d, &QDockWidget::windowTitleChanged, title, &QLabel::setText);
+	h->addWidget(title, 1);
+	auto button = [&](QStyle::StandardPixmap px, const char *tip, const char *object) {
+		auto *b = new QToolButton(bar);
+		b->setObjectName(object);
+		b->setIcon(d->style()->standardIcon(px, nullptr, d));
+		b->setAutoRaise(true);
+		b->setToolTip(T(tip));
+		h->addWidget(b);
+		return b;
+	};
+	QToolButton *max = button(QStyle::SP_TitleBarMaxButton, "dock.window.maximize", "VideoAnalyserMaximize");
+	QToolButton *dock = button(QStyle::SP_TitleBarShadeButton, "dock.window.dock", "VideoAnalyserDockBack");
+	QToolButton *close = button(QStyle::SP_TitleBarCloseButton, "dock.window.close", "VideoAnalyserClose");
+	QObject::connect(max, &QToolButton::clicked, d, [d]() { toggle_maximized(d); });
+	QObject::connect(dock, &QToolButton::clicked, d, [d]() {
+		if (d->property("va_maximized").toBool())
+			toggle_maximized(d);
+		d->setFloating(false);
+	});
+	QObject::connect(close, &QToolButton::clicked, d, &QDockWidget::close);
+	bar->installEventFilter(new TitleDoubleClick(d));
+	title->installEventFilter(new TitleDoubleClick(d));
+	d->setTitleBarWidget(bar);
+}
+
+static void window_buttons(QWidget *container)
+{
+	QMetaObject::invokeMethod(
+		container,
+		[container]() {
+			QDockWidget *d = nullptr;
+			for (QWidget *p = container->parentWidget(); p && !d; p = p->parentWidget())
+				d = qobject_cast<QDockWidget *>(p);
+			if (!d || d->property("va_window_buttons").toBool())
+				return;
+			d->setProperty("va_window_buttons", true);
+			QObject::connect(d, &QDockWidget::topLevelChanged, d,
+					 [d](bool floating) { floating_title(d, floating); });
+			floating_title(d, d->isFloating());
+		},
+		Qt::QueuedConnection);
+}
+
 void scope_dock_add(const char *name, obs_data_t *props, bool show)
 {
 	auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -65,6 +184,7 @@ void scope_dock_add(const char *name, obs_data_t *props, bool show)
 
 	if (docks)
 		docks->push_back(w);
+	window_buttons(container);
 
 	if (show)
 		scope_dock_show(w);
