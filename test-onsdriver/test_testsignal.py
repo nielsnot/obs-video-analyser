@@ -70,6 +70,10 @@ class TestSignalTest(obstest.OBSTest):
         if img:
             os.makedirs('screenshots', exist_ok=True)
             img.save(f'screenshots/testsignal-{int(time.time() * 1000)}.png')
+            # the picture in the log too, small, to see what the waveform drew
+            buf = io.BytesIO()
+            img.convert('L').resize((160, 128)).save(buf, 'PNG')
+            print('IMG64:' + base64.b64encode(buf.getvalue()).decode('ascii'), flush=True)
         return rows
 
     def test_bars(self):
@@ -88,7 +92,9 @@ class TestSignalTest(obstest.OBSTest):
         self.assertGreaterEqual(rows[-1], 251, f'-7 % sub-black not at the bottom: row {rows[-1]}')
 
         cl.send('SetInputSettings', {'inputName': SOURCE, 'inputSettings': {'pattern': 3}})
-        time.sleep(1.0)
+        settings = cl.send('GetInputSettings', {'inputName': SOURCE}).input_settings
+        notice(f'test signal settings after the switch: {settings}')
+        time.sleep(3.0)
         rows = self.rows(cl, name)
         notice(f'test signal steps: waveform rows {rows[:3]}..{rows[-3:]}')
         self.assertLessEqual(rows[0], 3, f'the 109 % step is not at the top: row {rows[0]}')
