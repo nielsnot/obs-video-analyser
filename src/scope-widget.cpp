@@ -1604,7 +1604,45 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 		};
 		shape("dock.toolbar.rect", ROI_DRAW_RECT);
 		shape("dock.toolbar.ellipse", ROI_DRAW_ELLIPSE);
+		shape("dock.toolbar.polygon", ROI_DRAW_POLYGON);
 		shape("dock.toolbar.pin", ROI_DRAW_PIN);
+		// the selections drawn: rename or delete each
+		struct roi_source *roi = widget_roi(data);
+		const size_t n_shapes = roi ? roi_get_shape_count(roi) : 0;
+		if (n_shapes) {
+			QMenu *list = selMenu->addMenu(QString::fromUtf8(obs_module_text("dock.select.list")));
+			static const char *type_keys[3] = {"dock.select.rect", "dock.select.ellipse",
+							   "dock.select.polygon"};
+			for (size_t i = 0; i < n_shapes; i++) {
+				int type = 0;
+				char name[32] = "";
+				if (!roi_get_shape(roi, i, &type, name, sizeof(name)))
+					continue;
+				QString title = QStringLiteral("%1  %2").arg(i + 1).arg(QString::fromUtf8(
+					obs_module_text(type_keys[type >= 0 && type < 3 ? type : 0])));
+				if (name[0])
+					title += QStringLiteral(" \u2014 ") + QString::fromUtf8(name);
+				QMenu *one = list->addMenu(title);
+				const QString current = QString::fromUtf8(name);
+				QAction *ra = one->addAction(QString::fromUtf8(obs_module_text("dock.select.rename")));
+				connect(
+					ra, &QAction::triggered, this,
+					[this, i, current]() {
+						bool ok = false;
+						const QString text = QInputDialog::getText(
+							this, QString::fromUtf8(obs_module_text("dock.select.rename")),
+							QString::fromUtf8(obs_module_text("dock.select.name")),
+							QLineEdit::Normal, current, &ok);
+						if (ok)
+							roi_set_shape_name(widget_roi(data), i,
+									   text.trimmed().toUtf8().constData());
+					},
+					Qt::QueuedConnection);
+				QAction *da = one->addAction(QString::fromUtf8(obs_module_text("dock.select.delete")));
+				connect(da, &QAction::triggered, this,
+					[this, i]() { roi_delete_shape(widget_roi(data), i); });
+			}
+		}
 		selMenu->addSeparator();
 		QAction *a = selMenu->addAction(QString::fromUtf8(obs_module_text("dock.toolbar.undo")));
 		connect(a, &QAction::triggered, this, &ScopeWidget::undoShape);

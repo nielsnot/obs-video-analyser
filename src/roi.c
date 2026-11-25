@@ -141,14 +141,31 @@ static void shapes_load(struct roi_source *src, obs_data_t *settings)
 	da_resize(src->shapes, 0);
 	for (size_t i = 0; i < n; i++) {
 		obs_data_t *item = obs_data_array_item(array, i);
+		const int type = (int)obs_data_get_int(item, "type");
 		struct roi_shape s = {
-			.type = (int)obs_data_get_int(item, "type") == ROI_SHAPE_ELLIPSE ? ROI_SHAPE_ELLIPSE
-											 : ROI_SHAPE_RECT,
+			.type = type == ROI_SHAPE_ELLIPSE   ? ROI_SHAPE_ELLIPSE
+				: type == ROI_SHAPE_POLYGON ? ROI_SHAPE_POLYGON
+							    : ROI_SHAPE_RECT,
 			.x0 = clamp01((float)obs_data_get_double(item, "x0")),
 			.y0 = clamp01((float)obs_data_get_double(item, "y0")),
 			.x1 = clamp01((float)obs_data_get_double(item, "x1")),
 			.y1 = clamp01((float)obs_data_get_double(item, "y1")),
 		};
+		snprintf(s.name, sizeof(s.name), "%s", obs_data_get_string(item, "name"));
+		if (s.type == ROI_SHAPE_POLYGON) {
+			obs_data_array_t *pts = obs_data_get_array(item, "pts");
+			const size_t np = obs_data_array_count(pts);
+			for (size_t k = 0; k < np && s.n_pts < ROI_POLY_MAX; k++) {
+				obs_data_t *pt = obs_data_array_item(pts, k);
+				s.px[s.n_pts] = clamp01((float)obs_data_get_double(pt, "x"));
+				s.py[s.n_pts] = clamp01((float)obs_data_get_double(pt, "y"));
+				s.n_pts++;
+				obs_data_release(pt);
+			}
+			obs_data_array_release(pts);
+			if (s.n_pts < 3)
+				s.x1 = s.x0; // not a polygon: dropped below
+		}
 		if (s.x1 > s.x0 && s.y1 > s.y0)
 			da_push_back(src->shapes, &s);
 		obs_data_release(item);
@@ -187,6 +204,20 @@ static void shapes_store(struct roi_source *src)
 		obs_data_set_double(item, "y0", s->y0);
 		obs_data_set_double(item, "x1", s->x1);
 		obs_data_set_double(item, "y1", s->y1);
+		if (s->name[0])
+			obs_data_set_string(item, "name", s->name);
+		if (s->type == ROI_SHAPE_POLYGON) {
+			obs_data_array_t *pts = obs_data_array_create();
+			for (int k = 0; k < s->n_pts; k++) {
+				obs_data_t *pt = obs_data_create();
+				obs_data_set_double(pt, "x", s->px[k]);
+				obs_data_set_double(pt, "y", s->py[k]);
+				obs_data_array_push_back(pts, pt);
+				obs_data_release(pt);
+			}
+			obs_data_set_array(item, "pts", pts);
+			obs_data_array_release(pts);
+		}
 		obs_data_array_push_back(array, item);
 		obs_data_release(item);
 	}
@@ -370,6 +401,16 @@ static inline bool shape_contains(const struct roi_shape *s, float u, float v)
 		const float dv = (v - cy) / ry;
 		return du * du + dv * dv <= 1.0f;
 	}
+	if (s->type == ROI_SHAPE_POLYGON) {
+		// even-odd rule
+		bool in = false;
+		for (int i = 0, j = s->n_pts - 1; i < s->n_pts; j = i++) {
+			if ((s->py[i] > v) != (s->py[j] > v) &&
+			    u < (s->px[j] - s->px[i]) * (v - s->py[i]) / (s->py[j] - s->py[i]) + s->px[i])
+				in = !in;
+		}
+		return in;
+	}
 	return true;
 }
 
@@ -509,6 +550,23 @@ static void draw_ellipse_outline(float x0, float y0, float x1, float y1)
 		gs_vertex2f(qx, qy);
 		px = qx;
 		py = qy;
+	}
+}
+
+static void draw_polygon_outline(const float *px, const float *py, int n, float w, float h, bool closed, uint32_t color)
+{
+	if (n < 2)
+		return;
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), color);
+	while (gs_effect_loop(effect, "Solid")) {
+		gs_render_start(false);
+		for (int i = 0; i + 1 < n + (closed ? 1 : 0); i++) {
+			const int j = (i + 1) % n;
+			gs_vertex2f(px[i] * w, py[i] * h);
+			gs_vertex2f(px[j] * w, py[j] * h);
+		}
+		gs_render_stop(GS_LINES);
 	}
 }
 
@@ -965,7 +1023,10 @@ static void roi_render(void *data, gs_effect_t *effect)
 		const struct roi_shape *s = src->shapes.array + i;
 		if (src->face_follow)
 			break; // the faces are the selection now
-		draw_shape_outline(s->type, s->x0 * w, s->y0 * h, s->x1 * w, s->y1 * h, COLOR_SHAPE);
+		if (s->type == ROI_SHAPE_POLYGON)
+			draw_polygon_outline(s->px, s->py, s->n_pts, w, h, true, COLOR_SHAPE);
+		else
+			draw_shape_outline(s->type, s->x0 * w, s->y0 * h, s->x1 * w, s->y1 * h, COLOR_SHAPE);
 	}
 	pthread_mutex_unlock(&src->shapes_mutex);
 
@@ -974,6 +1035,19 @@ static void roi_render(void *data, gs_effect_t *effect)
 		const struct face_box *f = src->faces + i;
 		draw_shape_outline(ROI_SHAPE_ELLIPSE, (f->x - f->w * 0.05f) * w, (f->y - f->h * 0.05f) * h,
 				   (f->x + f->w * 1.05f) * w, (f->y + f->h * 1.05f) * h, COLOR_FACE);
+	}
+
+	if (src->poly_n > 0) {
+		// the polygon being drawn, with a line to the pointer
+		float px[ROI_POLY_MAX + 1], py[ROI_POLY_MAX + 1];
+		const int n = src->poly_n;
+		for (int i = 0; i < n; i++) {
+			px[i] = src->poly_x[i] / w;
+			py[i] = src->poly_y[i] / h;
+		}
+		px[n] = src->x_mouse / w;
+		py[n] = src->y_mouse / h;
+		draw_polygon_outline(px, py, n + 1, w, h, false, COLOR_DRAWING);
 	}
 
 	if (src->dragging) {
@@ -988,6 +1062,17 @@ static void roi_render(void *data, gs_effect_t *effect)
 
 	// labels keep their size: drawn in view coordinates
 	const struct text_scale ts = text_scale_from_viewport(w, h);
+	// the names of the selections, at their top left corner
+	pthread_mutex_lock(&src->shapes_mutex);
+	for (size_t i = 0; !src->face_follow && i < src->shapes.num; i++) {
+		const struct roi_shape *s = src->shapes.array + i;
+		if (!s->name[0])
+			continue;
+		const float x = (s->x0 * w - view_x) * zoom, y = (s->y0 * h - view_y) * zoom;
+		text_draw(&ts, s->name, x + 4.0f * ts.ux, y + 3.0f * ts.uy, 11.0f, 0xFF60FF60, TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_TOP);
+	}
+	pthread_mutex_unlock(&src->shapes_mutex);
 	if (comparing && cmode == 0) {
 		const float xm = (cpos * src->ref_w - view_x) * zoom;
 		if (xm > 0.0f && xm < w) {
@@ -1257,6 +1342,32 @@ static void finish_drag(struct roi_source *src)
 	shapes_store(src);
 }
 
+static void finish_polygon(struct roi_source *src)
+{
+	const int w = (int)roi_get_width(src), h = (int)roi_get_height(src);
+	const int n = src->poly_n;
+	src->poly_n = 0;
+	if (w <= 0 || h <= 0 || n < 3)
+		return;
+	struct roi_shape s = {.type = ROI_SHAPE_POLYGON, .x0 = 1.0f, .y0 = 1.0f, .x1 = 0.0f, .y1 = 0.0f};
+	for (int i = 0; i < n; i++) {
+		s.px[i] = clamp01((float)src->poly_x[i] / w);
+		s.py[i] = clamp01((float)src->poly_y[i] / h);
+		s.x0 = fminf(s.x0, s.px[i]);
+		s.y0 = fminf(s.y0, s.py[i]);
+		s.x1 = fmaxf(s.x1, s.px[i]);
+		s.y1 = fmaxf(s.y1, s.py[i]);
+	}
+	s.n_pts = n;
+	if (s.x1 <= s.x0 || s.y1 <= s.y0)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	da_push_back(src->shapes, &s);
+	src->shapes_dirty = true;
+	pthread_mutex_unlock(&src->shapes_mutex);
+	shapes_store(src);
+}
+
 static void add_pin(struct roi_source *src, int x, int y)
 {
 	const int w = (int)roi_get_width(src);
@@ -1333,6 +1444,24 @@ static void roi_mouse_click(void *data, const struct obs_mouse_event *event, int
 	src->x_mouse = to_picture_x(src, event->x);
 	src->y_mouse = to_picture_y(src, event->y);
 
+	if (src->draw_mode == ROI_DRAW_POLYGON) {
+		if (mouse_up)
+			return;
+		const float reach = 10.0f / fmaxf(src->zoom, 1e-3f);
+		const bool near_first = src->poly_n >= 3 && fabsf((float)(src->x_mouse - src->poly_x[0])) <= reach &&
+					fabsf((float)(src->y_mouse - src->poly_y[0])) <= reach;
+		if (near_first || (click_count >= 2 && src->poly_n >= 3) || src->poly_n >= ROI_POLY_MAX) {
+			finish_polygon(src);
+			return;
+		}
+		if (click_count >= 2)
+			return; // the double click of a corner just placed
+		src->poly_x[src->poly_n] = src->x_mouse;
+		src->poly_y[src->poly_n] = src->y_mouse;
+		src->poly_n++;
+		return;
+	}
+
 	if (!mouse_up) {
 		if (src->draw_mode == ROI_DRAW_PIN) {
 			add_pin(src, src->x_mouse, src->y_mouse);
@@ -1354,9 +1483,10 @@ void roi_set_draw_mode(struct roi_source *src, int mode)
 {
 	if (!src)
 		return;
-	if (mode != ROI_DRAW_RECT && mode != ROI_DRAW_ELLIPSE && mode != ROI_DRAW_PIN)
+	if (mode != ROI_DRAW_RECT && mode != ROI_DRAW_ELLIPSE && mode != ROI_DRAW_PIN && mode != ROI_DRAW_POLYGON)
 		mode = ROI_DRAW_NONE;
 	src->draw_mode = mode;
+	src->poly_n = 0;
 	if (mode == ROI_DRAW_NONE)
 		src->dragging = false;
 }
@@ -1373,6 +1503,45 @@ void roi_undo_shape(struct roi_source *src)
 	pthread_mutex_lock(&src->shapes_mutex);
 	if (src->shapes.num)
 		da_pop_back(src->shapes);
+	src->shapes_dirty = true;
+	pthread_mutex_unlock(&src->shapes_mutex);
+	shapes_store(src);
+}
+
+bool roi_get_shape(struct roi_source *src, size_t i, int *type, char *name, size_t size)
+{
+	if (!src)
+		return false;
+	pthread_mutex_lock(&src->shapes_mutex);
+	const bool ok = i < src->shapes.num;
+	if (ok) {
+		if (type)
+			*type = src->shapes.array[i].type;
+		if (name && size)
+			snprintf(name, size, "%s", src->shapes.array[i].name);
+	}
+	pthread_mutex_unlock(&src->shapes_mutex);
+	return ok;
+}
+
+void roi_set_shape_name(struct roi_source *src, size_t i, const char *name)
+{
+	if (!src)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	if (i < src->shapes.num)
+		snprintf(src->shapes.array[i].name, sizeof(src->shapes.array[i].name), "%s", name ? name : "");
+	pthread_mutex_unlock(&src->shapes_mutex);
+	shapes_store(src);
+}
+
+void roi_delete_shape(struct roi_source *src, size_t i)
+{
+	if (!src)
+		return;
+	pthread_mutex_lock(&src->shapes_mutex);
+	if (i < src->shapes.num)
+		da_erase(src->shapes, i);
 	src->shapes_dirty = true;
 	pthread_mutex_unlock(&src->shapes_mutex);
 	shapes_store(src);

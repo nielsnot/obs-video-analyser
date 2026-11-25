@@ -11,14 +11,18 @@ extern "C" {
 enum roi_shape_e {
 	ROI_SHAPE_RECT = 0,
 	ROI_SHAPE_ELLIPSE = 1,
+	ROI_SHAPE_POLYGON = 2,
 };
 
 enum roi_draw_mode_e {
 	ROI_DRAW_NONE = 0,
 	ROI_DRAW_RECT = 1,
 	ROI_DRAW_ELLIPSE = 2,
-	ROI_DRAW_PIN = 3, // color picker: a click places a pin that reads the color under it
+	ROI_DRAW_PIN = 3,     // color picker: a click places a pin that reads the color under it
+	ROI_DRAW_POLYGON = 4, // a click per corner; a click on the first corner or a double click closes it
 };
+
+#define ROI_POLY_MAX 24
 
 #define ROI_MAX_PINS 8
 
@@ -40,8 +44,11 @@ struct roi_pin
  * so they stay valid when the scale changes. An ellipse is inscribed in its box. */
 struct roi_shape
 {
-	int type; // roi_shape_e
-	float x0, y0, x1, y1;
+	int type;             // roi_shape_e
+	float x0, y0, x1, y1; // the box; of a polygon the box around its corners
+	int n_pts;            // polygon corners
+	float px[ROI_POLY_MAX], py[ROI_POLY_MAX];
+	char name[32]; // shown at the shape; empty for none
 };
 
 struct roi_source
@@ -56,6 +63,8 @@ struct roi_source
 	volatile bool shift_down;
 	int x_start, y_start;
 	int x_mouse, y_mouse;
+	int poly_x[ROI_POLY_MAX], poly_y[ROI_POLY_MAX]; // the polygon being drawn, in picture pixels
+	volatile int poly_n;
 
 	// selection shapes; the scopes count pixels inside any of them
 	pthread_mutex_t shapes_mutex;
@@ -119,6 +128,10 @@ int roi_get_draw_mode(const struct roi_source *src);
 void roi_undo_shape(struct roi_source *src);
 void roi_clear_shapes(struct roi_source *src);
 size_t roi_get_shape_count(struct roi_source *src);
+/* The type and name of a shape (the name is copied, at most size bytes). */
+bool roi_get_shape(struct roi_source *src, size_t i, int *type, char *name, size_t size);
+void roi_set_shape_name(struct roi_source *src, size_t i, const char *name);
+void roi_delete_shape(struct roi_source *src, size_t i);
 void roi_undo_pin(struct roi_source *src);
 void roi_clear_pins(struct roi_source *src);
 /* Loads a picture file (PNG, JPEG) as the snapshot reference, scaled to the ROI picture, on the next frame. */
