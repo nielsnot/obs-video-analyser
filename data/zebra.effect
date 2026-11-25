@@ -3,6 +3,12 @@ uniform texture2d image;
 uniform float zebra_th_low;
 uniform float zebra_th_high;
 uniform float zebra_tm;
+uniform float zebra_dx = 1.0;  // stripe direction: x and y weights (1, 1) is "/", (1, -1) is "\"
+uniform float zebra_dy = 1.0;
+uniform float zebra_anim = 1.0; // 0: still stripes
+uniform float skin_on = 0.0;    // 1: a second zebra across the first, for skin tones
+uniform float skin_low = 0.6;
+uniform float skin_high = 0.7;
 uniform texture2d raw; // the raw signal of a video source: legal luma code (16 is 0 %, 235 is 100 %)
 
 sampler_state def_sampler {
@@ -39,6 +45,23 @@ sampler_state raw_sampler {
 	AddressV = Clamp;
 };
 
+
+// Stripes 3 pixels wide every 6, moving unless still; the skin zebra crosses them in light grey.
+float4 zebra_apply(float4 rgba, float2 pos, float y, bool upper_open)
+{
+	float t = zebra_tm * zebra_anim;
+	if (zebra_th_low <= y && (y <= zebra_th_high || upper_open)) {
+		if (frac((pos.x * zebra_dx + pos.y * zebra_dy + t) / 6.0) < 0.5)
+			return float4(0.0, 0.0, 0.0, 1.0);
+		return rgba;
+	}
+	if (skin_on > 0.5 && skin_low <= y && y <= skin_high) {
+		if (frac((pos.x * zebra_dx - pos.y * zebra_dy + t) / 6.0) < 0.34)
+			return float4(0.85, 0.85, 0.85, 1.0);
+	}
+	return rgba;
+}
+
 // Stripes from the raw luma, which goes beyond 0 % and 100 %; a high threshold of 100 % has no upper limit.
 float4 PSDrawZebraRaw(VertInOut vert_in) : TARGET
 {
@@ -46,12 +69,7 @@ float4 PSDrawZebraRaw(VertInOut vert_in) : TARGET
 	if (mask_outside > 0.5 && rgba.a < 0.5)
 		return outside_selection(rgba);
 	float y = (raw.Sample(raw_sampler, vert_in.uv).r * 255.0 - 16.0) / 219.0;
-	int xy = int(vert_in.pos.x + vert_in.pos.y + zebra_tm);
-	xy = xy - (xy / 6) * 6;
-	if (zebra_th_low <= y && (y <= zebra_th_high || zebra_th_high >= 0.999) && xy < 3)
-		return float4(0.0, 0.0, 0.0, 1.0);
-	else
-		return rgba;
+	return zebra_apply(rgba, vert_in.pos.xy, y, zebra_th_high >= 0.999);
 }
 
 technique DrawZebraRaw
@@ -69,12 +87,7 @@ float4 PSDrawZebra601(VertInOut vert_in) : TARGET
 	if (mask_outside > 0.5 && rgba.a < 0.5)
 		return outside_selection(rgba);
 	float y = dot(rgba.xyz, float3(0.299000, 0.587000, 0.114000));
-	int xy = int(vert_in.pos.x + vert_in.pos.y + zebra_tm);
-	xy = xy - (xy / 6) * 6;
-	if (zebra_th_low<=y && y<=zebra_th_high && xy<3)
-		return float4(0.0, 0.0, 0.0, 1.0);
-	else
-		return rgba;
+	return zebra_apply(rgba, vert_in.pos.xy, y, false);
 }
 
 float4 PSDrawZebra709(VertInOut vert_in) : TARGET
@@ -83,12 +96,7 @@ float4 PSDrawZebra709(VertInOut vert_in) : TARGET
 	if (mask_outside > 0.5 && rgba.a < 0.5)
 		return outside_selection(rgba);
 	float y = dot(rgba.xyz, float3(0.212600, 0.715200, 0.072200));
-	int xy = int(vert_in.pos.x + vert_in.pos.y + zebra_tm);
-	xy = xy - (xy / 6) * 6;
-	if (zebra_th_low<=y && y<=zebra_th_high && xy<3)
-		return float4(0.0, 0.0, 0.0, 1.0);
-	else
-		return rgba;
+	return zebra_apply(rgba, vert_in.pos.xy, y, false);
 }
 
 float4 PSDrawZebra2020(VertInOut vert_in) : TARGET
@@ -97,12 +105,7 @@ float4 PSDrawZebra2020(VertInOut vert_in) : TARGET
 	if (mask_outside > 0.5 && rgba.a < 0.5)
 		return outside_selection(rgba);
 	float y = dot(rgba.xyz, float3(0.262700, 0.678000, 0.059300));
-	int xy = int(vert_in.pos.x + vert_in.pos.y + zebra_tm);
-	xy = xy - (xy / 6) * 6;
-	if (zebra_th_low<=y && y<=zebra_th_high && xy<3)
-		return float4(0.0, 0.0, 0.0, 1.0);
-	else
-		return rgba;
+	return zebra_apply(rgba, vert_in.pos.xy, y, false);
 }
 
 technique DrawZebra601

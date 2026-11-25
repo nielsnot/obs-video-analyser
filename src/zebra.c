@@ -60,6 +60,9 @@ enum fc_preset_e {
 	FC_PRESET_HLG = 5,
 	FC_PRESET_PQ = 6,
 	FC_PRESET_FOOTBALL = 7,
+	FC_PRESET_LEGAL = 8,        // EBU R103 broadcast range
+	FC_PRESET_CINEMA = 9,       // camera style: black, 18 % grey, skin one stop over, clipping
+	FC_PRESET_EXPOSURE_CB = 10, // exposure in colors that color blind viewers can tell apart
 };
 
 static const struct fc_preset_band fc_preset_exposure[] = {
@@ -123,6 +126,33 @@ static const struct fc_preset_band fc_preset_football[] = {
 	{2.00f, 0xFFFF2020, "FC.Band.Clip"},
 };
 
+/* Broadcast legal (EBU R103): within -1..103 % grey, the preferred range of -5..105 % in blue and yellow, outside it
+ * in magenta and red. Below 0 % and above 100 % only show with the raw signal of a video source. */
+static const struct fc_preset_band fc_preset_legal[] = {
+	{-0.05f, 0xFFFF00FF, "FC.Band.IllegalLow"}, {-0.01f, 0xFF3070FF, "FC.Band.PreferredLow"},
+	{1.03f, FC_GREY, "FC.Band.Legal"},          {1.05f, 0xFFFFE000, "FC.Band.PreferredHigh"},
+	{2.00f, 0xFFFF2020, "FC.Band.IllegalHigh"},
+};
+
+/* Camera style false color: purple at the black clip, blue just above it, green on 18 % grey (about 41 %), pink on
+ * skin one stop over grey (about 52-56 %), yellow near and red at the white clip; the rest grey. */
+static const struct fc_preset_band fc_preset_cinema[] = {
+	{0.025f, 0xFFA040FF, "FC.Band.BlackClip"}, {0.04f, 0xFF2060FF, "FC.Band.NearBlack"},
+	{0.38f, FC_GREY, "FC.Band.Dark"},          {0.42f, 0xFF30C040, "FC.Band.Grey18"},
+	{0.52f, FC_GREY, "FC.Band.Mid"},           {0.56f, 0xFFFF90C0, "FC.Band.Skin"},
+	{0.97f, FC_GREY, "FC.Band.Bright"},        {0.99f, 0xFFFFE000, "FC.Band.NearClip"},
+	{2.00f, 0xFFFF2020, "FC.Band.Clip"},
+};
+
+/* The exposure preset in the colors of Okabe and Ito, which most color blind viewers tell apart: blue below, sky
+ * blue in the shadows, bluish green on mid grey, yellow in the highlights, orange near and vermilion at the clip. */
+static const struct fc_preset_band fc_preset_exposure_cb[] = {
+	{0.02f, 0xFF0072B2, "FC.Band.BlackClip"}, {0.10f, 0xFF56B4E9, "FC.Band.DeepShadow"},
+	{0.42f, FC_GREY, "FC.Band.Dark"},         {0.48f, 0xFF009E73, "FC.Band.MidGrey"},
+	{0.84f, FC_GREY, "FC.Band.Bright"},       {0.94f, 0xFFF0E442, "FC.Band.Highlight"},
+	{1.00f, 0xFFE69F00, "FC.Band.NearClip"},  {2.00f, 0xFFD55E00, "FC.Band.Clip"},
+};
+
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
 // common structure for source and filter
@@ -133,6 +163,10 @@ struct zb_source
 	/* properties */
 	float zebra_th_low, zebra_th_high;
 	float zebra_tm;
+	int zebra_dir;    // 0 "/", 1 "\\", 2 horizontal, 3 vertical
+	bool zebra_still; // stripes that do not move
+	bool skin_on;     // a second zebra for skin tones
+	float skin_low, skin_high;
 	enum show_key_e show_key;
 	char *falsecolor_lut_filename;
 
@@ -461,9 +495,18 @@ static void fc_load_scheme(struct zb_source *src, obs_data_t *settings)
 		return;
 	case FC_PRESET_PQ:
 		fc_set_bands(src, fc_preset_pq, ARRAY_LEN(fc_preset_pq));
-		break;
+		return;
 	case FC_PRESET_FOOTBALL:
 		fc_set_bands(src, fc_preset_football, ARRAY_LEN(fc_preset_football));
+		return;
+	case FC_PRESET_LEGAL:
+		fc_set_bands(src, fc_preset_legal, ARRAY_LEN(fc_preset_legal));
+		return;
+	case FC_PRESET_CINEMA:
+		fc_set_bands(src, fc_preset_cinema, ARRAY_LEN(fc_preset_cinema));
+		return;
+	case FC_PRESET_EXPOSURE_CB:
+		fc_set_bands(src, fc_preset_exposure_cb, ARRAY_LEN(fc_preset_exposure_cb));
 		return;
 	case FC_PRESET_CUSTOM:
 		break;
@@ -587,6 +630,11 @@ static void zb_update(struct zb_source *src, obs_data_t *settings)
 		/* zebra */
 		src->zebra_th_low = obs_data_get_int(settings, "zebra_th_low") * 1e-2f;
 		src->zebra_th_high = obs_data_get_int(settings, "zebra_th_high") * 1e-2f;
+		src->zebra_dir = (int)obs_data_get_int(settings, "zebra_dir");
+		src->zebra_still = obs_data_get_bool(settings, "zebra_still");
+		src->skin_on = obs_data_get_bool(settings, "zebra_skin");
+		src->skin_low = obs_data_get_int(settings, "zebra_skin_low") * 1e-2f;
+		src->skin_high = obs_data_get_int(settings, "zebra_skin_high") * 1e-2f;
 	} else {
 		/* falsecolor */
 		bool lut = obs_data_get_bool(settings, "falsecolor_lut");
@@ -635,6 +683,8 @@ static void zb_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "zebra_th_low", 75);
 	obs_data_set_default_int(settings, "zebra_th_high", 100);
+	obs_data_set_default_int(settings, "zebra_skin_low", 60);
+	obs_data_set_default_int(settings, "zebra_skin_high", 70);
 
 	// a starting point for the custom false color scheme (colors as 0xAABBGGRR)
 	static const struct
@@ -697,6 +747,18 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		obs_property_int_set_suffix(prop, "%");
 		prop = obs_properties_add_int(props, "zebra_th_high", obs_module_text("Threshold (high)"), 50, 100, 1);
 		obs_property_int_set_suffix(prop, "%");
+		prop = obs_properties_add_list(props, "zebra_dir", obs_module_text("Zebra.Dir"), OBS_COMBO_TYPE_LIST,
+					       OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(prop, "/", 0);
+		obs_property_list_add_int(prop, "\\", 1);
+		obs_property_list_add_int(prop, obs_module_text("Zebra.Dir.Horizontal"), 2);
+		obs_property_list_add_int(prop, obs_module_text("Zebra.Dir.Vertical"), 3);
+		obs_properties_add_bool(props, "zebra_still", obs_module_text("Zebra.Still"));
+		obs_properties_add_bool(props, "zebra_skin", obs_module_text("Zebra.Skin"));
+		prop = obs_properties_add_int(props, "zebra_skin_low", obs_module_text("Zebra.SkinLow"), 30, 90, 1);
+		obs_property_int_set_suffix(prop, "%");
+		prop = obs_properties_add_int(props, "zebra_skin_high", obs_module_text("Zebra.SkinHigh"), 30, 95, 1);
+		obs_property_int_set_suffix(prop, "%");
 	} else {
 		/* falsecolor */
 		struct dstr filename_filters = {0};
@@ -718,6 +780,9 @@ static void zb_get_properties(obs_properties_t *props, bool is_falsecolor)
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.HLG"), FC_PRESET_HLG);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.PQ"), FC_PRESET_PQ);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Football"), FC_PRESET_FOOTBALL);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Legal"), FC_PRESET_LEGAL);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Cinema"), FC_PRESET_CINEMA);
+		obs_property_list_add_int(prop, obs_module_text("FC.Preset.ExposureCB"), FC_PRESET_EXPOSURE_CB);
 		obs_property_list_add_int(prop, obs_module_text("FC.Preset.Custom"), FC_PRESET_CUSTOM);
 		obs_property_set_modified_callback(prop, fc_scheme_props_changed);
 
@@ -929,6 +994,14 @@ static void set_effect_params(struct zb_source *src, bool mask_outside)
 		gs_effect_set_float(gs_effect_get_param_by_name(e, "zebra_th_low"), src->zebra_th_low);
 		gs_effect_set_float(gs_effect_get_param_by_name(e, "zebra_th_high"), src->zebra_th_high);
 		gs_effect_set_float(gs_effect_get_param_by_name(e, "zebra_tm"), src->zebra_tm);
+		static const float dirs[4][2] = {{1.0f, 1.0f}, {1.0f, -1.0f}, {0.0f, 1.0f}, {1.0f, 0.0f}};
+		const int d = src->zebra_dir >= 0 && src->zebra_dir < 4 ? src->zebra_dir : 0;
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "zebra_dx"), dirs[d][0]);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "zebra_dy"), dirs[d][1]);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "zebra_anim"), src->zebra_still ? 0.0f : 1.0f);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "skin_on"), src->skin_on ? 1.0f : 0.0f);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "skin_low"), src->skin_low);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "skin_high"), src->skin_high);
 	} else {
 		/* falsecolor */
 		gs_texture_t *lut = src->falsecolor_lut.texture;

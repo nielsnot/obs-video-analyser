@@ -34,7 +34,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | 3 | `▭` `◯` `⊕` `↶` `✕` | Selection tools: draw rectangles and ellipses (`Shift` for squares and circles), place color picker pins, undo the last one, reset all. |
 | 4 | `◉ Snapshot` / `⇆ Compare` | Freeze the picture and every scope as a reference, then show it: pink traces over the live scopes and a wipe or blend in the ROI view. Right-click Snapshot for the snapshot library. |
 | 10 | `❚❚ Pause` | Pauses every scope in every dock on the current frame until you resume (also a hotkey). |
-| 10 | `☺ Faces (exp.)` | The selection follows every face found, so all scopes measure the faces. |
+| 10 | `☺ Faces` | The selection follows every face found, so all scopes measure the faces. |
 | 10 | `⤓ Export` | Saves the whole dock as it is now as a PNG picture. |
 | 10 | `⛶ Full` | Shows the dock full screen on the screen it is on; again, or Esc, to go back. |
 | 10 | `⊞ Arrange` | Drag scopes anywhere in the dock and resize them at any edge or corner (free layout, saved per view). |
@@ -60,7 +60,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **Line plot** | One picture line | R, G, B and luma of the line you choose |
 | **3D color cube** | Every pixel in a color space | RGB, Y'CbCr, HSV or Lab; turns by itself; drag to turn, Shift-drag to pan, wheel to zoom |
 | **Audio meter** | Sound | Peak per channel with hold, EBU R128 loudness (momentary, short-term with maximum, integrated) against a target, a loudness timeline of 30 s to 1.5 h, phase correlation, goniometer for stereo and a room meter for 5.1 and 7.1 |
-| **Faces** *(experimental)* | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
+| **Faces** | Faces in the picture | Finds and follows faces; the picture with the faces, the largest face up close, scene levels (median, P10-P90, P99, near black, near clipping), face luma, hue against the skin tone line and saturation, written advice. `◉ Snapshot` keeps the face, so after switching camera you see it next to the live face with the differences |
 | **Color chart** | A color chart | ColorChecker Classic (24), 140 patches (14 x 10) or your own grid: compares with a reference camera or the published values: Delta E per patch, exposure and white balance from the greys (with the gain change to match), saturation and the hue of the primaries |
 | **Channel plot** | Two channels against each other | R/G, R/B, G/B, Y/Cb, Y/Cr or Cb/Cr, with the legal and EBU R103 boxes |
 | **Data analyser** | Pixel values | A block of pixels around a pin as 10-bit or 8-bit codes or %, exact codes of the raw signal |
@@ -94,7 +94,7 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 - **Test signal.** Add a *Video Analyser test signal* source: bars with 109 % and -7 %, ramp, steps, PLUGE, skin, HLG and PQ bars and an A/V sync pattern, as 10-bit Y'CbCr like a capture card.
 - **Scope menu.** Right-click a scope: *Replace with* another type in place, *Copy image to clipboard*, or *Capture reference* of that scope only. A status line per scope (Options) shows the source it measures and its size.
 - **Help on every scope.** The **i** button in the hover bar explains how to read the scope and what its controls do.
-- **Follow faces (experimental).** `☺ Faces (exp.)` turns the selection into the faces found, and it moves with them.
+- **Follow faces.** `☺ Faces` turns the selection into the faces found, and it moves with them.
 - **Free layout.** `⊞ Arrange` lets you drag and resize every scope; give scopes of one camera the same tile color.
 - **Quick controls.** Hover a scope for intensity, grid, color, gain, shape and full size without opening the options.
 - **Guides.** Title and action safe, thirds and a center cross over the ROI view (right-click, Guides).
