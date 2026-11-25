@@ -39,6 +39,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QImage>
+#include <QResizeEvent>
 #include <QClipboard>
 #include <QStandardPaths>
 #include <QWidgetAction>
@@ -231,6 +232,10 @@ struct scope_widget_s
 	int drag_x = 0, drag_y = 0;
 	free_rect_s drag_start;
 	int last_cx = 0, last_cy = 0;
+
+	// Live mode: the scopes only, no quick controls; compact: no names on the tiles (a small dock)
+	volatile bool live = false;
+	volatile bool compact = false;
 
 	// quick controls shown on the tile under the mouse
 	volatile int hover_tile = -1;
@@ -640,7 +645,7 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		if (t > 0) {
 			const scope_entry *e = data->entries[t - 1];
 			// while arranging the name is shown in the middle of the tile instead
-			if (e->show_label && !e->label.empty() &&
+			if (e->show_label && !e->label.empty() && !data->compact &&
 			    !(data->arranging && data->layout == SCOPE_LAYOUT_FREE)) {
 				// Draw in tile pixels so the label keeps its size whatever the scope's scale.
 				gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
@@ -719,7 +724,7 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		data->hover_tile = -1;
 		data->hover_until = 0;
 	}
-	if (!data->arranging && data->hover_tile > 0 && data->hover_tile < total) {
+	if (!data->arranging && !data->live && data->hover_tile > 0 && data->hover_tile < total) {
 		gs_projection_push();
 		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
 		draw_quickbar(data, data->hover_tile);
@@ -1543,27 +1548,68 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	auto *btnView = make_tool_button(toolbar, "dock.toolbar.addview", "dock.toolbar.addview.tip", false);
 	connect(btnView, &QToolButton::clicked, this, &ScopeWidget::addView);
 
+	// The selection tools in one menu: shapes, undo and clear, follow faces, the selection options. The single
+	// buttons stay (hidden) as the state the rest of the dock already uses.
+	for (QToolButton *b : {btnRect, btnEllipse, btnPin, btnUndo, btnReset, btnFaces})
+		b->hide();
+	btnSelect = make_tool_button(toolbar, "dock.toolbar.select", "dock.toolbar.select.tip", false);
+	auto *selMenu = new QMenu(btnSelect);
+	btnSelect->setMenu(selMenu);
+	btnSelect->setPopupMode(QToolButton::InstantPopup);
+	connect(selMenu, &QMenu::aboutToShow, this, [this, selMenu]() {
+		selMenu->clear();
+		auto shape = [&](const char *key, int mode) {
+			QAction *a = selMenu->addAction(QString::fromUtf8(obs_module_text(key)).remove('&'));
+			a->setCheckable(true);
+			a->setChecked(drawMode == mode);
+			connect(a, &QAction::triggered, this,
+				[this, mode]() { setDrawMode(drawMode == mode ? ROI_DRAW_NONE : mode); });
+		};
+		shape("dock.toolbar.rect", ROI_DRAW_RECT);
+		shape("dock.toolbar.ellipse", ROI_DRAW_ELLIPSE);
+		shape("dock.toolbar.pin", ROI_DRAW_PIN);
+		selMenu->addSeparator();
+		QAction *a = selMenu->addAction(QString::fromUtf8(obs_module_text("dock.toolbar.undo")));
+		connect(a, &QAction::triggered, this, &ScopeWidget::undoShape);
+		a = selMenu->addAction(QString::fromUtf8(obs_module_text("dock.toolbar.reset")));
+		connect(a, &QAction::triggered, this, &ScopeWidget::resetShapes);
+		selMenu->addSeparator();
+		a = selMenu->addAction(QString::fromUtf8(obs_module_text("dock.toolbar.faces")));
+		a->setCheckable(true);
+		a->setChecked(btnFaces && btnFaces->isChecked());
+		connect(a, &QAction::toggled, this, [this](bool on) {
+			if (btnFaces)
+				btnFaces->setChecked(on);
+		});
+		selMenu->addSeparator();
+		a = selMenu->addAction(QString::fromUtf8(obs_module_text("dock.toolbar.select.options")));
+		connect(a, &QAction::triggered, this, [this]() { openProperties(0); }, Qt::QueuedConnection);
+	});
+
+	btnEdit = make_tool_button(toolbar, "dock.toolbar.edit", "dock.toolbar.edit.tip", true);
+	connect(btnEdit, &QToolButton::toggled, this, &ScopeWidget::setEditMode);
+
+	auto *sep1 = toolbar_separator(toolbar), *sep2 = toolbar_separator(toolbar), *sep3 = toolbar_separator(toolbar),
+	     *sep4 = toolbar_separator(toolbar);
 	layout->addWidget(tabs);
 	layout->addWidget(btnView);
-	layout->addWidget(toolbar_separator(toolbar));
+	layout->addWidget(sep1);
 	layout->addWidget(btnAdd);
-	layout->addWidget(toolbar_separator(toolbar));
-	layout->addWidget(btnRect);
-	layout->addWidget(btnEllipse);
-	layout->addWidget(btnPin);
-	layout->addWidget(btnUndo);
-	layout->addWidget(btnReset);
-	layout->addWidget(toolbar_separator(toolbar));
+	layout->addWidget(btnSelect);
+	layout->addWidget(sep2);
 	layout->addWidget(btnSnap);
 	layout->addWidget(btnCompare);
-	layout->addWidget(btnFaces);
 	layout->addWidget(btnPause);
-	layout->addWidget(toolbar_separator(toolbar));
+	layout->addWidget(sep3);
 	layout->addWidget(btnArrange);
 	layout->addWidget(btnExport);
+	layout->addWidget(sep4);
 	layout->addWidget(btnWindow);
 	layout->addWidget(btnFull);
 	layout->addStretch(1);
+	layout->addWidget(btnEdit);
+	// what Live mode hides
+	editOnly = {btnView, sep1, btnAdd, btnSelect, sep3, btnArrange, btnExport};
 
 	// The shape buttons behave like radio buttons that can also be switched off.
 	connect(btnRect, &QToolButton::clicked, this,
@@ -1631,9 +1677,10 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnUndo, &QToolButton::clicked, this, &ScopeWidget::undoShape);
 	connect(btnReset, &QToolButton::clicked, this, &ScopeWidget::resetShapes);
 
-	toolbar->setVisible(toolbarVisible);
+	toolbar->setVisible(toolbarVisible && !data->compact);
 	updatePause();
 	applyDisplaySettings();
+	setEditMode(editMode);
 	return toolbar;
 }
 
@@ -2032,7 +2079,56 @@ void ScopeWidget::setToolbarVisible(bool visible)
 {
 	toolbarVisible = visible;
 	if (toolbar)
-		toolbar->setVisible(visible);
+		toolbar->setVisible(visible && !data->compact);
+}
+
+/* Edit mode shows everything to build the dock; Live mode only the scopes and what is used while on air. */
+void ScopeWidget::setEditMode(bool on)
+{
+	editMode = on;
+	data->live = !on;
+	if (!on) {
+		data->hover_tile = -1;
+		if (drawMode != ROI_DRAW_NONE)
+			setDrawMode(ROI_DRAW_NONE);
+		if (btnArrange && btnArrange->isChecked())
+			btnArrange->setChecked(false);
+	}
+	for (QWidget *w : editOnly)
+		if (w)
+			w->setVisible(on);
+	if (btnEdit) {
+		btnEdit->blockSignals(true);
+		btnEdit->setChecked(on);
+		btnEdit->blockSignals(false);
+		btnEdit->setText(
+			QString::fromUtf8(obs_module_text(on ? "dock.toolbar.edit.done" : "dock.toolbar.edit")));
+	}
+	update();
+}
+
+/* Compact: a small dock hides its toolbar and the names on the tiles, when that is switched on. */
+void ScopeWidget::updateCompact()
+{
+	const int w = width(), h = height();
+	bool compact = data->compact;
+	if (!compactAuto)
+		compact = false;
+	else if (!compact && (w < 480 || h < 280))
+		compact = true;
+	else if (compact && w >= 540 && h >= 340) // a margin, so it does not flip back and forth
+		compact = false;
+	if (compact == data->compact)
+		return;
+	data->compact = compact;
+	if (toolbar)
+		toolbar->setVisible(toolbarVisible && !compact);
+}
+
+void ScopeWidget::resizeEvent(QResizeEvent *event)
+{
+	NorisQTDisplay::resizeEvent(event);
+	updateCompact();
 }
 
 void ScopeWidget::toggleSolo(int tile)
@@ -2358,7 +2454,7 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 		const int prev = data->hover_tile;
 		// Leaving the tile (or a short Leave event from the native display window) keeps the quick
 		// controls a moment, so they do not flicker while the pointer moves.
-		const int over = mouseLeave ? -1 : tile_at(data, x, y);
+		const int over = mouseLeave || data->live ? -1 : tile_at(data, x, y);
 		if (over > 0) {
 			data->hover_tile = over;
 			data->hover_until = 0;
@@ -2844,6 +2940,17 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 	act->setCheckable(true);
 	act->setChecked(toolbarVisible);
 	connect(act, &QAction::toggled, this, &ScopeWidget::setToolbarVisible);
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.edit")));
+	act->setCheckable(true);
+	act->setChecked(editMode);
+	connect(act, &QAction::toggled, this, &ScopeWidget::setEditMode);
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.compact")));
+	act->setCheckable(true);
+	act->setChecked(compactAuto);
+	connect(act, &QAction::toggled, this, [this](bool on) {
+		compactAuto = on;
+		updateCompact();
+	});
 
 	popup.addSeparator();
 
@@ -4167,6 +4274,8 @@ void ScopeWidget::openTabMenu(const QPoint &pos)
 void ScopeWidget::default_properties(obs_data_t *props)
 {
 	obs_data_set_default_bool(props, "toolbar", true);
+	obs_data_set_default_bool(props, "edit_mode", true);
+	obs_data_set_default_bool(props, "compact_auto", false);
 	obs_data_set_default_int(props, "text_size_pct", 0);
 }
 
@@ -4175,6 +4284,8 @@ void ScopeWidget::save_properties(obs_data_t *props)
 	storeActive();
 
 	obs_data_set_bool(props, "toolbar", toolbarVisible);
+	obs_data_set_bool(props, "edit_mode", editMode);
+	obs_data_set_bool(props, "compact_auto", compactAuto);
 	obs_data_set_int(props, "text_size_pct", data->text_pct);
 	obs_data_set_bool(props, "window_mode", scope_dock_in_window_mode(findDock()));
 	obs_data_set_string(props, "window_screen", windowScreen.toUtf8().constData());
@@ -4200,6 +4311,9 @@ void ScopeWidget::load_properties(obs_data_t *props)
 	const std::string roi_name = roi_name_of(this);
 
 	setToolbarVisible(obs_data_get_bool(props, "toolbar"));
+	compactAuto = obs_data_get_bool(props, "compact_auto");
+	setEditMode(obs_data_get_bool(props, "edit_mode"));
+	updateCompact();
 	windowScreen = QString::fromUtf8(obs_data_get_string(props, "window_screen"));
 	if (obs_data_get_bool(props, "window_mode") && !scope_dock_in_window_mode(findDock())) {
 		// back in window mode on the screen it was on, once the dock is shown

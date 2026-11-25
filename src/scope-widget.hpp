@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <QRect>
 #include <QString>
+#include <QList>
 #include <memory>
 #include <string>
 #include <NorisQTDisplay.hpp>
@@ -27,7 +28,12 @@ class ScopeWidget : public NorisQTDisplay {
 	class QToolButton *btnFull = nullptr;
 	class QToolButton *btnPause = nullptr;
 	class QToolButton *btnWindow = nullptr;
-	QString windowScreen; // the screen the window mode fills, by name; empty for the one the dock is on
+	class QToolButton *btnSelect = nullptr;
+	class QToolButton *btnEdit = nullptr;
+	QList<QWidget *> editOnly; // hidden in Live mode
+	bool editMode = true;
+	bool compactAuto = false; // a small dock hides the toolbar and the names on the tiles
+	QString windowScreen;     // the screen the window mode fills, by name; empty for the one the dock is on
 	class QDialog *snapshotDialog = nullptr;
 	class QDialog *signalDialog = nullptr;
 	std::function<void()> snapshotRefresh;
@@ -69,6 +75,9 @@ private:
 	void exportScreenshot();
 	void setFullScreen(bool on);
 	void toggleWindow();
+	void setEditMode(bool on);
+	void updateCompact();
+	void resizeEvent(class QResizeEvent *event) override;
 	void setWindowScreen(const QString &name);
 	void updateScreenScale();
 	class QDockWidget *findDock() const;
