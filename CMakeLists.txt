@@ -67,6 +67,10 @@ set(PLUGIN_SOURCES
 	src/vectorscope.c
 	src/vs-trace.c
 	src/testsignal.c
+	src/draw-util.c
+	src/balance.c
+	src/quadbalance.c
+	src/colorinspector.c
 	src/waveform.c
 	src/histogram.c
 	src/zebra.c
