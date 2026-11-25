@@ -33,7 +33,10 @@ class ScopeWidget : public NorisQTDisplay {
 	QList<QWidget *> editOnly; // hidden in Live mode
 	bool editMode = true;
 	bool compactAuto = false; // a small dock hides the toolbar and the names on the tiles
-	QString windowScreen;     // the screen the window mode fills, by name; empty for the one the dock is on
+	class QLabel *signalBar = nullptr;
+	bool signalBarOn = true;
+	void updateSignalBar();
+	QString windowScreen; // the screen the window mode fills, by name; empty for the one the dock is on
 	class QDialog *snapshotDialog = nullptr;
 	class QDialog *signalDialog = nullptr;
 	std::function<void()> snapshotRefresh;
@@ -121,6 +124,9 @@ public:
 	ScopeWidget(QWidget *parent);
 	~ScopeWidget();
 	QWidget *createToolbar(QWidget *parent);
+	/* A line under the toolbar: the source, size, frame rate, raw signal or color space, LUT, paused. */
+	QWidget *createSignalBar(QWidget *parent);
+	void setSignalBarVisible(bool on);
 	static void default_properties(obs_data_t *);
 	void save_properties(obs_data_t *);
 	/* Calls proc(cmd) on every scope of the dock that has it, for example va_waveform("zoom_blacks"). */

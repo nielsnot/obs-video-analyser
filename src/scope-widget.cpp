@@ -40,6 +40,7 @@
 #include <QFileDialog>
 #include <QImage>
 #include <QResizeEvent>
+#include <QRegularExpression>
 #include <QClipboard>
 #include <QStandardPaths>
 #include <QWidgetAction>
@@ -2123,6 +2124,8 @@ void ScopeWidget::updateCompact()
 	data->compact = compact;
 	if (toolbar)
 		toolbar->setVisible(toolbarVisible && !compact);
+	if (signalBar)
+		signalBar->setVisible(signalBarOn && !compact);
 }
 
 void ScopeWidget::resizeEvent(QResizeEvent *event)
@@ -2944,6 +2947,10 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 	act->setCheckable(true);
 	act->setChecked(editMode);
 	connect(act, &QAction::toggled, this, &ScopeWidget::setEditMode);
+	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.signalbar")));
+	act->setCheckable(true);
+	act->setChecked(signalBarOn);
+	connect(act, &QAction::toggled, this, &ScopeWidget::setSignalBarVisible);
 	act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.compact")));
 	act->setCheckable(true);
 	act->setChecked(compactAuto);
@@ -4275,6 +4282,7 @@ void ScopeWidget::default_properties(obs_data_t *props)
 {
 	obs_data_set_default_bool(props, "toolbar", true);
 	obs_data_set_default_bool(props, "edit_mode", true);
+	obs_data_set_default_bool(props, "signal_bar", true);
 	obs_data_set_default_bool(props, "compact_auto", false);
 	obs_data_set_default_int(props, "text_size_pct", 0);
 }
@@ -4285,6 +4293,7 @@ void ScopeWidget::save_properties(obs_data_t *props)
 
 	obs_data_set_bool(props, "toolbar", toolbarVisible);
 	obs_data_set_bool(props, "edit_mode", editMode);
+	obs_data_set_bool(props, "signal_bar", signalBarOn);
 	obs_data_set_bool(props, "compact_auto", compactAuto);
 	obs_data_set_int(props, "text_size_pct", data->text_pct);
 	obs_data_set_bool(props, "window_mode", scope_dock_in_window_mode(findDock()));
@@ -4312,6 +4321,7 @@ void ScopeWidget::load_properties(obs_data_t *props)
 
 	setToolbarVisible(obs_data_get_bool(props, "toolbar"));
 	compactAuto = obs_data_get_bool(props, "compact_auto");
+	setSignalBarVisible(obs_data_get_bool(props, "signal_bar"));
 	setEditMode(obs_data_get_bool(props, "edit_mode"));
 	updateCompact();
 	windowScreen = QString::fromUtf8(obs_data_get_string(props, "window_screen"));
@@ -4973,4 +4983,95 @@ void ScopeWidget::clearDock()
 	setArranging(false);
 	loadActive(state);
 	rebuildTabs();
+}
+
+/* ---------- signal bar: what the dock measures, in one line under the toolbar ---------- */
+
+QWidget *ScopeWidget::createSignalBar(QWidget *parent)
+{
+	signalBar = new QLabel(parent);
+	signalBar->setObjectName("VASignalBar");
+	signalBar->setTextFormat(Qt::RichText);
+	signalBar->setStyleSheet(QStringLiteral("#VASignalBar { background: #141418; color: #b8b8c0; padding: 2px 8px; "
+						"font-size: 11px; border-bottom: 1px solid #26262c; }"));
+	signalBar->setVisible(signalBarOn);
+	auto *timer = new QTimer(signalBar);
+	connect(timer, &QTimer::timeout, this, &ScopeWidget::updateSignalBar);
+	timer->start(1000);
+	updateSignalBar();
+	return signalBar;
+}
+
+void ScopeWidget::setSignalBarVisible(bool on)
+{
+	signalBarOn = on;
+	if (signalBar)
+		signalBar->setVisible(on && !data->compact);
+	if (on)
+		updateSignalBar();
+}
+
+void ScopeWidget::updateSignalBar()
+{
+	if (!signalBar || !signalBar->isVisible())
+		return;
+	struct roi_source *r = widget_roi(data);
+	if (!r)
+		return;
+	QStringList parts;
+	pthread_mutex_lock(&r->cm.target_update_mutex);
+	obs_source_t *target = r->cm.weak_target ? obs_weak_source_get_source(r->cm.weak_target) : nullptr;
+	pthread_mutex_unlock(&r->cm.target_update_mutex);
+	parts << esc(target_label(data->roi));
+	struct obs_video_info ovi = {};
+	const bool have_ovi = obs_get_video_info(&ovi);
+	uint32_t w = 0, h = 0;
+	if (target) {
+		w = obs_source_get_width(target);
+		h = obs_source_get_height(target);
+	} else if (have_ovi) {
+		w = ovi.base_width;
+		h = ovi.base_height;
+	}
+	const bool signal = w > 0 && h > 0;
+	parts << QStringLiteral("%1&times;%2").arg(w).arg(h);
+	if (have_ovi && ovi.fps_den)
+		parts << QStringLiteral("%1 fps").arg((double)ovi.fps_num / ovi.fps_den, 0, 'f',
+						      ovi.fps_num % ovi.fps_den ? 2 : 0);
+	// the raw signal of a video source, when it is read
+	bool raw = false;
+	obs_source_t *video = nullptr;
+	if (target && (obs_source_get_output_flags(target) & OBS_SOURCE_ASYNC_VIDEO) == OBS_SOURCE_ASYNC_VIDEO)
+		video = obs_source_get_ref(target);
+	else if (!target || obs_scene_from_source(target))
+		video = cm_scene_video(target);
+	if (video) {
+		if (obs_source_t *filter = raw_input_find(video)) {
+			char desc[160] = "";
+			bool usable = false;
+			if (obs_source_enabled(filter) &&
+			    raw_input_describe(filter, r->cm.colorspace, desc, sizeof(desc), &usable) && usable) {
+				// "I210, 1920x1080, video range (SDI standard), SDR. ..." up to the first period
+				QString d = QString::fromUtf8(desc).section(QLatin1Char('.'), 0, 0);
+				d.remove(QRegularExpression(QStringLiteral(", \\d+x\\d+")));
+				parts << QStringLiteral("RAW ") + esc(d);
+				raw = true;
+			}
+			obs_source_release(filter);
+		}
+		obs_source_release(video);
+	}
+	obs_source_release(target);
+	if (!raw && have_ovi)
+		parts << QString::fromUtf8(get_video_colorspace_name(ovi.colorspace)) + QStringLiteral(", ") +
+				 QString::fromUtf8(get_video_range_name(ovi.output_format, ovi.range));
+	if (r->cm.lut_mode != CM_LUT_OFF && r->cm.lut_tex)
+		parts << QStringLiteral("LUT");
+	if (cm_get_paused())
+		parts << QStringLiteral("<span style='color:#ffb040'>%1</span>")
+				 .arg(QString::fromUtf8(obs_module_text("dock.toolbar.paused")));
+	const QString dot = QStringLiteral("<span style='color:%1'>&#9679;</span> ")
+				    .arg(signal ? (cm_colorblind ? "#56b4e9" : "#60e060")
+						: (cm_colorblind ? "#d55e00" : "#f04040"));
+	signalBar->setText(dot + parts.join(QStringLiteral(" &middot; ")));
 }

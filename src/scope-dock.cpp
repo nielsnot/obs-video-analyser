@@ -233,6 +233,7 @@ void scope_dock_add(const char *name, obs_data_t *props, bool show)
 	ScopeWidget *w = new ScopeWidget(container);
 	w->name = name;
 	layout->addWidget(w->createToolbar(container));
+	layout->addWidget(w->createSignalBar(container));
 	layout->addWidget(w, 1);
 	w->load_properties(props);
 	if (!obs_frontend_add_dock_by_id(name, name, container)) {
