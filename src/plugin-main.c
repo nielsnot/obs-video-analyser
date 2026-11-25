@@ -54,6 +54,7 @@ extern const struct obs_source_info colormonitor_raw_input;
 extern const struct obs_source_info colormonitor_channelplot;
 extern const struct obs_source_info colormonitor_datascope;
 extern const struct obs_source_info colormonitor_skintone;
+extern const struct obs_source_info colormonitor_testsignal;
 void scope_docks_init();
 void text_render_init(void);
 void text_render_free(void);
@@ -140,6 +141,8 @@ bool obs_module_load(void)
 	if (!register_source_with_flags(&colormonitor_datascope, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_skintone, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_testsignal, 0))
 		return false;
 	if (!register_source_with_flags(&colormonitor_faces, src_flags))
 		return false;
