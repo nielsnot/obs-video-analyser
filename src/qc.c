@@ -20,6 +20,7 @@
 #include "common.h"
 #include "util.h"
 #include "text-render.h"
+#include <obs-frontend-api.h>
 
 #define QC_W 480
 #define QC_H 400    // overview
@@ -116,6 +117,13 @@ struct qc_source
 	float max_cll, max_fall;
 	struct qc_event log[QC_LOG_MAX];
 	int n_log, i_log; // ring buffer, i_log is the next slot
+	// the whole session, for the report: per check how often and how long
+	int ev_count[QC_N_CHECKS];
+	double ev_seconds[QC_N_CHECKS];
+	time_t session_start;
+	bool chapters;     // a chapter marker in the recording at every error (OBS 30.2, Hybrid MP4 / MOV)
+	char *report_file; // HTML report
+	bool report_auto;  // write the report when recording or streaming stops
 
 	// check state (pipeline thread)
 	bool active[QC_N_CHECKS];    // currently in violation
@@ -167,6 +175,17 @@ static const char *qc_get_name(void *unused)
 	return obs_module_text("QC");
 }
 
+static void qc_write_report(struct qc_source *src, const char *path);
+
+/* The report, when recording or streaming stops. */
+static void qc_frontend_event(enum obs_frontend_event event, void *data)
+{
+	struct qc_source *src = data;
+	if ((event == OBS_FRONTEND_EVENT_RECORDING_STOPPED || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) &&
+	    src->report_auto && src->report_file)
+		qc_write_report(src, src->report_file);
+}
+
 static void *qc_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct qc_source *src = bzalloc(sizeof(struct qc_source));
@@ -181,7 +200,9 @@ static void *qc_create(obs_data_t *settings, obs_source_t *source)
 	cm_create(&src->cm, settings, source);
 	cm_request(&src->cm, qc_surface_cb, src);
 
+	src->session_start = time(NULL);
 	qc_update(src, settings);
+	obs_frontend_add_event_callback(qc_frontend_event, src);
 	return src;
 }
 
@@ -191,7 +212,9 @@ static void qc_destroy(void *data)
 	cm_destroy(&src->cm);
 	pthread_mutex_destroy(&src->mutex);
 	bfree(src->deadpix);
+	obs_frontend_remove_event_callback(qc_frontend_event, src);
 	bfree(src->log_file);
+	bfree(src->report_file);
 	bfree(src);
 }
 
@@ -235,6 +258,11 @@ static void qc_update(void *data, obs_data_t *settings)
 	const double window = (double)obs_data_get_int(settings, "qc_window");
 
 	pthread_mutex_lock(&src->mutex);
+	bfree(src->report_file);
+	const char *rf = obs_data_get_string(settings, "qc_report_file");
+	src->report_file = rf && *rf ? bstrdup(rf) : NULL;
+	src->report_auto = obs_data_get_bool(settings, "qc_report_auto");
+	src->chapters = obs_data_get_bool(settings, "qc_chapters");
 	bfree(src->log_file);
 	const char *f = obs_data_get_string(settings, "qc_log_file");
 	src->log_file = f && *f ? bstrdup(f) : NULL;
@@ -251,6 +279,7 @@ static void qc_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "target_scale", 2);
 	obs_data_set_default_bool(settings, "qc_check_clip", true);
+	obs_data_set_default_bool(settings, "qc_chapters", true);
 	obs_data_set_default_bool(settings, "qc_check_crush", true);
 	obs_data_set_default_bool(settings, "qc_check_legal", true);
 	obs_data_set_default_bool(settings, "qc_check_hdr", false);
@@ -280,6 +309,126 @@ static void qc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "qc_tl_rgb", false);
 	obs_data_set_default_bool(settings, "qc_tl_nits", false);
 	obs_data_set_default_bool(settings, "qc_tl_ext", true);
+}
+
+static void html_escape(FILE *fp, const char *s)
+{
+	for (; s && *s; s++) {
+		if (*s == '<')
+			fputs("&lt;", fp);
+		else if (*s == '>')
+			fputs("&gt;", fp);
+		else if (*s == '&')
+			fputs("&amp;", fp);
+		else
+			fputc(*s, fp);
+	}
+}
+
+static void fmt_time(char *buf, size_t size, time_t t, bool with_date)
+{
+	struct tm tm;
+#ifdef _WIN32
+	localtime_s(&tm, &t);
+#else
+	localtime_r(&t, &tm);
+#endif
+	if (with_date)
+		snprintf(buf, size, "%04d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			 tm.tm_hour, tm.tm_min, tm.tm_sec);
+	else
+		snprintf(buf, size, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
+/* A self-contained HTML page with the session: per check how often and how long, and the last events. */
+static void qc_write_report(struct qc_source *src, const char *path)
+{
+	if (!path || !*path)
+		return;
+	struct qc_event log[QC_LOG_MAX];
+	int n_log, i_log, count[QC_N_CHECKS];
+	double seconds[QC_N_CHECKS];
+	time_t start;
+	float max_cll, max_fall;
+	pthread_mutex_lock(&src->mutex);
+	memcpy(log, src->log, sizeof(log));
+	n_log = src->n_log;
+	i_log = src->i_log;
+	memcpy(count, src->ev_count, sizeof(count));
+	memcpy(seconds, src->ev_seconds, sizeof(seconds));
+	start = src->session_start;
+	max_cll = src->max_cll;
+	max_fall = src->max_fall;
+	pthread_mutex_unlock(&src->mutex);
+
+	FILE *fp = os_fopen(path, "w");
+	if (!fp) {
+		blog(LOG_WARNING, "QC: could not write the report to '%s'", path);
+		return;
+	}
+	char t0[32], t1[32];
+	fmt_time(t0, sizeof(t0), start, true);
+	fmt_time(t1, sizeof(t1), time(NULL), true);
+	int total = 0;
+	for (int c = 0; c < QC_N_CHECKS; c++)
+		total += count[c];
+	fputs("<!doctype html><html><head><meta charset=\"utf-8\"><title>QC report</title><style>"
+	      "body{font-family:system-ui,sans-serif;background:#111;color:#ddd;margin:24px;max-width:900px}"
+	      "h1{font-size:22px}table{border-collapse:collapse;width:100%;margin:12px 0 24px}"
+	      "td,th{border-bottom:1px solid #333;padding:6px 8px;text-align:left}th{color:#999;font-weight:500}"
+	      ".ok{color:#6fcf86}.bad{color:#ff6a5a}.n{text-align:right;font-variant-numeric:tabular-nums}"
+	      "</style></head><body>",
+	      fp);
+	fputs("<h1>QC report: ", fp);
+	html_escape(fp, obs_source_get_name(src->cm.self));
+	fprintf(fp, "</h1><p>%s &ndash; %s</p>", t0, t1);
+	fprintf(fp, "<p class=\"%s\">%d %s</p>", total ? "bad" : "ok", total,
+		obs_module_text(total == 1 ? "QC.Report.Event" : "QC.Report.Events"));
+	if (max_cll > 0.0f)
+		fprintf(fp, "<p>MaxCLL %.0f nits, MaxFALL %.0f nits</p>", max_cll, max_fall);
+	fprintf(fp, "<table><tr><th>%s</th><th class=n>%s</th><th class=n>%s</th></tr>",
+		obs_module_text("QC.Report.Check"), obs_module_text("QC.Report.Count"),
+		obs_module_text("QC.Report.Seconds"));
+	for (int c = 0; c < QC_N_CHECKS; c++) {
+		if (!src->enabled[c])
+			continue;
+		fputs("<tr><td>", fp);
+		html_escape(fp, obs_module_text(check_names[c]));
+		fprintf(fp, "</td><td class=\"n %s\">%d</td><td class=n>%.1f</td></tr>", count[c] ? "bad" : "ok",
+			count[c], seconds[c]);
+	}
+	fputs("</table>", fp);
+	if (n_log) {
+		fprintf(fp, "<table><tr><th>%s</th><th>%s</th><th>%s</th><th class=n>%s</th></tr>",
+			obs_module_text("QC.Report.Time"), obs_module_text("QC.Report.Check"),
+			obs_module_text("QC.Report.Detail"), obs_module_text("QC.Report.Seconds"));
+		for (int k = 0; k < n_log; k++) {
+			const struct qc_event *e = log + (i_log - n_log + k + 2 * QC_LOG_MAX) % QC_LOG_MAX;
+			char tb[32];
+			fmt_time(tb, sizeof(tb), e->start, false);
+			fprintf(fp, "<tr><td>%s</td><td>", tb);
+			html_escape(fp, obs_module_text(check_names[e->check]));
+			fputs("</td><td>", fp);
+			html_escape(fp, e->detail);
+			if (e->duration >= 0.0)
+				fprintf(fp, "</td><td class=n>%.1f</td></tr>", e->duration);
+			else
+				fputs("</td><td class=n>&hellip;</td></tr>", fp);
+		}
+		fputs("</table>", fp);
+	}
+	fputs("<p style=\"color:#777\">Video Analyser</p></body></html>\n", fp);
+	fclose(fp);
+	blog(LOG_INFO, "QC: report written to '%s'", path);
+}
+
+static bool qc_report_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	struct qc_source *src = data;
+	qc_write_report(src, src->report_file);
+	return false;
 }
 
 static bool qc_reset_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -354,6 +503,11 @@ static obs_properties_t *qc_get_properties(void *data)
 
 	obs_properties_add_path(props, "qc_log_file", obs_module_text("QC.LogFile"), OBS_PATH_FILE_SAVE, "CSV (*.csv)",
 				NULL);
+	obs_properties_add_bool(props, "qc_chapters", obs_module_text("QC.Chapters"));
+	obs_properties_add_path(props, "qc_report_file", obs_module_text("QC.ReportFile"), OBS_PATH_FILE_SAVE,
+				"HTML (*.html)", NULL);
+	obs_properties_add_bool(props, "qc_report_auto", obs_module_text("QC.ReportAuto"));
+	obs_properties_add_button2(props, "qc_report", obs_module_text("QC.Report"), qc_report_clicked, src);
 	obs_properties_add_button2(props, "qc_reset", obs_module_text("QC.Reset"), qc_reset_clicked, src);
 	return props;
 }
@@ -604,6 +758,29 @@ static void append_csv(const char *path, const struct qc_event *e)
 	fclose(fp);
 }
 
+/* A chapter marker in the recording (Hybrid MP4 / MOV, OBS 30.2 and later), from the UI thread. */
+#if LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 2, 0)
+static void add_chapter_task(void *param)
+{
+	char *name = param;
+	if (obs_frontend_recording_active())
+		obs_frontend_recording_add_chapter(name);
+	bfree(name);
+}
+#endif
+
+static void add_chapter(int check, const char *detail)
+{
+#if LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 2, 0)
+	char buf[128];
+	snprintf(buf, sizeof(buf), "QC: %s %s", obs_module_text(check_names[check]), detail);
+	obs_queue_task(OBS_TASK_UI, add_chapter_task, bstrdup(buf), false);
+#else
+	UNUSED_PARAMETER(check);
+	UNUSED_PARAMETER(detail);
+#endif
+}
+
 /* Updates one check; called with the mutex held. */
 static void update_check(struct qc_source *src, int check, bool violation, const char *detail, uint64_t now);
 
@@ -639,6 +816,9 @@ static void update_check(struct qc_source *src, int check, bool violation, const
 		if (src->n_log < QC_LOG_MAX)
 			src->n_log++;
 		src->logged[check] = true;
+		src->ev_count[check]++;
+		if (src->chapters)
+			add_chapter(check, detail);
 	}
 
 	if (src->logged[check]) {
@@ -646,6 +826,7 @@ static void update_check(struct qc_source *src, int check, bool violation, const
 		if (e->check == check && e->duration < 0.0) {
 			if (!violation) {
 				e->duration = (now - src->since[check]) / 1e9;
+				src->ev_seconds[check] += e->duration;
 				append_csv(src->log_file, e);
 			} else {
 				snprintf(e->detail, sizeof(e->detail), "%s", detail);
@@ -726,6 +907,9 @@ static void qc_surface_cb(void *data, struct cm_surface_data *sd)
 		src->want_reset = false;
 		src->max_cll = src->max_fall = 0.0f;
 		src->n_log = src->i_log = 0;
+		memset(src->ev_count, 0, sizeof(src->ev_count));
+		memset(src->ev_seconds, 0, sizeof(src->ev_seconds));
+		src->session_start = time(NULL);
 		memset(src->active, 0, sizeof(src->active));
 		memset(src->logged, 0, sizeof(src->logged));
 	}
