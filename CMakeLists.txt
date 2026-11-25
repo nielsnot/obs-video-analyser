@@ -73,6 +73,7 @@ set(PLUGIN_SOURCES
 	src/colorinspector.c
 	src/avsync.c
 	src/rta.c
+	src/shot.c
 	src/waveform.c
 	src/histogram.c
 	src/zebra.c

@@ -1,6 +1,9 @@
 /*
  * 3D color cube: the pixels as points in a 3D color space, each in its own color, with the black-white axis
  * upright: the RGB cube, Y'CbCr (a HectorScope: luma up, the chroma plane across), HSV or CIE L*a*b*.
+ * The 3D views show the picture itself in depth: the 3D waveform stands every line of the picture behind the other as
+ * a waveform, the 3D picture lifts every pixel to its luma in its own color, and the 3D histogram stacks the luma
+ * histogram of the last seconds behind each other.
  * It turns slowly; drag to turn it yourself, Shift + drag to move it, wheel to zoom.
  */
 #include <obs-module.h>
@@ -14,6 +17,8 @@
 
 #define CB_SIZE 360
 #define CB_MAX_POINTS 16384
+#define HIST_BINS 64
+#define HIST_T 48
 
 struct cb_source
 {
@@ -21,7 +26,11 @@ struct cb_source
 
 	pthread_mutex_t mutex;
 	uint8_t points[CB_MAX_POINTS][3]; // R, G, B
+	uint16_t pos[CB_MAX_POINTS][2];   // where in the picture, 0..65535
 	uint32_t n_points;
+	float hist[HIST_T][HIST_BINS]; // luma histograms, newest at hist_pos - 1
+	int hist_pos, hist_n;
+	uint64_t hist_last_ns;
 
 	gs_vertbuffer_t *vb;
 
@@ -44,7 +53,15 @@ enum cb_model_e {
 	CB_YCBCR = 1, // HectorScope
 	CB_HSV = 2,
 	CB_LAB = 3,
+	CB_WAVE3D = 4,    // x across the picture, luma up, the lines of the picture in depth
+	CB_PICTURE3D = 5, // the same, each pixel in its own color
+	CB_HIST3D = 6,    // luma histograms over time
 };
+
+static inline bool is_spatial(int model)
+{
+	return model == CB_WAVE3D || model == CB_PICTURE3D;
+}
 
 static void cb_update(void *, obs_data_t *);
 static void cb_surface_cb(void *data, struct cm_surface_data *surface_data);
@@ -124,6 +141,9 @@ static obs_properties_t *cb_get_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("Cube.Model.YCbCr"), CB_YCBCR);
 	obs_property_list_add_int(p, obs_module_text("Cube.Model.HSV"), CB_HSV);
 	obs_property_list_add_int(p, obs_module_text("Cube.Model.Lab"), CB_LAB);
+	obs_property_list_add_int(p, obs_module_text("Cube.Model.Wave3D"), CB_WAVE3D);
+	obs_property_list_add_int(p, obs_module_text("Cube.Model.Picture3D"), CB_PICTURE3D);
+	obs_property_list_add_int(p, obs_module_text("Cube.Model.Hist3D"), CB_HIST3D);
 	obs_properties_add_button2(props, "cube_reset", obs_module_text("Cube.Prop.Reset"), reset_view_clicked, src);
 	return props;
 }
@@ -145,24 +165,43 @@ static void cb_surface_cb(void *data, struct cm_surface_data *sd)
 	struct cb_source *src = data;
 	if (!sd->rgb_data || !sd->width || !sd->height)
 		return;
-	// an even spread of at most CB_MAX_POINTS pixels
+	// an even grid of at most CB_MAX_POINTS pixels
 	const uint64_t total = (uint64_t)sd->width * sd->height;
-	uint32_t step = (uint32_t)((total + CB_MAX_POINTS - 1) / CB_MAX_POINTS);
+	uint32_t step = (uint32_t)ceil(sqrt((double)total / CB_MAX_POINTS));
 	if (step < 1)
 		step = 1;
+	const bool want_hist = src->model == CB_HIST3D;
+	float hist[HIST_BINS] = {0};
 	pthread_mutex_lock(&src->mutex);
 	uint32_t n = 0;
-	for (uint64_t i = 0; i < total && n < CB_MAX_POINTS; i += step) {
-		const uint32_t x = (uint32_t)(i % sd->width), y = (uint32_t)(i / sd->width);
-		const uint8_t *p = sd->rgb_data + (size_t)sd->linesize * y + x * 4;
-		if (!p[3])
-			continue;
-		src->points[n][0] = p[2];
-		src->points[n][1] = p[1];
-		src->points[n][2] = p[0];
-		n++;
+	for (uint32_t y = step / 2; y < sd->height && n < CB_MAX_POINTS; y += step) {
+		for (uint32_t x = step / 2; x < sd->width && n < CB_MAX_POINTS; x += step) {
+			const uint8_t *p = sd->rgb_data + (size_t)sd->linesize * y + x * 4;
+			if (!p[3])
+				continue;
+			src->points[n][0] = p[2];
+			src->points[n][1] = p[1];
+			src->points[n][2] = p[0];
+			src->pos[n][0] = (uint16_t)(65535ull * x / (sd->width > 1 ? sd->width - 1 : 1));
+			src->pos[n][1] = (uint16_t)(65535ull * y / (sd->height > 1 ? sd->height - 1 : 1));
+			if (want_hist) {
+				const float l = 0.2126f * p[2] + 0.7152f * p[1] + 0.0722f * p[0];
+				hist[(int)(l * HIST_BINS / 256.0f)] += 1.0f;
+			}
+			n++;
+		}
 	}
 	src->n_points = n;
+	// the histogram history moves on ten times a second
+	const uint64_t now = os_gettime_ns();
+	if (want_hist && n && now - src->hist_last_ns >= 100000000ULL) {
+		src->hist_last_ns = now;
+		for (int i = 0; i < HIST_BINS; i++)
+			src->hist[src->hist_pos][i] = hist[i] / n;
+		src->hist_pos = (src->hist_pos + 1) % HIST_T;
+		if (src->hist_n < HIST_T)
+			src->hist_n++;
+	}
 	pthread_mutex_unlock(&src->mutex);
 }
 
@@ -275,6 +314,109 @@ static inline void project_model(const struct cb_source *src, const float m[9], 
 	*y = CB_SIZE * 0.5f - py * scale + src->pan_y * CB_SIZE;
 }
 
+/* A point of the 3D waveform or 3D picture: across the picture, its luma up, down the picture in depth. */
+static inline void project_spatial(const struct cb_source *src, const float m[9], float u, float v, float luma,
+				   float scale, float *x, float *y)
+{
+	const float a = u - 0.5f, c = luma - 0.5f, d = v - 0.5f;
+	const float px = m[0] * a + m[1] * c + m[2] * d;
+	const float py = m[3] * a + m[4] * c + m[5] * d;
+	*x = CB_SIZE * 0.5f + px * scale + src->pan_x * CB_SIZE;
+	*y = CB_SIZE * 0.5f - py * scale + src->pan_y * CB_SIZE;
+}
+
+static void draw_line3(const struct cb_source *src, const float m[9], float scale, const float a[3], const float b[3])
+{
+	float x, y;
+	project_spatial(src, m, a[0], a[1], a[2], scale, &x, &y);
+	gs_vertex2f(x, y);
+	project_spatial(src, m, b[0], b[1], b[2], scale, &x, &y);
+	gs_vertex2f(x, y);
+}
+
+/* The box around the 3D waveform, picture or histogram, with lines at 0, 50 and 100 %. */
+static void draw_box3(const struct cb_source *src, const float m[9], float scale, const struct text_scale *ts,
+		      bool hist)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x60FFFFFF);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		for (int k = 0; k < 3; k++) {
+			const float l = k * 0.5f;
+			if (hist && k == 1)
+				continue;
+			const float c[4][3] = {{0, 0, l}, {1, 0, l}, {1, 1, l}, {0, 1, l}};
+			for (int e = 0; e < 4; e++)
+				draw_line3(src, m, scale, c[e], c[(e + 1) % 4]);
+		}
+		for (int e = 0; e < 4; e++) {
+			const float u = (float)(e & 1), v = (float)(e >> 1);
+			const float a[3] = {u, v, 0}, b[3] = {u, v, 1};
+			draw_line3(src, m, scale, a, b);
+		}
+		gs_render_stop(GS_LINES);
+	}
+	float x, y;
+	if (hist) {
+		static const char *lab[3] = {"0%", "50%", "100%"};
+		for (int k = 0; k < 3; k++) {
+			project_spatial(src, m, k * 0.5f, 1.0f, 0.0f, scale, &x, &y);
+			text_draw(ts, lab[k], x, y + 3.0f * ts->uy, 9.0f, 0xA0FFFFFF, TEXT_ALIGN_CENTER,
+				  TEXT_VALIGN_TOP);
+		}
+		project_spatial(src, m, 1.0f, 0.0f, 0.0f, scale, &x, &y);
+		text_draw(ts, obs_module_text("Cube.Hist3D.Old"), x + 4.0f * ts->ux, y, 9.0f, 0x80FFFFFF,
+			  TEXT_ALIGN_LEFT, TEXT_VALIGN_MIDDLE);
+	} else {
+		static const char *lab[3] = {"0", "50", "100"};
+		for (int k = 0; k < 3; k++) {
+			project_spatial(src, m, 0.0f, 1.0f, k * 0.5f, scale, &x, &y);
+			text_draw(ts, lab[k], x - 3.0f * ts->ux, y, 9.0f, 0xA0FFFFFF, TEXT_ALIGN_RIGHT,
+				  TEXT_VALIGN_MIDDLE);
+		}
+	}
+	static const char *names[3] = {"Cube.Model.Wave3D", "Cube.Model.Picture3D", "Cube.Model.Hist3D"};
+	text_draw(ts, obs_module_text(names[src->model - CB_WAVE3D]), 4.0f * ts->ux, 4.0f * ts->uy, 11.0f, 0xC0FFFFFF,
+		  TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+}
+
+static void render_hist3d(struct cb_source *src, const float m[9], float scale, const struct text_scale *ts)
+{
+	float hist[HIST_T][HIST_BINS];
+	int pos, cnt;
+	pthread_mutex_lock(&src->mutex);
+	memcpy(hist, src->hist, sizeof(hist));
+	pos = src->hist_pos;
+	cnt = src->hist_n;
+	pthread_mutex_unlock(&src->mutex);
+	float mx = 1e-6f;
+	for (int t = 0; t < cnt; t++)
+		for (int i = 0; i < HIST_BINS; i++)
+			mx = fmaxf(mx, hist[t][i]);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	// oldest at the back, so the newest draws on top
+	for (int age = cnt - 1; age >= 0; age--) {
+		const int t = (pos - 1 - age + 2 * HIST_T) % HIST_T;
+		const float v = (float)age / (HIST_T - 1);
+		const float fade = 1.0f - 0.75f * v;
+		const uint32_t a = (uint32_t)(255 * fade);
+		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"),
+				    (a << 24) | (age == 0 ? 0xFFFFFF : 0xFFD060));
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			for (int i = 0; i + 1 < HIST_BINS; i++) {
+				const float p0[3] = {(i + 0.5f) / HIST_BINS, v, sqrtf(hist[t][i] / mx)};
+				const float p1[3] = {(i + 1.5f) / HIST_BINS, v, sqrtf(hist[t][i + 1] / mx)};
+				draw_line3(src, m, scale, p0, p1);
+			}
+			gs_render_stop(GS_LINES);
+		}
+	}
+	if (src->edges)
+		draw_box3(src, m, scale, ts, true);
+}
+
 static void cb_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -287,13 +429,18 @@ static void cb_render(void *data, gs_effect_t *effect)
 
 	float m[9];
 	const bool rgb = src->model == CB_RGB;
+	const bool spatial = is_spatial(src->model);
 	if (rgb)
 		make_rotation(src->yaw, src->pitch, m);
 	else
 		make_rotation_upright(src->yaw, src->pitch, m);
 	// the grey axis of the cube is sqrt(3) long; the cylinders are 1 high and 1 across
-	const float scale = CB_SIZE * (rgb ? 0.5f / 0.95f : 0.62f) * src->zoom;
+	const float scale = CB_SIZE * (rgb ? 0.5f / 0.95f : src->model >= CB_WAVE3D ? 0.5f : 0.62f) * src->zoom;
 	const struct text_scale ts = text_scale_from_viewport((float)CB_SIZE, (float)CB_SIZE);
+	if (src->model == CB_HIST3D) {
+		render_hist3d(src, m, scale * 0.95f, &ts);
+		return;
+	}
 
 	// points, each a small cross so the size shows at any tile size
 	pthread_mutex_lock(&src->mutex);
@@ -313,8 +460,18 @@ static void cb_render(void *data, gs_effect_t *effect)
 		for (uint32_t i = 0; i < n; i++) {
 			const uint8_t *p = src->points[i];
 			float x, y;
-			project_model(src, m, p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, scale, &x, &y);
-			const uint32_t color = 0xFF000000 | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];
+			uint32_t color = 0xFF000000 | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];
+			if (spatial) {
+				const float l = (0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) / 255.0f;
+				project_spatial(src, m, src->pos[i][0] / 65535.0f, src->pos[i][1] / 65535.0f, l, scale,
+						&x, &y);
+				if (src->model == CB_WAVE3D) {
+					const uint32_t g = (uint32_t)(120 + 135 * l);
+					color = 0xFF000000 | (g / 3) << 16 | g << 8 | g / 3;
+				}
+			} else {
+				project_model(src, m, p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, scale, &x, &y);
+			}
 			if (per == 1) {
 				vec3_set(vbd->points + nv, x, y, 0.0f);
 				vbd->colors[nv++] = color;
@@ -343,7 +500,9 @@ static void cb_render(void *data, gs_effect_t *effect)
 		gs_load_vertexbuffer(NULL);
 	}
 
-	if (src->edges && !rgb) {
+	if (src->edges && spatial)
+		draw_box3(src, m, scale, &ts, false);
+	if (src->edges && !rgb && !spatial) {
 		// the cylinder: rings at the bottom, middle and top, the axis, and the primaries on the outside
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x60FFFFFF);
 		const float rr = src->model == CB_YCBCR ? 0.35f : 0.5f;
