@@ -43,6 +43,8 @@ struct cb_source
 	bool edges;
 	int model;          // cb_model_e
 	float pan_x, pan_y; // in tile units
+	bool lines3d;       // 3D waveform and picture: lines along the picture lines instead of points
+	int color3d;        // 3D waveform: 0 green, 1 heat by level
 	bool panning;
 	int pan_mx, pan_my;
 	float pan_x0, pan_y0;
@@ -105,6 +107,8 @@ static void cb_update(void *data, obs_data_t *settings)
 	src->point_size = (float)obs_data_get_double(settings, "point_size");
 	src->edges = obs_data_get_bool(settings, "edges");
 	src->model = (int)obs_data_get_int(settings, "cube_model");
+	src->lines3d = obs_data_get_bool(settings, "cube_lines");
+	src->color3d = (int)obs_data_get_int(settings, "cube_color3d");
 }
 
 static bool reset_view_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -125,6 +129,7 @@ static void cb_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "spin", 15.0);
 	obs_data_set_default_double(settings, "point_size", 1.5);
 	obs_data_set_default_bool(settings, "edges", true);
+	obs_data_set_default_bool(settings, "cube_lines", true);
 }
 
 static obs_properties_t *cb_get_properties(void *data)
@@ -144,6 +149,11 @@ static obs_properties_t *cb_get_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("Cube.Model.Wave3D"), CB_WAVE3D);
 	obs_property_list_add_int(p, obs_module_text("Cube.Model.Picture3D"), CB_PICTURE3D);
 	obs_property_list_add_int(p, obs_module_text("Cube.Model.Hist3D"), CB_HIST3D);
+	obs_properties_add_bool(props, "cube_lines", obs_module_text("Cube.Prop.Lines"));
+	p = obs_properties_add_list(props, "cube_color3d", obs_module_text("Cube.Prop.Color3D"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, obs_module_text("Cube.Color3D.Green"), 0);
+	obs_property_list_add_int(p, obs_module_text("Cube.Color3D.Heat"), 1);
 	obs_properties_add_button2(props, "cube_reset", obs_module_text("Cube.Prop.Reset"), reset_view_clicked, src);
 	return props;
 }
@@ -445,7 +455,12 @@ static void cb_render(void *data, gs_effect_t *effect)
 	// points, each a small cross so the size shows at any tile size
 	pthread_mutex_lock(&src->mutex);
 	const uint32_t n = src->n_points;
-	const int per = src->point_size > 1.25f ? 4 : 1; // vertices per point
+	// lines along the picture lines for the 3D waveform and picture: two vertices per segment
+	const bool lines = spatial && src->lines3d;
+	const int per = lines ? 2 : src->point_size > 1.25f ? 4 : 1; // vertices per point
+	float prev_x = 0.0f, prev_y = 0.0f;
+	uint32_t prev_color = 0;
+	int prev_row = -1;
 	if (!src->vb) {
 		struct gs_vb_data *vbd = gs_vbdata_create();
 		vbd->num = CB_MAX_POINTS * 4;
@@ -465,14 +480,32 @@ static void cb_render(void *data, gs_effect_t *effect)
 				const float l = (0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) / 255.0f;
 				project_spatial(src, m, src->pos[i][0] / 65535.0f, src->pos[i][1] / 65535.0f, l, scale,
 						&x, &y);
-				if (src->model == CB_WAVE3D) {
+				if (src->model == CB_WAVE3D && src->color3d == 1) {
+					// heat by level: blue, green, yellow, red
+					const float h = fminf(fmaxf(l, 0.0f), 1.0f) * 3.0f;
+					const float r = h < 1.0f ? 0.1f : h < 2.0f ? h - 1.0f : 1.0f;
+					const float g = h < 1.0f ? h : h < 2.0f ? 1.0f : 3.0f - h;
+					const float b = h < 1.0f ? 1.0f - h * 0.5f : 0.1f;
+					color = 0xFF000000 | (uint32_t)(b * 255) << 16 | (uint32_t)(g * 255) << 8 |
+						(uint32_t)(r * 255);
+				} else if (src->model == CB_WAVE3D) {
 					const uint32_t g = (uint32_t)(120 + 135 * l);
 					color = 0xFF000000 | (g / 3) << 16 | g << 8 | g / 3;
 				}
 			} else {
 				project_model(src, m, p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, scale, &x, &y);
 			}
-			if (per == 1) {
+			if (lines) {
+				const int row = src->pos[i][1];
+				if (row == prev_row && nv + 2 <= CB_MAX_POINTS * 4) {
+					vec3_set(vbd->points + nv, prev_x, prev_y, 0.0f);
+					vbd->colors[nv++] = prev_color;
+					vec3_set(vbd->points + nv, x, y, 0.0f);
+					vbd->colors[nv++] = color;
+				}
+				prev_row = row;
+				prev_x = x, prev_y = y, prev_color = color;
+			} else if (per == 1) {
 				vec3_set(vbd->points + nv, x, y, 0.0f);
 				vbd->colors[nv++] = color;
 			} else {
@@ -496,7 +529,7 @@ static void cb_render(void *data, gs_effect_t *effect)
 		gs_load_indexbuffer(NULL);
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF);
 		while (gs_effect_loop(solid, "SolidColored"))
-			gs_draw(per == 1 ? GS_POINTS : GS_LINES, 0, nv);
+			gs_draw(per == 1 && !lines ? GS_POINTS : GS_LINES, 0, nv);
 		gs_load_vertexbuffer(NULL);
 	}
 
