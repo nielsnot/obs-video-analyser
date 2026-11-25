@@ -1,6 +1,6 @@
 /*
  * Audio meter: peak per channel with hold, EBU R128 loudness (momentary, short-term,
- * integrated), phase correlation and a goniometer (stereo vector scope).
+ * integrated), true peak, loudness range (LRA), phase correlation and a goniometer (stereo vector scope).
  *
  * The audio comes from the program mix of OBS or from one source.
  * Loudness follows ITU-R BS.1770-4: K-weighting, channel weights, 400 ms blocks with
@@ -13,6 +13,7 @@
 #include <media-io/audio-io.h>
 #include <math.h>
 #include <float.h>
+#include <stdlib.h>
 #include "plugin-macros.generated.h"
 #include "text-render.h"
 #include "util.h"
@@ -24,6 +25,18 @@
 #define AU_MAX_CH 8
 #define GONIO 128
 #define SUB_BLOCKS 30 // 100 ms sub-blocks: 4 for momentary, 30 for short-term
+#define TP_TAPS 12    // true peak: 4 times oversampling with the 48-tap filter of BS.1770-4 annex 2
+
+static const float tp_coef[4][TP_TAPS] = {
+	{0.0017089843750f, 0.0109863281250f, -0.0196533203125f, 0.0332031250000f, -0.0594482421875f, 0.1373291015625f,
+	 0.9721679687500f, -0.1022949218750f, 0.0476074218750f, -0.0266113281250f, 0.0148925781250f, -0.0083007812500f},
+	{-0.0291748046875f, 0.0292968750000f, -0.0517578125000f, 0.0891113281250f, -0.1665039062500f, 0.4650878906250f,
+	 0.7797851562500f, -0.2003173828125f, 0.1015625000000f, -0.0582275390625f, 0.0330810546875f, -0.0189208984375f},
+	{-0.0189208984375f, 0.0330810546875f, -0.0582275390625f, 0.1015625000000f, -0.2003173828125f, 0.7797851562500f,
+	 0.4650878906250f, -0.1665039062500f, 0.0891113281250f, -0.0517578125000f, 0.0292968750000f, -0.0291748046875f},
+	{-0.0083007812500f, 0.0148925781250f, -0.0266113281250f, 0.0476074218750f, -0.1022949218750f, 0.9721679687500f,
+	 0.1373291015625f, -0.0594482421875f, 0.0332031250000f, -0.0196533203125f, 0.0109863281250f, 0.0017089843750f},
+};
 
 struct biquad
 {
@@ -68,6 +81,14 @@ struct au_source
 	DARRAY(double) blocks; // 400 ms block energies for the integrated loudness
 	float momentary, short_term, integrated;
 	float momentary_max, short_term_max;
+
+	// true peak per channel (4x oversampled) and the loudness range from the short-term values (EBU Tech 3342)
+	float tp_hist[AU_MAX_CH][TP_TAPS];
+	int tp_pos;
+	float true_peak; // highest since the reset, linear
+	DARRAY(double) st_blocks;
+	int lra_count;
+	float lra;
 
 	// loudness timeline: per bucket the highest momentary and short-term loudness
 	struct
@@ -135,6 +156,11 @@ static void loudness_reset(struct au_source *src)
 	da_resize(src->blocks, 0);
 	src->momentary = src->short_term = src->integrated = -INFINITY;
 	src->momentary_max = src->short_term_max = -INFINITY;
+	src->true_peak = 0.0f;
+	memset(src->tp_hist, 0, sizeof(src->tp_hist));
+	da_resize(src->st_blocks, 0);
+	src->lra = -1.0f;
+	src->lra_count = 0;
 	for (int i = 0; i < AU_HIST; i++)
 		src->hist[i].m = src->hist[i].s = -INFINITY;
 	src->hist_head = 0;
@@ -184,6 +210,42 @@ static inline double channel_weight(size_t c, size_t channels)
 	return c >= 4 ? 1.41 : 1.0;
 }
 
+static int cmp_double(const void *a, const void *b)
+{
+	const double x = *(const double *)a, y = *(const double *)b;
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* Loudness range (EBU Tech 3342): the short-term values above -70 LUFS and within 20 LU of their mean, from the
+ * 10th to the 95th percentile. -1 while there is too little. */
+static float loudness_range(const double *st, size_t n)
+{
+	const double abs_gate = pow(10.0, (-70.0 + 0.691) / 10.0);
+	double sum = 0.0;
+	size_t cnt = 0;
+	for (size_t i = 0; i < n; i++)
+		if (st[i] > abs_gate) {
+			sum += st[i];
+			cnt++;
+		}
+	if (cnt < 10)
+		return -1.0f;
+	const double rel_gate = sum / cnt * pow(10.0, -20.0 / 10.0);
+	double *v = bmalloc(sizeof(double) * cnt);
+	size_t m = 0;
+	for (size_t i = 0; i < n; i++)
+		if (st[i] > abs_gate && st[i] > rel_gate)
+			v[m++] = st[i];
+	float lra = -1.0f;
+	if (m >= 10) {
+		qsort(v, m, sizeof(double), cmp_double);
+		const double lo = v[(size_t)(0.10 * (m - 1) + 0.5)], hi = v[(size_t)(0.95 * (m - 1) + 0.5)];
+		lra = to_lufs(hi) - to_lufs(lo);
+	}
+	bfree(v);
+	return lra;
+}
+
 static void process_audio(struct au_source *src, const struct audio_data *data, size_t channels)
 {
 	if (!data->frames)
@@ -212,10 +274,23 @@ static void process_audio(struct au_source *src, const struct audio_data *data, 
 			const float a = fabsf(v);
 			if (a > src->peak[c])
 				src->peak[c] = a;
+			// true peak: the four interpolated values between the last samples
+			float *h = src->tp_hist[c];
+			h[src->tp_pos] = v;
+			for (int ph = 0; ph < 4; ph++) {
+				float y = 0.0f;
+				for (int k = 0; k < TP_TAPS; k++)
+					y += tp_coef[ph][k] * h[(src->tp_pos - k + TP_TAPS) % TP_TAPS];
+				if (fabsf(y) > src->true_peak)
+					src->true_peak = fabsf(y);
+			}
+			if (a > src->true_peak)
+				src->true_peak = a;
 			const double k = biquad_run(src->hpass + c, biquad_run(src->shelf + c, v));
 			e += channel_weight(c, channels) * k * k;
 		}
 		src->sub_energy += e;
+		src->tp_pos = (src->tp_pos + 1) % TP_TAPS;
 
 		if (channels >= 2 && ch[0] && ch[1]) {
 			const float l = ch[0][i], r = ch[1][i];
@@ -256,6 +331,15 @@ static void process_audio(struct au_source *src, const struct audio_data *data, 
 				src->integrated = integrated_loudness(src->blocks.array, src->blocks.num);
 			}
 			src->short_term = src->n_subs >= SUB_BLOCKS ? to_lufs(st / src->n_subs) : -INFINITY;
+			if (src->n_subs >= SUB_BLOCKS) {
+				const double stb = st / src->n_subs;
+				da_push_back(src->st_blocks, &stb);
+				// the range once a second is enough
+				if (++src->lra_count >= 10) {
+					src->lra_count = 0;
+					src->lra = loudness_range(src->st_blocks.array, src->st_blocks.num);
+				}
+			}
 			if (src->momentary > src->momentary_max)
 				src->momentary_max = src->momentary;
 			if (src->short_term > src->short_term_max)
@@ -365,6 +449,7 @@ static void *au_create(obs_data_t *settings, obs_source_t *source)
 	src->self = source;
 	pthread_mutex_init(&src->mutex, NULL);
 	da_init(src->blocks);
+	da_init(src->st_blocks);
 	loudness_reset(src);
 	obs_enter_graphics();
 	src->effect = create_effect_from_module_file("vectorscope.effect");
@@ -381,6 +466,7 @@ static void au_destroy(void *data)
 	gs_texture_destroy(src->gonio_tex);
 	obs_leave_graphics();
 	da_free(src->blocks);
+	da_free(src->st_blocks);
 	pthread_mutex_destroy(&src->mutex);
 	bfree(src->source_name);
 	bfree(src);
@@ -690,6 +776,8 @@ static void au_render(void *data, gs_effect_t *effect)
 	in = src->integrated;
 	corr = src->correlation;
 	const float m_max = src->momentary_max, st_max = src->short_term_max;
+	const float tp = src->true_peak > 0.0f ? 20.0f * log10f(src->true_peak) : -INFINITY;
+	const float lra = src->lra;
 	static struct
 	{
 		float m, s;
@@ -780,8 +868,23 @@ static void au_render(void *data, gs_effect_t *effect)
 		}
 		ty += lh * 1.25f;
 	}
+	// the target, the true peak against its limit (-2 dBTP for ATSC A/85, -1 otherwise) and the loudness range
 	snprintf(buf, sizeof(buf), "target %d", src->target_lufs);
 	text_draw(&ts, buf, tx, ty, px - 1.0f, 0xFF8D8D96, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	{
+		const float tp_limit = src->target_lufs == -24 ? -2.0f : -1.0f;
+		if (isfinite(tp))
+			snprintf(buf, sizeof(buf), "TP %.1f", tp);
+		else
+			snprintf(buf, sizeof(buf), "TP --");
+		text_draw(&ts, buf, tx + 58.0f * ts.ux, ty, px - 1.0f,
+			  isfinite(tp) && tp > tp_limit ? 0xFFFF5A50 : 0xFFE6E6EA, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		if (lra >= 0.0f)
+			snprintf(buf, sizeof(buf), "LRA %.1f", lra);
+		else
+			snprintf(buf, sizeof(buf), "LRA --");
+		text_draw(&ts, buf, tx + 112.0f * ts.ux, ty, px - 1.0f, 0xFFE6E6EA, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+	}
 	ty += lh;
 
 	// phase correlation bar, -1 .. +1
