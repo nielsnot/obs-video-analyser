@@ -2,6 +2,12 @@
 
 ## 0.9.2 (in progress)
 
+- Plug and play with SDI cards: the raw signal of a DeckLink or AJA card is read as video range (the SDI standard),
+  also when the source in OBS is set to Full range, so superwhite and sub-black are no longer squeezed into
+  0..100 %. The filter's *Signal range* can still force video or full range.
+- A DeckLink source in 8-bit YUV is switched to 10-bit by itself, once, while it is not on air (the card restarts
+  its capture). A filter option turns this off; set back to 8-bit by hand, it stays 8-bit.
+- Signal path says when the source is set to Full range (its OBS picture looks flat) or captures in 8-bit.
 - Reset in the dock menu: *Clear this dock* (all views and scopes, the selection and the pins; the source stays) and
   *Reset everything*, the factory reset with a backup first, now also from the dock instead of only from Tools.
 - A floating dock has maximize, dock-back and close buttons in its title bar, like any window; double click on the

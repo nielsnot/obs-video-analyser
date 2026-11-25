@@ -43,9 +43,9 @@ Install **Blackmagic Desktop Video** and add a **Blackmagic Device** source in O
 | Device | your UltraStudio / DeckLink | |
 | Input | SDI or HDMI, the one you use | |
 | Mode | the format of your signal, or Auto | |
-| **Pixel format** | **10-bit YUV** | measures the 10-bit codes (shown as `RAW 10-bit V210`); 8-bit YUV works too, at 8 bits |
+| **Pixel format** | **10-bit YUV** | measures the 10-bit codes (shown as `RAW 10-bit V210`); 8-bit YUV works too, at 8 bits. From 0.9.2 Video Analyser switches a DeckLink source to 10-bit by itself, once, while the source is not on air (filter option) |
 | Color space | Rec. 709 (or what your signal is) | the matrix used for R, G and B |
-| Color range | Limited (Partial) | SDI and HDMI video are limited range: 0 % is code 64 (10-bit), 100 % is 940 |
+| Color range | Limited (Partial) | SDI and HDMI video are limited range: 0 % is code 64 (10-bit), 100 % is 940. From 0.9.2 the scopes read Y'CbCr from a DeckLink or AJA card as video range anyway (the SDI standard), so a source set to *Full* no longer squeezes superwhite into 0..100 %; only the OBS picture looks flat then |
 
 8-bit BGRA and 10-bit RGB (R'G'B' 4:4:4) work too: they show as `RAW 8-bit BGRA` or `RAW 10-bit RGB`. When the
 R'G'B' signal is video range (0 % at 64, 100 % at 940), set the filter's *Signal range* to *Video* (see below).
@@ -67,7 +67,7 @@ With *Data levels* set to *Full* in Resolve, nothing goes beyond 0 % and 100 %: 
 
 | Setting | What it does |
 |---|---|
-| Signal range | *As the source reports it* (default), *Video (legal) range* or *Full range*: how the codes are read. Set it when the source reports the wrong range |
+| Signal range | *Auto* (default: as the source reports it, but video range for Y'CbCr from an SDI card), *Video (legal) range* or *Full range*: how the codes are read. Set it when the source reports the wrong range |
 | Also measure the raw signal when the source is SDR in an HDR project | see *HDR* below |
 
 ### 4. Other sources
@@ -131,4 +131,5 @@ a media file from its tags. A source that reports nothing counts as SDR.
 | `RAW 8-bit UYVY` from a Blackmagic | Set *Pixel format* to *10-bit YUV* in the Blackmagic source |
 | No `RAW` label in an HLG project | The source is SDR (or reports no transfer): see *HDR* above |
 | Everything is shifted up or down by about 7 % | Check *Color range* in the source: limited for normal video |
+| Everything is squeezed towards the middle (peaks lower, darks higher than on a hardware scope) | The codes are read as full range: set *Signal range* to *Video* in the filter (from 0.9.2 automatic for DeckLink and AJA) |
 | The filter is missing | It is added a second after a scope starts measuring the source; if you removed it, restart OBS |

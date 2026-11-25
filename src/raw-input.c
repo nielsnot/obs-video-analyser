@@ -41,7 +41,50 @@ struct raw_input
 	volatile uint64_t last_use; // ns; frames are copied only while a scope uses them
 	bool any_transfer;          // also when the source's transfer differs from the project's
 	int range;                  // RAW_RANGE_*: as the source says, or video (legal) or full range
+	int card;                   // CARD_*: the kind of source, found from its first frame
+	bool auto_10bit;            // switch a DeckLink source from 8-bit to 10-bit Y'CbCr (when not on air)
+	bool tried_10bit;           // done once: a source set back to 8-bit by hand stays so
 };
+
+enum card_e {
+	CARD_UNKNOWN = 0,
+	CARD_OTHER,
+	CARD_DECKLINK,
+	CARD_AJA,
+};
+
+#define DECKLINK_ID "decklink-input"
+#define AJA_ID "aja_source"
+#define BMD_8BIT_YUV 0x32767579  // '2vuy'
+#define BMD_10BIT_YUV 0x76323130 // 'v210'
+
+static bool is_yuv(enum video_format format)
+{
+	switch (format) {
+	case VIDEO_FORMAT_RGBA:
+	case VIDEO_FORMAT_BGRA:
+	case VIDEO_FORMAT_BGRX:
+	case VIDEO_FORMAT_R10L:
+	case VIDEO_FORMAT_Y800:
+		return false;
+	default:
+		return true;
+	}
+}
+
+/* Whether the frame is full range. As the source says, except that Y'CbCr from an SDI card (DeckLink, AJA) is
+ * video range by the SDI standards, also when its source in OBS is set to Full: then the scopes still show
+ * superwhite and sub-black instead of squeezing them into 0..100 %. */
+static bool frame_full(const struct raw_input *r, const struct raw_frame *f)
+{
+	if (r->range == RAW_RANGE_VIDEO)
+		return false;
+	if (r->range == RAW_RANGE_FULL)
+		return true;
+	if ((r->card == CARD_DECKLINK || r->card == CARD_AJA) && is_yuv(f->format))
+		return false;
+	return f->full_range;
+}
 
 static const char *raw_input_get_name(void *unused)
 {
@@ -54,6 +97,12 @@ static void raw_input_update(void *data, obs_data_t *settings)
 	struct raw_input *r = data;
 	r->any_transfer = obs_data_get_bool(settings, "any_transfer");
 	r->range = (int)obs_data_get_int(settings, "range");
+	r->auto_10bit = obs_data_get_bool(settings, "auto_10bit");
+}
+
+static void raw_input_defaults(obs_data_t *settings)
+{
+	obs_data_set_default_bool(settings, "auto_10bit", true);
 }
 
 static void *raw_input_create(obs_data_t *settings, obs_source_t *source)
@@ -75,6 +124,8 @@ static obs_properties_t *raw_input_get_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("RawInput.Range.Video"), RAW_RANGE_VIDEO);
 	obs_property_list_add_int(p, obs_module_text("RawInput.Range.Full"), RAW_RANGE_FULL);
 	obs_properties_add_bool(props, "any_transfer", obs_module_text("RawInput.AnyTransfer"));
+	obs_property_t *b = obs_properties_add_bool(props, "auto_10bit", obs_module_text("RawInput.Auto10bit"));
+	obs_property_set_long_description(b, obs_module_text("RawInput.Auto10bit.Tip"));
 	obs_properties_add_text(props, "note", obs_module_text("RawInput.Note"), OBS_TEXT_INFO);
 	return props;
 }
@@ -185,11 +236,54 @@ static const char *format_desc(enum video_format f)
 	}
 }
 
+/* A DeckLink source in 8-bit Y'CbCr: switch it to 10-bit, so the scopes get the full precision. Only while the
+ * source is not on air (the card restarts its capture) and once per session. */
+static void switch_10bit_task(void *param)
+{
+	obs_weak_source_t *weak = param;
+	obs_source_t *parent = obs_weak_source_get_source(weak);
+	obs_weak_source_release(weak);
+	if (!parent)
+		return;
+	if (!obs_source_active(parent)) {
+		obs_data_t *settings = obs_source_get_settings(parent);
+		if (obs_data_get_int(settings, "pixel_format") == BMD_8BIT_YUV) {
+			obs_data_t *change = obs_data_create();
+			obs_data_set_int(change, "pixel_format", BMD_10BIT_YUV);
+			obs_source_update(parent, change);
+			obs_data_release(change);
+			blog(LOG_INFO, "[" PLUGIN_NAME "] switched '%s' to 10-bit Y'CbCr for the scopes",
+			     obs_source_get_name(parent));
+		}
+		obs_data_release(settings);
+	}
+	obs_source_release(parent);
+}
+
+static void check_card(struct raw_input *r, const struct obs_source_frame *frame)
+{
+	obs_source_t *parent = obs_filter_get_parent(r->self);
+	if (!parent)
+		return;
+	if (r->card == CARD_UNKNOWN) {
+		const char *id = obs_source_get_unversioned_id(parent);
+		r->card = id && !strcmp(id, DECKLINK_ID) ? CARD_DECKLINK
+			  : id && !strcmp(id, AJA_ID)    ? CARD_AJA
+							 : CARD_OTHER;
+	}
+	if (r->card == CARD_DECKLINK && r->auto_10bit && !r->tried_10bit && frame->format == VIDEO_FORMAT_UYVY &&
+	    !obs_source_active(parent)) {
+		r->tried_10bit = true;
+		obs_queue_task(OBS_TASK_UI, switch_10bit_task, obs_source_get_weak_source(parent), false);
+	}
+}
+
 static struct obs_source_frame *raw_input_filter_video(void *data, struct obs_source_frame *frame)
 {
 	struct raw_input *r = data;
 	if (!frame || os_gettime_ns() - r->last_use > 2000000000ULL)
 		return frame; // no scope uses it: pass the frame on and do nothing
+	check_card(r, frame);
 
 	uint32_t heights[MAX_AV_PLANES] = {0};
 	const int n = plane_heights(frame->format, frame->height, heights);
@@ -401,7 +495,7 @@ bool raw_input_sample(obs_source_t *filter, float u, float v, int cols, int rows
 		pthread_mutex_unlock(&r->mutex);
 		return false;
 	}
-	const bool full = r->range == RAW_RANGE_AUTO ? f->full_range : r->range == RAW_RANGE_FULL;
+	const bool full = frame_full(r, f);
 	const bool rgb_fmt = is_rgb_format(f->format);
 	const int cx = (int)(u * f->width), cy = (int)(v * f->height);
 	const float *m = f->matrix;
@@ -453,7 +547,7 @@ bool raw_input_describe(obs_source_t *filter, int colorspace, char *desc, size_t
 	const struct raw_frame *f = &r->frame;
 	const bool valid = f->valid && f->width && f->height;
 	if (valid) {
-		const bool full = r->range == RAW_RANGE_AUTO ? f->full_range : r->range == RAW_RANGE_FULL;
+		const bool full = frame_full(r, f);
 		const int project = colorspace == CM_CS_2100_HLG  ? VIDEO_TRC_HLG
 				    : colorspace == CM_CS_2100_PQ ? VIDEO_TRC_PQ
 								  : VIDEO_TRC_DEFAULT;
@@ -461,9 +555,21 @@ bool raw_input_describe(obs_source_t *filter, int colorspace, char *desc, size_t
 		if (usable)
 			*usable = source == project || r->any_transfer;
 		if (desc && desc_size)
-			snprintf(desc, desc_size, "%s, %ux%u, %s%s, %s", format_desc(f->format), f->width, f->height,
-				 full ? "full range" : "video range", r->range == RAW_RANGE_AUTO ? "" : " (set)",
-				 trc_desc(f->trc));
+			snprintf(
+				desc, desc_size, "%s, %ux%u, %s%s, %s%s%s", format_desc(f->format), f->width, f->height,
+				full ? "full range" : "video range",
+				r->range != RAW_RANGE_AUTO ? " (set)"
+				: full != f->full_range    ? " (SDI standard)"
+							   : "",
+				trc_desc(f->trc),
+				full != f->full_range && r->range == RAW_RANGE_AUTO
+					? ". The source in OBS is set to Full range: its picture looks flat, set Color Range "
+					  "to Limited"
+					: "",
+				r->card == CARD_DECKLINK && f->format == VIDEO_FORMAT_UYVY
+					? ". 8-bit: set Pixel Format to 10-bit YUV for more precision (done by itself when "
+					  "the source is not on air)"
+					: "");
 	}
 	pthread_mutex_unlock(&r->mutex);
 	return valid;
@@ -496,7 +602,7 @@ bool raw_input_fill(obs_source_t *filter, uint8_t *ext, uint32_t width, uint32_t
 	const float kx = (float)f->width / src_w, ky = (float)f->height / src_h;
 	const float *m = f->matrix;
 	// the range the codes are in: as the source says, or as set on the filter
-	const bool full = r->range == RAW_RANGE_AUTO ? f->full_range : r->range == RAW_RANGE_FULL;
+	const bool full = frame_full(r, f);
 	const bool rgb_fmt = is_rgb_format(f->format);
 	// R'G'B' sources: luma with the weights of the transfer (Rec. 2020 for HDR, Rec. 709 otherwise)
 	const bool wide = f->trc == VIDEO_TRC_HLG || f->trc == VIDEO_TRC_PQ;
@@ -653,5 +759,6 @@ const struct obs_source_info colormonitor_raw_input = {
 	.destroy = raw_input_destroy,
 	.filter_video = raw_input_filter_video,
 	.update = raw_input_update,
+	.get_defaults = raw_input_defaults,
 	.get_properties = raw_input_get_properties,
 };
