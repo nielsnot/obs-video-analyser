@@ -1135,7 +1135,7 @@ static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 	pthread_mutex_lock(&src->sources_mutex);
 	for (size_t i = 0; i < src->sources.num; i++) {
 		struct cm_source *cm = src->sources.array[i];
-		if (cm->callback) {
+		if (cm->callback && cm_update_due(cm)) {
 			cm->callback(cm->callback_data, surface_data);
 		}
 	}

@@ -100,6 +100,7 @@ void cm_update(struct cm_source *src, obs_data_t *settings)
 		src->target_scale = 1;
 
 	src->bypass = obs_data_get_bool(settings, "bypass");
+	src->max_fps = (int)obs_data_get_int(settings, "max_fps");
 	src->raw_scene = !obs_data_get_bool(settings, "raw_no_scene");
 
 	src->lut_mode = (int)obs_data_get_int(settings, "lut_mode");
@@ -162,8 +163,30 @@ void cm_get_properties(struct cm_source *src, obs_properties_t *props)
 	property_list_add_sources(prop, src ? src->self : NULL);
 	obs_properties_add_int(props, "target_scale", obs_module_text("Scale"), 1, 128, 1);
 
-	if (!(src->flags & CM_FLAG_ROI))
+	if (!(src->flags & CM_FLAG_ROI)) {
 		obs_properties_add_bool(props, "bypass", obs_module_text("Bypass"));
+		// fewer updates for a heavy scope on a slow computer
+		prop = obs_properties_add_list(props, "max_fps", obs_module_text("UpdateRate"), OBS_COMBO_TYPE_LIST,
+					       OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(prop, obs_module_text("UpdateRate.Every"), 0);
+		obs_property_list_add_int(prop, "30 / s", 30);
+		obs_property_list_add_int(prop, "15 / s", 15);
+		obs_property_list_add_int(prop, "10 / s", 10);
+		obs_property_list_add_int(prop, "5 / s", 5);
+		obs_property_list_add_int(prop, "2 / s", 2);
+	}
+}
+
+bool cm_update_due(struct cm_source *src)
+{
+	if (src->max_fps <= 0)
+		return true;
+	const uint64_t now = os_gettime_ns(), interval = 1000000000ULL / (uint64_t)src->max_fps;
+	// a little slack, so 30 / s on a 30 fps project does not skip every other frame
+	if (now - src->last_update_ns < interval - interval / 4)
+		return false;
+	src->last_update_ns = now;
+	return true;
 }
 
 static void prepare_stagesurface(struct cm_surface_queue_item *item, uint32_t width, uint32_t height, uint32_t sheight)
@@ -423,6 +446,8 @@ void cm_render_target(struct cm_source *src)
 		roi_target_render(src->roi);
 		return;
 	}
+	if (!cm_update_due(src) && src->texrender && src->texrender_width)
+		return; // keep the last capture until the next update
 
 	obs_source_t *target = src->weak_target ? obs_weak_source_get_source(src->weak_target) : NULL;
 	if (!target && *src->target_name)

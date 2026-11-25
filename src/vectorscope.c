@@ -10,6 +10,7 @@
 #include "text-render.h"
 #include "markers.h"
 #include "vs-trace.h"
+#include "draw-util.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -105,7 +106,10 @@ struct vss_source
 	gs_texture_t *tex_ref;
 
 	float zoom;
-	int gain; // zoom set from the options or quick controls
+	int gain;     // zoom set from the options or quick controls
+	bool readout; // hue and saturation under the mouse pointer
+	volatile bool cursor_in;
+	volatile int cursor_x, cursor_y;
 
 	struct cm_markers markers;
 	int drag_marker;           // index of the marker being dragged with the mouse, or -1
@@ -204,6 +208,7 @@ static void vss_update(void *data, obs_data_t *settings)
 	struct vss_source *src = data;
 	cm_update(&src->cm, settings);
 	cm_markers_load(&src->markers, settings);
+	src->readout = obs_data_get_bool(settings, "vs_readout");
 	const int gain = (int)obs_data_get_int(settings, "gain");
 	if (gain >= 1 && gain != src->gain) {
 		src->gain = gain;
@@ -275,6 +280,7 @@ static void vss_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "trace_smooth", 1);
 	obs_data_set_default_int(settings, "persistence", 0);
 	obs_data_set_default_bool(settings, "color_bg", true);
+	obs_data_set_default_bool(settings, "vs_readout", true);
 }
 
 static obs_properties_t *vss_get_properties(void *data)
@@ -304,6 +310,7 @@ static obs_properties_t *vss_get_properties(void *data)
 	obs_property_int_set_suffix(prop, "\xc2\xb0");
 	obs_properties_add_bool(props, "expand_low", obs_module_text("VS.Prop.ExpandLow"));
 	obs_properties_add_bool(props, "color_bg", obs_module_text("VS.Prop.ColorBg"));
+	obs_properties_add_bool(props, "vs_readout", obs_module_text("Prop.Readout"));
 
 	prop = obs_properties_add_list(props, "color_type", obs_module_text("VS.Prop.ColorType"), OBS_COMBO_TYPE_LIST,
 				       OBS_COMBO_FORMAT_INT);
@@ -487,7 +494,7 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 		}
 	}
 	const float (*pts)[2] = cm_cs_is_hdr(colorspace) ? (const float (*)[2])pp2020
-							 : pp[colorspace == CM_CS_601 ? 0 : 1];
+							: pp[colorspace == CM_CS_601 ? 0 : 1];
 
 	// label
 	for (int i = 0; i < 6; i++) {
@@ -1080,6 +1087,53 @@ static void vss_render_markers(struct vss_source *src)
 	}
 }
 
+/* Hue and saturation under the mouse pointer, with the nearest color target. */
+static void vss_render_readout(const struct vss_source *src, const struct vst_params *params, float zoom)
+{
+	if (!src->readout || !src->cursor_in || src->marker_edit || src->drag_marker >= 0)
+		return;
+	float x = (float)src->cursor_x, y = (float)src->cursor_y;
+	if (x < 0.0f || y < 0.0f || x > VS_SIZE || y > VS_SIZE)
+		return;
+	if (zoom > 1.01f) {
+		// undo the magnification around the middle of the layout
+		float ox = 127.5f, oy = 127.5f;
+		vst_map(params, 0.0f, 0.0f, &ox, &oy);
+		x = ox + (x - ox) / zoom;
+		y = oy + (y - oy) / zoom;
+	}
+	float angle, radius;
+	vst_unmap(params, x, y, &angle, &radius);
+	// the nearest of the six colors and the skin tone line, within 20 degrees
+	static const float targets[7][3] = {
+		{1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}, {1, 0, 1}, {0.80f, 0.55f, 0.42f}};
+	static const char *names[7] = {"R", "Yl", "G", "Cy", "B", "Mg", "Skin"};
+	const char *near = NULL;
+	float best = 20.0f * (float)M_PI / 180.0f;
+	for (int i = 0; i < 7; i++) {
+		float ta, tr;
+		vst_polar_rgb(params, targets[i][0], targets[i][1], targets[i][2], &ta, &tr);
+		float d = fabsf(fmodf(angle - ta + 3.0f * (float)M_PI, 2.0f * (float)M_PI) - (float)M_PI);
+		if (d < best) {
+			best = d;
+			near = names[i];
+		}
+	}
+	char buf[64];
+	snprintf(buf, sizeof(buf), "%.0f\xc2\xb0  %.0f%%%s%s", angle * 180.0f / (float)M_PI, radius * 100.0f,
+		 near ? "  " : "", near ? near : "");
+	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+	const float cx = (float)src->cursor_x, cy = (float)src->cursor_y;
+	const float tw = text_width(&ts, buf, 10.0f);
+	const bool right = cx < VS_SIZE * 0.6f, above = cy > 24.0f * ts.uy;
+	const float tx = right ? cx + 10.0f * ts.ux : cx - 10.0f * ts.ux - tw;
+	const float ty = above ? cy - 6.0f * ts.uy : cy + 6.0f * ts.uy;
+	du_circle(cx, cy, 3.0f * ts.ux, 0xE0FFFFFF, false);
+	du_fill_rect(tx - 3.0f * ts.ux, above ? ty - 13.0f * ts.uy : ty, tx + tw + 3.0f * ts.ux,
+		     above ? ty : ty + 13.0f * ts.uy, 0xB0000000);
+	text_draw(&ts, buf, tx, ty, 10.0f, 0xFFFFFFFF, TEXT_ALIGN_LEFT, above ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
+}
+
 static void vss_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -1203,6 +1257,7 @@ static void vss_render(void *data, gs_effect_t *effect)
 	vss_render_markers(src);
 
 label:
+	vss_render_readout(src, &params, b_zoom ? src->zoom : 1.0f);
 	// which matrix the scope uses
 	{
 		const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
@@ -1316,6 +1371,9 @@ static void vss_markers_proc(void *data, calldata_t *cd)
 static void vss_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
 {
 	struct vss_source *src = data;
+	src->cursor_in = !mouse_leave;
+	src->cursor_x = event->x;
+	src->cursor_y = event->y;
 	const int i = src->drag_marker;
 	if (i < 0 || mouse_leave || !(event->modifiers & INTERACT_MOUSE_LEFT))
 		return;

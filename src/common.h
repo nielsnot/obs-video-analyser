@@ -127,7 +127,9 @@ struct cm_source
 
 	// properties
 	int target_scale;
-	int colorspace; // get from ovi if auto
+	int max_fps;             // analysis updates per second, 0 for every frame
+	uint64_t last_update_ns; // last analysis, for max_fps
+	int colorspace;          // get from ovi if auto
 	uint32_t flags;
 	bool bypass;
 };
@@ -156,6 +158,8 @@ void cm_bypass_render(struct cm_source *src);
 void cm_tick(void *data, float unused);
 
 void cm_request(struct cm_source *src, cm_surface_cb_t callback, void *data);
+/* False when the scope limits its updates (max_fps) and the last one is too recent; true marks an update now. */
+bool cm_update_due(struct cm_source *src);
 void cm_set_mask_params(gs_effect_t *effect, const struct cm_mask *mask);
 /* Sets the uniforms that encode the captured picture (hdr_mode, sdr_white_over_max). */
 void cm_set_signal_params(gs_effect_t *effect, int colorspace);

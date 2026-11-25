@@ -6,6 +6,7 @@
 #include "common.h"
 #include "util.h"
 #include "text-render.h"
+#include "draw-util.h"
 #include "markers.h"
 
 #ifdef ENABLE_PROFILE
@@ -69,6 +70,9 @@ struct wvs_source
 	int trace_smooth;  // 0..3 pixels
 	float persistence; // 0..0.9
 	float *acc;        // running average of the counts, for persistence
+	bool lowpass;      // EBU R103 style low-pass across the line before measuring
+	uint8_t *lp_buf[3];
+	size_t lp_cap[3];
 	size_t acc_size;
 	bool acc_valid;
 	uint32_t acc_key; // components and display the running average belongs to
@@ -90,13 +94,16 @@ struct wvs_source
 	float zoom, zoom_off;
 
 	struct cm_markers markers;
-	int drag_marker;           // index of the marker being dragged with the mouse, or -1
-	float last_uy;             // source units per screen pixel at the last render, for hit testing
-	volatile bool marker_edit; // markers can be moved with the mouse (Markers in the quick controls)
-	volatile int marker_sel;   // the marker last clicked or added, for Color and Delete
-	int gain;                  // zoom into the blacks, set from the options or quick controls
-	bool panning;              // dragging the zoomed view up or down
-	float pan_y, pan_off;      // pointer and view offset where the drag started
+	int drag_marker; // index of the marker being dragged with the mouse, or -1
+	bool readout;    // a line and the level under the mouse pointer
+	volatile bool cursor_in;
+	volatile int cursor_x, cursor_y; // source units
+	float last_uy;                   // source units per screen pixel at the last render, for hit testing
+	volatile bool marker_edit;       // markers can be moved with the mouse (Markers in the quick controls)
+	volatile int marker_sel;         // the marker last clicked or added, for Color and Delete
+	int gain;                        // zoom into the blacks, set from the options or quick controls
+	bool panning;                    // dragging the zoomed view up or down
+	float pan_y, pan_off;            // pointer and view offset where the drag started
 
 	// extras: levels at the limits in orange, a histogram along the right edge, pixel positions
 	bool out_highlight;
@@ -223,6 +230,8 @@ static void wvs_destroy(void *data)
 	bfree(src->tex_buf[1]);
 	bfree(src->acc);
 	bfree(src->blur_tmp);
+	for (int i = 0; i < 3; i++)
+		bfree(src->lp_buf[i]);
 	cm_markers_free(&src->markers);
 
 	bfree(src);
@@ -234,6 +243,8 @@ static void wvs_update(void *data, obs_data_t *settings)
 	cm_update(&src->cm, settings);
 	cm_markers_load(&src->markers, settings);
 	src->out_highlight = obs_data_get_bool(settings, "out_highlight");
+	src->lowpass = obs_data_get_bool(settings, "wv_lowpass");
+	src->readout = obs_data_get_bool(settings, "wv_readout");
 	src->out_hi = (float)obs_data_get_double(settings, "out_hi") / 100.0f;
 	src->out_lo = (float)obs_data_get_double(settings, "out_lo") / 100.0f;
 	src->side_histogram = obs_data_get_bool(settings, "side_histogram");
@@ -281,6 +292,7 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "persistence", 0);
 	obs_data_set_default_int(settings, "scale_labels", SCALE_PERCENT);
 	obs_data_set_default_bool(settings, "out_highlight", true);
+	obs_data_set_default_bool(settings, "wv_readout", true);
 	obs_data_set_default_double(settings, "out_hi", 100.0);
 	obs_data_set_default_double(settings, "out_lo", 0.0);
 	obs_data_set_default_bool(settings, "side_histogram", false);
@@ -356,6 +368,8 @@ static obs_properties_t *wvs_get_properties(void *data)
 	obs_properties_add_bool(props, "side_histogram", obs_module_text("WV.Prop.SideHistogram"));
 	obs_properties_add_bool(props, "x_axis", obs_module_text("WV.Prop.XAxis"));
 	obs_properties_add_bool(props, "out_highlight", obs_module_text("WV.Prop.OutHighlight"));
+	obs_properties_add_bool(props, "wv_lowpass", obs_module_text("WV.Prop.Lowpass"));
+	obs_properties_add_bool(props, "wv_readout", obs_module_text("Prop.Readout"));
 	obs_properties_add_bool(props, "minmax", obs_module_text("WV.Prop.MinMax"));
 	obs_properties_add_bool(props, "peak_hold", obs_module_text("WV.Prop.PeakHold"));
 	obs_properties_add_button2(props, "hold_reset", obs_module_text("WV.Prop.PeakHoldReset"), hold_reset_clicked,
@@ -634,9 +648,47 @@ static void wvs_set_image(struct wvs_source *src, const uint8_t *tex_buf, uint32
 	src->tex_wv_alpha = alpha;
 }
 
-static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
+/* A [1 2 1] / 4 low-pass across the line, like the filter EBU R103 asks for before checking the levels: one-pixel
+ * ringing and noise spikes no longer count as out of range. Channels c0..c1-1 are filtered, the rest copied. */
+static const uint8_t *lowpass_plane(uint8_t **buf, size_t *cap, const uint8_t *in, uint32_t w, uint32_t h, uint32_t ls,
+				    int c1)
+{
+	const size_t size = (size_t)ls * h;
+	if (*cap < size) {
+		bfree(*buf);
+		*buf = bmalloc(size);
+		*cap = size;
+	}
+	for (uint32_t y = 0; y < h; y++) {
+		const uint8_t *s = in + (size_t)ls * y;
+		uint8_t *d = *buf + (size_t)ls * y;
+		memcpy(d, s, (size_t)w * 4);
+		for (uint32_t x = 1; x + 1 < w; x++)
+			for (int c = 0; c < c1; c++)
+				d[x * 4 + c] =
+					(uint8_t)((s[(x - 1) * 4 + c] + 2 * s[x * 4 + c] + s[(x + 1) * 4 + c] + 2) >>
+						  2);
+	}
+	return *buf;
+}
+
+static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data_in)
 {
 	struct wvs_source *src = data;
+	struct cm_surface_data lp = *surface_data_in, *surface_data = surface_data_in;
+	if (src->lowpass && surface_data_in->width > 2) {
+		const uint32_t w = lp.width, h = lp.height;
+		if (lp.rgb_data)
+			lp.rgb_data = (uint8_t *)lowpass_plane(&src->lp_buf[0], &src->lp_cap[0], lp.rgb_data, w, h,
+							       lp.linesize, 3);
+		if (lp.yuv_data)
+			lp.yuv_data = (uint8_t *)lowpass_plane(&src->lp_buf[1], &src->lp_cap[1], lp.yuv_data, w, h,
+							       lp.linesize, 3);
+		if (lp.ext_data)
+			lp.ext_data = (uint8_t *)lowpass_plane(&src->lp_buf[2], &src->lp_cap[2], lp.ext_data, w, h,
+							       lp.ext_linesize, 4);
+		surface_data = &lp;
+	}
 
 	if ((src->components & COMP_RGB) && !surface_data->rgb_data)
 		return;
@@ -1391,6 +1443,37 @@ static void wvs_render_minmax(struct wvs_source *src, float width, float height)
 #undef LEVEL_Y
 }
 
+static float level_at(const struct wvs_source *src, int y);
+
+/* The level under the mouse pointer: a dashed line across and its value, in the units of the scale. */
+static void wvs_render_readout(struct wvs_source *src, float width, float height)
+{
+	if (!src->readout || !src->cursor_in || src->marker_edit || src->panning)
+		return;
+	const float y = (float)src->cursor_y, x = (float)src->cursor_x;
+	if (y < 0.0f || y > height || x < 0.0f || x > width)
+		return;
+	const struct text_scale ts = text_scale_from_viewport(width, height);
+	hline(0.0f, width, y, 0xC0FFFFFF, true, ts.ux);
+	const float level = level_at(src, src->cursor_y);
+	char val[32], buf[64];
+	const int scale = src->scale_labels != SCALE_NONE ? src->scale_labels : SCALE_PERCENT;
+	scale_label(scale, cm_get_colorspace(&src->cm), level, val, sizeof(val));
+	// across: the place in the picture (in a parade, within the part under the pointer)
+	const int n_par = src->display == DISP_PARADE ? (int)n_components(src) : 1;
+	const float part = width / (n_par > 0 ? n_par : 1);
+	const float across = fmodf(x, part) / part * 100.0f;
+	snprintf(buf, sizeof(buf), "%s  x %.0f%%", val, across);
+	const bool right = x < width * 0.6f;
+	const float tw = text_width(&ts, buf, 10.0f);
+	const float tx = right ? x + 8.0f * ts.ux : x - 8.0f * ts.ux - tw;
+	const bool above = y > 20.0f * ts.uy;
+	const float ty = above ? y - 3.0f * ts.uy : y + 3.0f * ts.uy;
+	du_fill_rect(tx - 3.0f * ts.ux, above ? ty - 13.0f * ts.uy : ty, tx + tw + 3.0f * ts.ux,
+		     above ? ty : ty + 13.0f * ts.uy, 0xB0000000);
+	text_draw(&ts, buf, tx, ty, 10.0f, 0xFFFFFFFF, TEXT_ALIGN_LEFT, above ? TEXT_VALIGN_BOTTOM : TEXT_VALIGN_TOP);
+}
+
 static void wvs_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
@@ -1448,6 +1531,7 @@ static void wvs_render(void *data, gs_effect_t *effect)
 	wvs_render_side_histogram(src, (float)wvs_get_width(src));
 	wvs_render_minmax(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 	wvs_render_x_axis(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
+	wvs_render_readout(src, (float)wvs_get_width(src), (float)wvs_get_height(src));
 
 	PROFILE_END(prof_render_name);
 }
@@ -1577,6 +1661,9 @@ static void wvs_waveform_proc(void *data, calldata_t *cd)
 static void wvs_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
 {
 	struct wvs_source *src = data;
+	src->cursor_in = !mouse_leave;
+	src->cursor_x = event->x;
+	src->cursor_y = event->y;
 	if (src->panning) {
 		if (mouse_leave || !(event->modifiers & INTERACT_MOUSE_LEFT) || !zoom_active(src)) {
 			src->panning = false;

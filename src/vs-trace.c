@@ -119,6 +119,40 @@ bool vst_map(const struct vst_params *p, float angle, float radius, float *x, fl
 	}
 }
 
+void vst_unmap(const struct vst_params *p, float x, float y, float *angle, float *radius)
+{
+	float a, r;
+	switch (p->layout) {
+	case VST_SEMICIRCLE:
+		a = atan2f(250.0f - y, x - 127.5f) - (90.0f * DEG_RAD - skin_dir(p));
+		r = hypotf(x - 127.5f, 250.0f - y) / 245.0f;
+		break;
+	case VST_QUADRANT:
+		a = atan2f(250.0f - y, x - 6.0f) - (45.0f * DEG_RAD - skin_dir(p));
+		r = hypotf(x - 6.0f, 250.0f - y) / 244.0f;
+		break;
+	case VST_RECTANGLE:
+		a = (x - 2.0f) / 252.0f * 2.0f * 3.14159265f - (180.0f * DEG_RAD - skin_dir(p));
+		r = (252.0f - y) / 248.0f;
+		break;
+	case VST_CIRCLE:
+	default:
+		a = atan2f(127.5f - y, x - 127.5f);
+		r = hypotf(x - 127.5f, 127.5f - y) / R_OUTER;
+		break;
+	}
+	a -= p->hue_rot * DEG_RAD;
+	if (r < 0.0f)
+		r = 0.0f;
+	if (p->expand)
+		r = r * r;
+	a = fmodf(a, 2.0f * 3.14159265f);
+	if (a < 0.0f)
+		a += 2.0f * 3.14159265f;
+	*angle = a;
+	*radius = r;
+}
+
 void vst_polar_rgb(const struct vst_params *p, float r, float g, float b, float *angle, float *radius)
 {
 	switch (p->projection) {

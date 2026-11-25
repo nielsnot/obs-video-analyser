@@ -70,6 +70,9 @@ bool vst_is_plain(const struct vst_params *p);
  * (angle in radians of the projection, radius 0..1) in the scope (0..VST_SIZE). False when outside the layout. */
 bool vst_map(const struct vst_params *p, float angle, float radius, float *x, float *y);
 
+/* The other way: the polar position (angle in radians of the projection, 0..2 pi, radius) at a place in the scope. */
+void vst_unmap(const struct vst_params *p, float x, float y, float *angle, float *radius);
+
 /* Polar position of an R'G'B' color (0..1) in the projection. */
 void vst_polar_rgb(const struct vst_params *p, float r, float g, float b, float *angle, float *radius);
 
