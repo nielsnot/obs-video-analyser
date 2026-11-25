@@ -366,7 +366,7 @@ static void cie_render_graticule(const struct cie_source *src)
 		int n = 0;
 		for (float t = 1667.0f; t <= 25000.0f && n < 60; t *= 1.05f, n++)
 			planck_xy(t, &pl[n][0], &pl[n][1]);
-		draw_lines((const float(*)[2])pl, n, false, 0xC0FFC080);
+		draw_lines((const float (*)[2])pl, n, false, 0xC0FFC080);
 		static const int temps[5] = {2000, 3200, 4300, 5600, 10000};
 		for (int k = 0; k < 5; k++) {
 			float x, y;

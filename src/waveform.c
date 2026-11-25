@@ -711,7 +711,7 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 	}
 	if (src->side_histogram) {
 		// how many pixels sit at each level, from the trace buffer
-		float(*h)[4] = src->side_hist[src->w_side ^ 1];
+		float (*h)[4] = src->side_hist[src->w_side ^ 1];
 		const uint8_t *buf = src->tex_buf[src->w_tex_buf];
 		const uint32_t w = surface_data->width;
 		for (int level = 0; level < WV_SIZE; level++) {
@@ -1095,7 +1095,7 @@ static void wvs_render_side_histogram(struct wvs_source *src, float width)
 {
 	if (!src->side_histogram || src->display == DISP_STACK)
 		return;
-	const float(*h)[4] = src->side_hist[src->w_side];
+	const float (*h)[4] = src->side_hist[src->w_side];
 	const bool yrgb = is_yrgb(src->components);
 	// channels in the trace buffer: B, G, R (and luma in A for YRGB); luma alone is in G
 	int chans[4], n = 0;
