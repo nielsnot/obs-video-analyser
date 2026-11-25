@@ -1322,6 +1322,20 @@ void ScopeWidget::duplicateScope(int tile)
 	insertScope(e->type, prop, meta, tile);
 }
 
+/* Undo the last removal (or replacement) of a scope in this view. */
+void ScopeWidget::undoScope()
+{
+	if (removedScopes.empty())
+		return;
+	const removed_scope r = removedScopes.back();
+	removedScopes.pop_back();
+	if (r.replaced)
+		removeScopeEx(r.index + 1, false, false); // the scope that took its place
+	OBSDataAutoRelease prop = obs_data_create_from_json(r.settings.c_str());
+	OBSDataAutoRelease meta = obs_data_create_from_json(r.meta.c_str());
+	insertScope(r.type, prop, meta, r.index);
+}
+
 void ScopeWidget::changeScopeType(int tile, int type)
 {
 	if (tile <= 0 || tile > (int)data->entries.size() || type < 0 || type >= N_TYPES)
@@ -1335,13 +1349,35 @@ void ScopeWidget::changeScopeType(int tile, int type)
 	if (e->label == obs_module_text(scope_types[e->type].name_key))
 		obs_data_set_string(meta, "label", obs_module_text(scope_types[type].name_key));
 	insertScope(type, nullptr, meta, tile); // lands right after the old one
-	removeScope(tile);
+	removeScopeEx(tile, true, true);
 }
 
 void ScopeWidget::removeScope(int tile)
 {
+	removeScopeEx(tile, true, false);
+}
+
+/* Remove a scope; remember it for Undo (Ctrl+Z) when asked, as replaced when it made room for another type. */
+void ScopeWidget::removeScopeEx(int tile, bool remember, bool replaced)
+{
 	if (tile <= 0 || tile > (int)data->entries.size())
 		return;
+	if (remember) {
+		const scope_entry *old = data->entries[tile - 1];
+		removed_scope r;
+		r.type = old->type;
+		r.index = tile - 1;
+		r.replaced = replaced;
+		r.label = old->label;
+		OBSDataAutoRelease prop = obs_source_get_settings(old->src);
+		r.settings = obs_data_get_json(prop);
+		OBSDataAutoRelease meta = obs_data_create();
+		entry_meta(old, meta);
+		r.meta = obs_data_get_json(meta);
+		removedScopes.push_back(r);
+		if (removedScopes.size() > 10)
+			removedScopes.erase(removedScopes.begin());
+	}
 
 	pthread_mutex_lock(&data->mutex);
 	scope_entry *e = data->entries[tile - 1];
@@ -1653,6 +1689,15 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 			connect(act, &QAction::triggered, this, [this, name]() { setWindowScreen(name); });
 		}
 		menu.exec(QCursor::pos());
+	});
+	// Ctrl+Z: a removed scope back, otherwise the last shape of the selection
+	auto *undo = new QShortcut(QKeySequence::Undo, parent);
+	undo->setContext(Qt::WidgetWithChildrenShortcut);
+	connect(undo, &QShortcut::activated, this, [this]() {
+		if (!removedScopes.empty())
+			undoScope();
+		else
+			undoShape();
 	});
 	// F11: full screen, as in most programs
 	auto *f11 = new QShortcut(QKeySequence(Qt::Key_F11), parent);
@@ -2835,6 +2880,11 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 		popup.addSeparator();
 	}
 
+	if (!removedScopes.empty()) {
+		act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.undoremove"))
+					      .arg(QString::fromStdString(removedScopes.back().label)));
+		connect(act, &QAction::triggered, this, &ScopeWidget::undoScope, Qt::QueuedConnection);
+	}
 	QMenu *addMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.add")));
 	fillAddScopeMenu(addMenu);
 
@@ -4111,6 +4161,7 @@ void ScopeWidget::storeActive()
 void ScopeWidget::clearActive()
 {
 	closeProperties();
+	removedScopes.clear(); // they belong to the view that goes away
 
 	pthread_mutex_lock(&data->mutex);
 	std::vector<scope_entry *> entries;

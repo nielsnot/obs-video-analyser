@@ -7,6 +7,7 @@
 #include <QRect>
 #include <QString>
 #include <QList>
+#include <vector>
 #include <memory>
 #include <string>
 #include <NorisQTDisplay.hpp>
@@ -36,6 +37,14 @@ class ScopeWidget : public NorisQTDisplay {
 	class QLabel *signalBar = nullptr;
 	bool signalBarOn = true;
 	void updateSignalBar();
+	struct removed_scope
+	{
+		int type = 0, index = 0;
+		bool replaced = false;
+		std::string label, settings, meta; // JSON
+	};
+	std::vector<removed_scope> removedScopes; // for Undo, in the active view
+	void removeScopeEx(int tile, bool remember, bool replaced);
 	QString windowScreen; // the screen the window mode fills, by name; empty for the one the dock is on
 	class QDialog *snapshotDialog = nullptr;
 	class QDialog *signalDialog = nullptr;
@@ -107,6 +116,7 @@ public slots:
 	void moveScope(int tile, int delta);
 	void duplicateScope(int tile);
 	void changeScopeType(int tile, int type);
+	void undoScope();
 	void switchView(int index);
 	void addView();
 	void renameView(int index);
