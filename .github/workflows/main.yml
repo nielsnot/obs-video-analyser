@@ -119,6 +119,8 @@ jobs:
       - name: 'Report OBS log problems'
         if: failure()
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python3 - <<'PY'
           import glob, re
@@ -332,6 +334,8 @@ jobs:
       - name: 'Report OBS log problems'
         if: ${{ failure() || steps.onsdriver.outcome == 'failure' }}
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python3 - <<'PY'
           import glob, re
