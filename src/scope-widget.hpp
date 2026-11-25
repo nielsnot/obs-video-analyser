@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <QRect>
 #include <QString>
+#include <QByteArray>
 #include <QList>
 #include <vector>
 #include <memory>
@@ -45,6 +46,15 @@ class ScopeWidget : public NorisQTDisplay {
 	};
 	std::vector<removed_scope> removedScopes; // for Undo, in the active view
 	void removeScopeEx(int tile, bool remember, bool replaced);
+	// scopes from one dock to another: the context menu and dragging a tile out while arranging
+	bool draggingOut = false;
+	QByteArray scopeJson(int tile);
+	bool addScopeJson(const QByteArray &json);
+	void sendScopeTo(int tile, ScopeWidget *to, bool move);
+	void startScopeDrag(int tile);
+	void dragEnterEvent(class QDragEnterEvent *event) override;
+	void dragMoveEvent(class QDragMoveEvent *event) override;
+	void dropEvent(class QDropEvent *event) override;
 	QString windowScreen; // the screen the window mode fills, by name; empty for the one the dock is on
 	class QDialog *snapshotDialog = nullptr;
 	class QDialog *signalDialog = nullptr;

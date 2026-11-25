@@ -9,6 +9,9 @@ void scope_docks_update_pause();
  * again puts it back where it was. */
 void scope_dock_window_toggle(class QDockWidget *d, const class QString &screen);
 bool scope_dock_in_window_mode(class QDockWidget *d);
+/* All scope docks, for moving scopes from one to another. */
+#include <vector>
+std::vector<class ScopeWidget *> scope_docks_all();
 /* The dock used last, for the hotkeys that act on one dock. */
 void scope_dock_set_active(class ScopeWidget *w);
 /* Factory reset of the whole plugin, after asking and with a backup first. */

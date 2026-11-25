@@ -40,6 +40,10 @@
 #include <QFileDialog>
 #include <QImage>
 #include <QResizeEvent>
+#include <QDrag>
+#include <QMimeData>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QRegularExpression>
 #include <QClipboard>
 #include <QStandardPaths>
@@ -1148,6 +1152,7 @@ ScopeWidget::ScopeWidget(QWidget *parent) : NorisQTDisplay(parent)
 {
 	properties = NULL;
 	setAttribute(Qt::WA_PaintOnScreen);
+	setAcceptDrops(true); // a scope dragged from another dock
 	setAttribute(Qt::WA_StaticContents);
 	setAttribute(Qt::WA_NoSystemBackground);
 	setAttribute(Qt::WA_OpaquePaintEvent);
@@ -1334,6 +1339,92 @@ void ScopeWidget::undoScope()
 	OBSDataAutoRelease prop = obs_data_create_from_json(r.settings.c_str());
 	OBSDataAutoRelease meta = obs_data_create_from_json(r.meta.c_str());
 	insertScope(r.type, prop, meta, r.index);
+}
+
+#define VA_SCOPE_MIME "application/x-video-analyser-scope"
+
+/* The scope at tile as JSON (type key, settings, dock-side settings), to put it in another dock. */
+QByteArray ScopeWidget::scopeJson(int tile)
+{
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return QByteArray();
+	const scope_entry *e = data->entries[tile - 1];
+	OBSDataAutoRelease all = obs_data_create();
+	obs_data_set_string(all, "type", scope_types[e->type].key);
+	OBSDataAutoRelease prop = obs_source_get_settings(e->src);
+	obs_data_set_obj(all, "prop", prop);
+	OBSDataAutoRelease meta = obs_data_create();
+	entry_meta(e, meta);
+	obs_data_erase(meta, "free-x"); // its place in the other dock is new
+	obs_data_erase(meta, "free-y");
+	obs_data_erase(meta, "free-w");
+	obs_data_erase(meta, "free-h");
+	obs_data_set_obj(all, "meta", meta);
+	return QByteArray(obs_data_get_json(all));
+}
+
+bool ScopeWidget::addScopeJson(const QByteArray &json)
+{
+	OBSDataAutoRelease all = obs_data_create_from_json(json.constData());
+	if (!all)
+		return false;
+	const int type = type_from_key(obs_data_get_string(all, "type"));
+	if (type < 0)
+		return false;
+	OBSDataAutoRelease prop = obs_data_get_obj(all, "prop");
+	OBSDataAutoRelease meta = obs_data_get_obj(all, "meta");
+	insertScope(type, prop, meta, -1);
+	return true;
+}
+
+/* Copy or move a scope to another dock. */
+void ScopeWidget::sendScopeTo(int tile, ScopeWidget *to, bool move)
+{
+	if (!to || to == this)
+		return;
+	const QByteArray json = scopeJson(tile);
+	if (json.isEmpty() || !to->addScopeJson(json))
+		return;
+	if (move)
+		removeScopeEx(tile, false, false);
+}
+
+/* Arranging: a tile dragged out of the dock can be dropped on another dock (Ctrl copies). */
+void ScopeWidget::startScopeDrag(int tile)
+{
+	const QByteArray json = scopeJson(tile);
+	if (json.isEmpty())
+		return;
+	auto *mime = new QMimeData();
+	mime->setData(QStringLiteral(VA_SCOPE_MIME), json);
+	mime->setText(QString::fromUtf8(obs_module_text(scope_types[data->entries[tile - 1]->type].name_key)));
+	auto *drag = new QDrag(this);
+	drag->setMimeData(mime);
+	draggingOut = true;
+	const Qt::DropAction done = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
+	draggingOut = false;
+	if (done == Qt::MoveAction && tile <= (int)data->entries.size())
+		removeScopeEx(tile, false, false);
+}
+
+void ScopeWidget::dragEnterEvent(QDragEnterEvent *event)
+{
+	if (event->mimeData()->hasFormat(QStringLiteral(VA_SCOPE_MIME)) && !draggingOut)
+		event->acceptProposedAction();
+}
+
+void ScopeWidget::dragMoveEvent(QDragMoveEvent *event)
+{
+	if (event->mimeData()->hasFormat(QStringLiteral(VA_SCOPE_MIME)) && !draggingOut)
+		event->acceptProposedAction();
+}
+
+void ScopeWidget::dropEvent(QDropEvent *event)
+{
+	if (draggingOut || !event->mimeData()->hasFormat(QStringLiteral(VA_SCOPE_MIME)))
+		return;
+	if (addScopeJson(event->mimeData()->data(QStringLiteral(VA_SCOPE_MIME))))
+		event->acceptProposedAction();
 }
 
 void ScopeWidget::changeScopeType(int tile, int type)
@@ -2491,6 +2582,17 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 
 	if (data->arranging && data->layout == SCOPE_LAYOUT_FREE) {
 		const int x = (int)qtPos.x(), y = (int)qtPos.y();
+		// a tile (not the picture) moved out of the dock: drag it to another dock
+		if (data->drag_tile > 0 && !data->drag_resize && !mouseLeave &&
+		    (x < -8 || y < -8 || x > width() + 8 || y > height() + 8) && scope_docks_all().size() > 1) {
+			const int tile = data->drag_tile;
+			pthread_mutex_lock(&data->mutex);
+			*tile_free(data, tile) = data->drag_start; // back where it was while dragging
+			data->drag_tile = -1;
+			pthread_mutex_unlock(&data->mutex);
+			QTimer::singleShot(0, this, [this, tile]() { startScopeDrag(tile); });
+			return true;
+		}
 		pthread_mutex_lock(&data->mutex);
 		const int t = data->drag_tile;
 		free_rect_s *f = t >= 0 ? tile_free(data, t) : nullptr;
@@ -2869,6 +2971,37 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 			connect(
 				act, &QAction::triggered, this, [this, tile]() { removeScope(tile); },
 				Qt::QueuedConnection);
+
+			// move or copy this scope to another dock
+			std::vector<ScopeWidget *> others;
+			for (ScopeWidget *w : scope_docks_all())
+				if (w != this)
+					others.push_back(w);
+			if (!others.empty()) {
+				QMenu *moveMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.moveto")));
+				QMenu *copyMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.copyto")));
+				for (ScopeWidget *w : others) {
+					QDockWidget *d = w->findDock();
+					const QString title = d ? d->windowTitle() : QString::fromStdString(w->name);
+					QPointer<ScopeWidget> wp(w);
+					act = moveMenu->addAction(title);
+					connect(
+						act, &QAction::triggered, this,
+						[this, tile, wp]() {
+							if (wp)
+								sendScopeTo(tile, wp, true);
+						},
+						Qt::QueuedConnection);
+					act = copyMenu->addAction(title);
+					connect(
+						act, &QAction::triggered, this,
+						[this, tile, wp]() {
+							if (wp)
+								sendScopeTo(tile, wp, false);
+						},
+						Qt::QueuedConnection);
+				}
+			}
 
 			// replace this scope by another type, in the same place with the same source
 			QMenu *replaceMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.replace")));

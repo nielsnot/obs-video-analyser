@@ -196,6 +196,11 @@ bool scope_dock_in_window_mode(QDockWidget *d)
 
 static QPointer<ScopeWidget> active_dock;
 
+std::vector<ScopeWidget *> scope_docks_all()
+{
+	return docks ? *docks : std::vector<ScopeWidget *>();
+}
+
 void scope_dock_set_active(ScopeWidget *w)
 {
 	active_dock = w;
