@@ -58,6 +58,8 @@ extern const struct obs_source_info colormonitor_testsignal;
 extern const struct obs_source_info colormonitor_balance;
 extern const struct obs_source_info colormonitor_quadbalance;
 extern const struct obs_source_info colormonitor_colorinspector;
+extern const struct obs_source_info colormonitor_avsync;
+extern const struct obs_source_info colormonitor_rta;
 void scope_docks_init();
 void text_render_init(void);
 void text_render_free(void);
@@ -152,6 +154,10 @@ bool obs_module_load(void)
 	if (!register_source_with_flags(&colormonitor_quadbalance, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_colorinspector, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_avsync, src_flags))
+		return false;
+	if (!register_source_with_flags(&colormonitor_rta, src_flags))
 		return false;
 	if (!register_source_with_flags(&colormonitor_faces, src_flags))
 		return false;

@@ -71,6 +71,8 @@ set(PLUGIN_SOURCES
 	src/balance.c
 	src/quadbalance.c
 	src/colorinspector.c
+	src/avsync.c
+	src/rta.c
 	src/waveform.c
 	src/histogram.c
 	src/zebra.c

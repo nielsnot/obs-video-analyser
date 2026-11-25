@@ -44,6 +44,12 @@ struct raw_input
 	int card;                   // CARD_*: the kind of source, found from its first frame
 	bool auto_10bit;            // switch a DeckLink source from 8-bit to 10-bit Y'CbCr (when not on air)
 	bool tried_10bit;           // done once: a source set back to 8-bit by hand stays so
+
+	// flashes for the A/V sync measurement (mutex)
+	volatile uint64_t watch_flash_until; // ns; detection runs only while a scope asks for it
+	bool bright;
+	uint64_t flash_ts[16]; // frame timestamps of the last flashes, newest at flash_pos - 1
+	int flash_n, flash_pos;
 };
 
 enum card_e {
@@ -278,9 +284,13 @@ static void check_card(struct raw_input *r, const struct obs_source_frame *frame
 	}
 }
 
+static void detect_flash(struct raw_input *r, const struct obs_source_frame *frame);
+
 static struct obs_source_frame *raw_input_filter_video(void *data, struct obs_source_frame *frame)
 {
 	struct raw_input *r = data;
+	if (frame && os_gettime_ns() < r->watch_flash_until)
+		detect_flash(r, frame);
 	if (!frame || os_gettime_ns() - r->last_use > 2000000000ULL)
 		return frame; // no scope uses it: pass the frame on and do nothing
 	check_card(r, frame);
@@ -440,6 +450,72 @@ static void get_pixel(const struct raw_frame *f, uint32_t x, uint32_t y, uint32_
 static inline bool is_rgb_format(enum video_format f)
 {
 	return f == VIDEO_FORMAT_BGRA || f == VIDEO_FORMAT_BGRX || f == VIDEO_FORMAT_RGBA || f == VIDEO_FORMAT_R10L;
+}
+
+static void get_rgb(const struct raw_frame *f, uint32_t x, uint32_t y, uint32_t *R, uint32_t *G, uint32_t *B);
+
+/* The middle of the picture going bright (a white flash) is a flash, at the frame's timestamp; it has to go dark
+ * again before the next one counts. */
+static void detect_flash(struct raw_input *r, const struct obs_source_frame *frame)
+{
+	struct raw_frame f = {0};
+	for (int i = 0; i < MAX_AV_PLANES; i++) {
+		f.data[i] = frame->data[i];
+		f.linesize[i] = frame->linesize[i];
+	}
+	f.width = frame->width;
+	f.height = frame->height;
+	f.format = frame->format;
+	if (!f.width || !f.height || !f.data[0])
+		return;
+	const bool rgb = !is_yuv(f.format);
+	double sum = 0.0;
+	int n = 0;
+	for (int j = 1; j <= 8; j++)
+		for (int i = 1; i <= 8; i++) {
+			const uint32_t x = f.width / 4 + f.width / 2 * i / 9, y = f.height / 4 + f.height / 2 * j / 9;
+			uint32_t a, b, c;
+			if (rgb) {
+				get_rgb(&f, x, y, &a, &b, &c);
+				sum += b / 65535.0; // green, about the luma
+			} else {
+				get_pixel(&f, x, y, &a, &b, &c);
+				sum += ((a >> 8) - 16) / 219.0;
+			}
+			n++;
+		}
+	const float level = (float)(sum / n);
+	pthread_mutex_lock(&r->mutex);
+	if (!r->bright && level > 0.6f) {
+		r->bright = true;
+		r->flash_ts[r->flash_pos] = frame->timestamp;
+		r->flash_pos = (r->flash_pos + 1) % 16;
+		if (r->flash_n < 16)
+			r->flash_n++;
+	} else if (r->bright && level < 0.3f) {
+		r->bright = false;
+	}
+	pthread_mutex_unlock(&r->mutex);
+}
+
+void raw_input_watch_flash(obs_source_t *filter)
+{
+	struct raw_input *r = filter ? obs_obj_get_data(filter) : NULL;
+	if (r)
+		r->watch_flash_until = os_gettime_ns() + 2000000000ULL;
+}
+
+int raw_input_flashes(obs_source_t *filter, uint64_t *ts, int max)
+{
+	struct raw_input *r = filter ? obs_obj_get_data(filter) : NULL;
+	if (!r)
+		return 0;
+	pthread_mutex_lock(&r->mutex);
+	const int n = r->flash_n < max ? r->flash_n : max;
+	for (int i = 0; i < n; i++)
+		ts[i] = r->flash_ts[(r->flash_pos - 1 - i + 32) % 16];
+	pthread_mutex_unlock(&r->mutex);
+	return n;
 }
 
 /* One pixel of an R'G'B' format as 16-bit values (the code shifted to the top of 16 bits). */

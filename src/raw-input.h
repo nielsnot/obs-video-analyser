@@ -42,6 +42,11 @@ bool raw_input_sample(obs_source_t *filter, float u, float v, int cols, int rows
  * the scopes can use it in a project of this color space (CM_CS_*). Returns false when no frame was seen. */
 bool raw_input_describe(obs_source_t *filter, int colorspace, char *desc, size_t desc_size, bool *usable);
 
+/* A/V sync: keeps the flash detection on for two seconds (call it every frame while measuring), and gives the
+ * frame timestamps of the last flashes (the middle of the picture going white), newest first. */
+void raw_input_watch_flash(obs_source_t *filter);
+int raw_input_flashes(obs_source_t *filter, uint64_t *ts, int max);
+
 /* Frees what the module keeps; at unload. */
 void raw_input_free(void);
 

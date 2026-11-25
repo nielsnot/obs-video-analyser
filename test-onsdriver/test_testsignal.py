@@ -93,6 +93,40 @@ class TestSignalTest(obstest.OBSTest):
         self.assertLessEqual(rows[0], 3, f'the 109 % step is not at the top: row {rows[0]}')
         self.assertTrue(230 <= rows[-1] <= 246, f'the 0 % step is not at 0 %: row {rows[-1]}')
 
+    def test_avsync(self):
+        'The A/V sync scope finds the flash and the beep of the test signal in sync (the big number is green)'
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        cl = self.obs.get_obsws()
+        cl.send('CreateInput', {'sceneName': 'Scene', 'inputName': SOURCE, 'inputKind': PREFIX + 'test_signal',
+                                'inputSettings': {'pattern': 7, 'resolution': 720, 'fps': 25}})
+        cl.send('CreateInput', {'sceneName': 'Scene', 'inputName': 'AV sync', 'inputKind': PREFIX + 'avsync_source',
+                                'inputSettings': {'avs_source': SOURCE}})
+        green = orange = 0
+        img = None
+        for _ in range(40):
+            time.sleep(0.5)
+            try:
+                data = cl.send('GetSourceScreenshot', {'sourceName': 'AV sync', 'imageFormat': 'png',
+                                                       'imageWidth': 400, 'imageHeight': 220}).image_data
+            except Exception:  # pylint: disable=broad-except
+                continue
+            img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
+            green = orange = 0
+            for y in range(50, 92, 2):
+                for x in range(100, 300, 2):
+                    r, g, b = img.getpixel((x, y))
+                    if g > 170 and r < 150 and b < 150:
+                        green += 1
+                    elif r > 200 and g > 120 and b < 120:
+                        orange += 1
+            if green > 20 or orange > 20:
+                break
+        if img:
+            os.makedirs('screenshots', exist_ok=True)
+            img.save(f'screenshots/avsync-{int(time.time() * 1000)}.png')
+        notice(f'A/V sync scope: {green} green and {orange} orange pixels in the offset')
+        self.assertGreater(green, 20, 'the A/V sync scope does not read the test signal as in sync')
+
 
 if __name__ == '__main__':
     unittest.main()
