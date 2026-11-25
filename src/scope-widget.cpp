@@ -1521,6 +1521,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	btnArrange = make_tool_button(toolbar, "dock.toolbar.arrange", "dock.toolbar.arrange.tip", true);
 	auto *btnExport = make_tool_button(toolbar, "dock.toolbar.export", "dock.toolbar.export.tip", false);
 	btnFull = make_tool_button(toolbar, "dock.toolbar.full", "dock.toolbar.full.tip", true);
+	btnWindow = make_tool_button(toolbar, "dock.toolbar.window", "dock.toolbar.window.tip", false);
 	btnFaces = make_tool_button(toolbar, "dock.toolbar.faces", "dock.toolbar.faces.tip", true);
 	btnPause = make_tool_button(toolbar, "dock.toolbar.pause", "dock.toolbar.pause.tip", true);
 	auto *btnUndo = make_tool_button(toolbar, "dock.toolbar.undo", "dock.toolbar.undo.tip", false);
@@ -1560,6 +1561,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addWidget(toolbar_separator(toolbar));
 	layout->addWidget(btnArrange);
 	layout->addWidget(btnExport);
+	layout->addWidget(btnWindow);
 	layout->addWidget(btnFull);
 	layout->addStretch(1);
 
@@ -1584,6 +1586,34 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnArrange, &QToolButton::toggled, this, &ScopeWidget::setArranging);
 	connect(btnExport, &QToolButton::clicked, this, &ScopeWidget::exportScreenshot);
 	connect(btnFull, &QToolButton::toggled, this, &ScopeWidget::setFullScreen);
+	connect(btnWindow, &QToolButton::clicked, this, &ScopeWidget::toggleWindow);
+	// right click on Window: which screen it fills
+	btnWindow->setContextMenuPolicy(Qt::CustomContextMenu);
+	connect(btnWindow, &QWidget::customContextMenuRequested, this, [this]() {
+		QMenu menu(this);
+		QAction *act = menu.addAction(QString::fromUtf8(obs_module_text("dock.window.screen.current")));
+		act->setCheckable(true);
+		act->setChecked(windowScreen.isEmpty());
+		connect(act, &QAction::triggered, this, [this]() { setWindowScreen(QString()); });
+		int i = 1;
+		for (QScreen *s : QGuiApplication::screens()) {
+			const QRect g = s->geometry();
+			const QString name = s->name();
+			act = menu.addAction(
+				QStringLiteral("%1  %2 (%3 x %4)").arg(i++).arg(name).arg(g.width()).arg(g.height()));
+			act->setCheckable(true);
+			act->setChecked(windowScreen == name);
+			connect(act, &QAction::triggered, this, [this, name]() { setWindowScreen(name); });
+		}
+		menu.exec(QCursor::pos());
+	});
+	// F11: full screen, as in most programs
+	auto *f11 = new QShortcut(QKeySequence(Qt::Key_F11), parent);
+	f11->setContext(Qt::WidgetWithChildrenShortcut);
+	connect(f11, &QShortcut::activated, this, [this]() {
+		if (btnFull)
+			btnFull->setChecked(!btnFull->isChecked());
+	});
 	// Esc leaves full screen
 	auto *esc = new QShortcut(QKeySequence(Qt::Key_Escape), parent);
 	esc->setContext(Qt::WidgetWithChildrenShortcut);
@@ -1640,6 +1670,31 @@ QDockWidget *ScopeWidget::findDock() const
 			return d;
 	}
 	return nullptr;
+}
+
+/* Window: the dock out of OBS and filling a screen; again puts it back. */
+void ScopeWidget::toggleWindow()
+{
+	QDockWidget *dock = findDock();
+	if (!dock)
+		return;
+	if (btnFull && btnFull->isChecked())
+		btnFull->setChecked(false);
+	scope_dock_window_toggle(dock, windowScreen);
+	if (btnWindow)
+		btnWindow->setText(QString::fromUtf8(obs_module_text(
+			scope_dock_in_window_mode(dock) ? "dock.toolbar.window.exit" : "dock.toolbar.window")));
+}
+
+void ScopeWidget::setWindowScreen(const QString &name)
+{
+	windowScreen = name;
+	QDockWidget *dock = findDock();
+	if (scope_dock_in_window_mode(dock)) {
+		// move it there now
+		scope_dock_window_toggle(dock, windowScreen);
+		scope_dock_window_toggle(dock, windowScreen);
+	}
 }
 
 /* Full screen: the dock is taken out of the main window if needed and shown full screen on the screen it is on;
@@ -2112,6 +2167,7 @@ static Qt::CursorShape edge_cursor(int e)
 
 bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 {
+	scope_dock_set_active(this);
 	data->ui_scale = (float)devicePixelRatioF();
 	updateScreenScale();
 	bool mouseUp = event->type() == QEvent::MouseButtonRelease;
@@ -4120,6 +4176,8 @@ void ScopeWidget::save_properties(obs_data_t *props)
 
 	obs_data_set_bool(props, "toolbar", toolbarVisible);
 	obs_data_set_int(props, "text_size_pct", data->text_pct);
+	obs_data_set_bool(props, "window_mode", scope_dock_in_window_mode(findDock()));
+	obs_data_set_string(props, "window_screen", windowScreen.toUtf8().constData());
 	obs_data_set_int(props, "active_view", data->active_view);
 
 	if (data->roi) {
@@ -4142,6 +4200,14 @@ void ScopeWidget::load_properties(obs_data_t *props)
 	const std::string roi_name = roi_name_of(this);
 
 	setToolbarVisible(obs_data_get_bool(props, "toolbar"));
+	windowScreen = QString::fromUtf8(obs_data_get_string(props, "window_screen"));
+	if (obs_data_get_bool(props, "window_mode") && !scope_dock_in_window_mode(findDock())) {
+		// back in window mode on the screen it was on, once the dock is shown
+		QTimer::singleShot(800, this, [this]() {
+			if (!scope_dock_in_window_mode(findDock()))
+				toggleWindow();
+		});
+	}
 	const int text_pct = (int)obs_data_get_int(props, "text_size_pct");
 	data->text_pct = text_pct >= 50 && text_pct <= 400 ? text_pct : 0;
 
@@ -4196,6 +4262,8 @@ void ScopeWidget::dockCommand(const char *cmd)
 		switchView(atoi(cmd + 5) - 1);
 	} else if (strcmp(cmd, "snapshot") == 0) {
 		takeSnapshot();
+	} else if (strcmp(cmd, "window") == 0) {
+		toggleWindow();
 	} else if (strcmp(cmd, "compare") == 0) {
 		if (btnCompare)
 			btnCompare->setChecked(!btnCompare->isChecked());

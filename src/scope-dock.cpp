@@ -22,6 +22,10 @@
 #include <QStandardPaths>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QGuiApplication>
+#include <QPointer>
+#include <QTimer>
+#include <algorithm>
 #include <QGroupBox>
 #include <util/platform.h>
 #include "common.h"
@@ -53,12 +57,12 @@ static void scope_dock_show(ScopeWidget *w);
 
 /* ---------- a floating dock: maximize and restore like any window ---------- */
 
-static void toggle_maximized(QDockWidget *d)
+static void toggle_maximized(QDockWidget *d, QScreen *on = nullptr)
 {
 	auto *btn = d->titleBarWidget() ? d->titleBarWidget()->findChild<QToolButton *>("VideoAnalyserMaximize")
 					: nullptr;
 	if (!d->property("va_maximized").toBool()) {
-		QScreen *screen = d->screen();
+		QScreen *screen = on ? on : d->screen();
 		if (!screen)
 			return;
 		d->setProperty("va_normal_geometry", d->geometry());
@@ -105,6 +109,7 @@ static void floating_title(QDockWidget *d, bool floating)
 	QWidget *old = d->titleBarWidget();
 	if (!floating) {
 		d->setProperty("va_maximized", false);
+		d->setProperty("va_window_mode", false); // docked back by hand
 		if (old) {
 			d->setTitleBarWidget(nullptr);
 			old->deleteLater();
@@ -144,6 +149,56 @@ static void floating_title(QDockWidget *d, bool floating)
 	bar->installEventFilter(new TitleDoubleClick(d));
 	title->installEventFilter(new TitleDoubleClick(d));
 	d->setTitleBarWidget(bar);
+}
+
+static QScreen *screen_by_name(const QString &name)
+{
+	if (!name.isEmpty())
+		for (QScreen *s : QGuiApplication::screens())
+			if (s->name() == name)
+				return s;
+	return nullptr;
+}
+
+void scope_dock_window_toggle(QDockWidget *d, const QString &screen)
+{
+	if (!d)
+		return;
+	if (d->property("va_window_mode").toBool()) {
+		d->setProperty("va_window_mode", false);
+		if (d->property("va_maximized").toBool())
+			toggle_maximized(d);
+		if (!d->property("va_was_floating").toBool())
+			d->setFloating(false);
+		return;
+	}
+	d->setProperty("va_was_floating", d->isFloating());
+	d->setProperty("va_window_mode", true);
+	if (!d->isFloating())
+		d->setFloating(true);
+	// once it is a window of its own
+	QPointer<QDockWidget> dp(d);
+	QTimer::singleShot(0, d, [dp, screen]() {
+		if (!dp)
+			return;
+		if (dp->property("va_maximized").toBool())
+			toggle_maximized(dp); // from one screen to another
+		toggle_maximized(dp, screen_by_name(screen));
+		dp->raise();
+		dp->activateWindow();
+	});
+}
+
+bool scope_dock_in_window_mode(QDockWidget *d)
+{
+	return d && d->property("va_window_mode").toBool();
+}
+
+static QPointer<ScopeWidget> active_dock;
+
+void scope_dock_set_active(ScopeWidget *w)
+{
+	active_dock = w;
 }
 
 static void window_buttons(QWidget *container)
@@ -311,6 +366,7 @@ static va_hotkey hotkeys[] = {
 	{"VideoAnalyser.Snapshot", "Hotkey.Snapshot", nullptr, "snapshot", OBS_INVALID_HOTKEY_ID},
 	{"VideoAnalyser.Compare", "Hotkey.Compare", nullptr, "compare", OBS_INVALID_HOTKEY_ID},
 	{"VideoAnalyser.Pause", "Hotkey.Pause", nullptr, "pause", OBS_INVALID_HOTKEY_ID},
+	{"VideoAnalyser.Window", "Hotkey.Window", nullptr, "window", OBS_INVALID_HOTKEY_ID},
 };
 
 static void hotkey_pressed(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
@@ -327,6 +383,15 @@ static void hotkey_pressed(void *data, obs_hotkey_id, obs_hotkey_t *, bool press
 			if (!h->proc && strcmp(h->cmd, "pause") == 0) {
 				cm_set_paused(!cm_get_paused());
 				scope_docks_update_pause();
+				return;
+			}
+			if (!h->proc && strcmp(h->cmd, "window") == 0) {
+				// one dock: the one used last, or the first
+				ScopeWidget *w = active_dock;
+				if (!w || std::find(docks->begin(), docks->end(), w) == docks->end())
+					w = docks->empty() ? nullptr : docks->front();
+				if (w)
+					w->dockCommand("window");
 				return;
 			}
 			for (ScopeWidget *w : *docks) {

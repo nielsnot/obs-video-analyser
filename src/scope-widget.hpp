@@ -5,6 +5,7 @@
 #include <obs.h>
 #include <QWidget>
 #include <QRect>
+#include <QString>
 #include <memory>
 #include <string>
 #include <NorisQTDisplay.hpp>
@@ -25,6 +26,8 @@ class ScopeWidget : public NorisQTDisplay {
 	class QToolButton *btnFaces = nullptr;
 	class QToolButton *btnFull = nullptr;
 	class QToolButton *btnPause = nullptr;
+	class QToolButton *btnWindow = nullptr;
+	QString windowScreen; // the screen the window mode fills, by name; empty for the one the dock is on
 	class QDialog *snapshotDialog = nullptr;
 	class QDialog *signalDialog = nullptr;
 	std::function<void()> snapshotRefresh;
@@ -65,6 +68,8 @@ private:
 	void setArranging(bool on);
 	void exportScreenshot();
 	void setFullScreen(bool on);
+	void toggleWindow();
+	void setWindowScreen(const QString &name);
 	void updateScreenScale();
 	class QDockWidget *findDock() const;
 	void quickControl(int tile, const struct qb_item &it, int x);
