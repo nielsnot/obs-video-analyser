@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.3
+
+- Smoother traces: the waveform and the vectorscope draw with a soft response by default, so faint detail shows
+  without bright areas burning out, with a little smoothing; persistence lets a trace fade out slowly. Linear
+  response and no smoothing give the exact trace of before.
+- Vectorscope: projections Cb/Cr, HSV and opponent colors; layouts circle, semicircle, rectangle and the skin tone
+  quadrant (magnified); hue rotation, expand low saturation and a colored background. Markers stay in the classic
+  Cb/Cr circle.
+- Test signal: a new source with test patterns as 10-bit Y'CbCr like a capture card: RP 219 style bars with 109 %
+  and -7 %, 100 % bars, a ramp, grey steps, PLUGE, skin tones, HLG and PQ bars, and an A/V sync pattern (a white
+  flash with a 1 kHz beep every second); 720p, 1080p and 2160p at 25 to 60 fps.
+- Color balance: the average color cast of the shadows, mid tones and highlights as three points.
+- Quad balance: the picture in a 2 x 2, 3 x 3 or 4 x 4 grid, with luma and color cast per cell against the whole.
+- Color inspector: a magnified vectorscope on the skin tones with skin and the six colors as targets.
+- A/V sync: measures the delay between picture and sound on the A/V sync test signal sent through a chain, and
+  suggests the Sync Offset.
+- Audio spectrum (RTA): 20 Hz to 20 kHz with peak hold, sum or left and right, and a waterfall.
+- Shot evaluator: traffic lights for exposure, clipped highlights, crushed blacks, contrast, focus, noise, white
+  balance and legal colors, without AI. Every check can be switched off; every limit is an option.
+- 3D views: the 3D waveform, the 3D picture (a relief of the brightness in color) and the 3D histogram over time,
+  in the 3D scope and in the + Scope menu.
+- Scope menu: *Replace with* another scope type in the same place, *Copy image to clipboard*, and *Capture
+  reference of this scope* (a snapshot of one scope only).
+- A status line per scope (Options): the source it measures and its size.
+- Tests: the test signal reaches 109 % and -7 % on the raw waveform; the A/V sync scope reads the test signal as in
+  sync; all new scopes render.
+
 ## 0.9.2
 
 - Plug and play with SDI cards: the raw signal of a DeckLink or AJA card is read as video range (the SDI standard),

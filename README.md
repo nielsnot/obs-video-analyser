@@ -47,8 +47,8 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 
 | Scope | Shows | Highlights |
 |-------|-------|------------|
-| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit, 10-bit or nits; colorize; levels at the limits in orange; histogram along the right edge; pixel positions along the top; gain, zoom presets for blacks and whites, mouse wheel zoom and drag; highest/lowest lines and peak hold per channel; EBU R103 lines (-5/105/109 %); HDR lines at 26, 203 and 1000 nits; markers |
-| **Vectorscope** | Hue and saturation | Skin tone line and band, ring scale with degree ticks, colored hue ring, part of the picture (all, lows, mids or highs), gain and mouse wheel zoom, Rec. 601/709/2020 targets at 75 % and 100 %, a saturation alert ring and the highest saturation, markers as points or lines |
+| **Waveform** | Levels across the picture | RGB, Luma, Chroma, YUV or YRGB; overlay, stack or parade; scale in %, IRE, 8-bit, 10-bit or nits; colorize; levels at the limits in orange; histogram along the right edge; pixel positions along the top; gain, zoom presets for blacks and whites, mouse wheel zoom and drag; highest/lowest lines and peak hold per channel; EBU R103 lines (-5/105/109 %); HDR lines at 26, 203 and 1000 nits; markers; soft, linear or log trace with smoothing and persistence |
+| **Vectorscope** | Hue and saturation | Skin tone line and band, ring scale with degree ticks, colored hue ring, part of the picture (all, lows, mids or highs), gain and mouse wheel zoom, Rec. 601/709/2020 targets at 75 % and 100 %, a saturation alert ring and the highest saturation, markers as points or lines; Cb/Cr, HSV or opponent projection; circle, semicircle, rectangle or skin quadrant layout; hue rotation, expand low saturation, colored background; soft trace with smoothing and persistence |
 | **Histogram** | Distribution of levels | RGB, Luma, Chroma, YUV, plus Hue and Saturation; horizontal or vertical; HDR reference lines; drag across a hue or saturation histogram to select that range |
 | **CIE diagram** | Chromaticity | Spectral locus, Rec. 709, DCI-P3, Rec. 2020, ACES AP0/AP1, ProPhoto and Adobe RGB triangles, D65 white point, the Planckian locus with color temperatures; CIE 1931 xy or 1976 u'v' |
 | **Diamond** | RGB gamut | Anything outside the dashed outlines is out of gamut |
@@ -66,6 +66,13 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
 | **Data analyser** | Pixel values | A block of pixels around a pin as 10-bit or 8-bit codes or %, exact codes of the raw signal |
 | **Skin tone** | Skin in the picture | Colors skin on target, redder or yellower, with statistics; turns the skin into the qualifier |
 | **HectorScope** | A 3D waveform | Every pixel in Y'CbCr space; the 3D cube can also show HSV and Lab |
+| **Color balance** | Cast per tone range | The average cast of shadows, mid tones and highlights as three points, with a tolerance circle and trails |
+| **Quad balance** | Evenness | The picture in a 2 x 2 to 4 x 4 grid: luma and color cast of every cell against the whole picture |
+| **Color inspector** | Skin and target colors | A magnified vectorscope on the skin tones; share, hue error and saturation of skin and the six colors |
+| **Shot evaluator** | A quick verdict | Traffic lights for exposure, clipping, crushed blacks, contrast, focus, noise, white balance and legal colors (no AI); every check can be switched off |
+| **3D views** | The picture in depth | 3D waveform, 3D picture (a relief of the brightness) and 3D histogram over time |
+| **A/V sync** | Lip sync | Measures the delay between picture and sound on the A/V sync test signal and suggests the Sync Offset |
+| **Audio spectrum** | Frequencies | RTA from 20 Hz to 20 kHz with peak hold, sum or left and right, and a waterfall |
 | **Info and timecode** | Time and format | One line per tile: time-of-day timecode, clock, date, video format or your own text (or all of them stacked) |
 
 ## Tools
@@ -84,6 +91,8 @@ Video Analyser is based on [Color Monitor](https://github.com/norihiro/obs-color
   measure, for example to check a log camera through its conversion LUT or an HLG to SDR conversion.
 - **Waveform colorize.** A luma waveform can draw its trace in the colors of the picture.
 - **Raw signal of video sources.** On a capture card, camera or media file the scopes read the Y'CbCr frame before OBS clips it (a filter the plugin adds by itself): the waveform runs from -7 % to 109 % and shows superwhite and sub-black, and QC checks the legal range (EBU R103). 8-bit and 10-bit, including Blackmagic V210. See [Raw signal](doc/raw-signal.md).
+- **Test signal.** Add a *Video Analyser test signal* source: bars with 109 % and -7 %, ramp, steps, PLUGE, skin, HLG and PQ bars and an A/V sync pattern, as 10-bit Y'CbCr like a capture card.
+- **Scope menu.** Right-click a scope: *Replace with* another type in place, *Copy image to clipboard*, or *Capture reference* of that scope only. A status line per scope (Options) shows the source it measures and its size.
 - **Help on every scope.** The **i** button in the hover bar explains how to read the scope and what its controls do.
 - **Follow faces (experimental).** `☺ Faces (exp.)` turns the selection into the faces found, and it moves with them.
 - **Free layout.** `⊞ Arrange` lets you drag and resize every scope; give scopes of one camera the same tile color.
