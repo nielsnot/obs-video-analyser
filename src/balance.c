@@ -327,7 +327,8 @@ static void bal_render(void *data, gs_effect_t *effect)
 			snprintf(buf, sizeof(buf), "%s  %.1f%%", obs_module_text("Balance.Neutral"), mag);
 		else
 			snprintf(buf, sizeof(buf), "%.1f%% %s", mag, cast_name(cs, b[k].cb, b[k].cr));
-		text_draw(&ts, buf, tx, ty, 10.0f, ok ? 0xFF60E060 : 0xFFFFC040, TEXT_ALIGN_LEFT, TEXT_VALIGN_TOP);
+		text_draw(&ts, buf, tx, ty, 10.0f, ok ? cm_ok_color() : cm_warn_color(), TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_TOP);
 		ty += 13.0f * ts.uy;
 		snprintf(buf, sizeof(buf), "Cb %+.1f  Cr %+.1f  Y %.0f%%  %.0f%% px", b[k].cb, b[k].cr, b[k].luma,
 			 b[k].share);

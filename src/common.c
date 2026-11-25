@@ -1,5 +1,6 @@
 #include <obs-module.h>
 #include <util/platform.h>
+#include <math.h>
 #include <obs-frontend-api.h>
 #include "plugin-macros.generated.h"
 #include "obs-convenience.h"
@@ -420,6 +421,36 @@ static obs_source_t *raw_filter_for(struct cm_source *src, obs_source_t *target)
 }
 
 static volatile bool cm_paused = false;
+volatile bool cm_colorblind = false;
+volatile int cm_grat_tint = 0;
+
+uint32_t cm_grat(uint32_t argb)
+{
+	static const float tints[4][3] = {{1, 1, 1}, {1, 1, 1}, {1.0f, 0.75f, 0.0f}, {0.35f, 1.0f, 0.45f}};
+	const int t = cm_grat_tint;
+	if (t <= 0 || t > 3)
+		return argb;
+	const float r = ((argb >> 16) & 0xFF) / 255.0f, g = ((argb >> 8) & 0xFF) / 255.0f, b = (argb & 0xFF) / 255.0f;
+	const float v = fmaxf(r, fmaxf(g, b));
+	const uint32_t R = (uint32_t)(v * tints[t][0] * 255.0f + 0.5f), G = (uint32_t)(v * tints[t][1] * 255.0f + 0.5f),
+		       B = (uint32_t)(v * tints[t][2] * 255.0f + 0.5f);
+	return (argb & 0xFF000000) | R << 16 | G << 8 | B;
+}
+
+uint32_t cm_ok_color(void)
+{
+	return cm_colorblind ? 0xFF56B4E9 : 0xFF60E060;
+}
+
+uint32_t cm_warn_color(void)
+{
+	return cm_colorblind ? 0xFFF0E442 : 0xFFFFB040;
+}
+
+uint32_t cm_bad_color(void)
+{
+	return cm_colorblind ? 0xFFD55E00 : 0xFFF04040;
+}
 
 void cm_set_paused(bool paused)
 {

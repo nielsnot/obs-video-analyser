@@ -604,7 +604,7 @@ static void create_graticule_vbuf(struct his_source *src)
 static void his_render_graticule(struct his_source *src)
 {
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), 0x80FFBF00); // amber
+	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), cm_grat(0x80FFBF00)); // amber
 	while (gs_effect_loop(effect, "Solid")) {
 		bool stack = src->display == DISP_STACK;
 		bool parade = src->display == DISP_PARADE;

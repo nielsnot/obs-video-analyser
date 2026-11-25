@@ -1233,14 +1233,14 @@ static void vss_render(void *data, gs_effect_t *effect)
 	if (!modern && src->graticule_img.loaded && src->graticule && src->effect) {
 		create_graticule_vbuf(src, src->tex_cs[r_tex_buf]);
 		gs_effect_t *effect = src->effect;
-		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), src->graticule_color);
+		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), cm_grat(src->graticule_color));
 		draw_uv_vbuffer(src->graticule_vbuf, src->graticule_img.texture, effect, "DrawGraticule",
 				N_GRATICULES * 2);
 	}
 
 	if (!modern && src->graticule && src->graticule_line_vbuf) {
 		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
-		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), src->graticule_color);
+		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), cm_grat(src->graticule_color));
 		gs_load_vertexbuffer(src->graticule_line_vbuf);
 		while (gs_effect_loop(effect, "Solid")) {
 			gs_draw(GS_LINES, 0, 0);
@@ -1251,7 +1251,7 @@ static void vss_render(void *data, gs_effect_t *effect)
 	draw_skin_band(src, src->tex_cs[r_tex_buf]);
 	draw_sat_rings(src, b_zoom ? src->zoom : 1.0f);
 	if (!modern && src->ring_scale)
-		draw_ring_scale(src->graticule ? (uint32_t)src->graticule_color : 0x80FFBF00);
+		draw_ring_scale(cm_grat(src->graticule ? (uint32_t)src->graticule_color : 0x80FFBF00));
 	PROFILE_END(prof_draw_graticule_name);
 
 	vss_render_markers(src);

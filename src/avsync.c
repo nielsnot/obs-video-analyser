@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include "plugin-macros.generated.h"
 #include "util.h"
+#include "common.h"
 #include "text-render.h"
 #include "draw-util.h"
 #include "raw-input.h"
@@ -239,12 +240,12 @@ static void avs_render(void *data, gs_effect_t *effect)
 	avg /= s->n_offsets;
 	const bool ok = fabsf(avg) <= 20.0f;
 	snprintf(buf, sizeof(buf), "%+.0f ms", avg);
-	text_draw(&ts, buf, AVS_W / 2.0f, 70.0f, 34.0f, ok ? 0xFF60E060 : 0xFFFFB040, TEXT_ALIGN_CENTER,
+	text_draw(&ts, buf, AVS_W / 2.0f, 70.0f, 34.0f, ok ? cm_ok_color() : cm_warn_color(), TEXT_ALIGN_CENTER,
 		  TEXT_VALIGN_MIDDLE);
 	const char *verdict = ok        ? obs_module_text("AVSync.InSync")
 			      : avg > 0 ? obs_module_text("AVSync.AudioLate")
 					: obs_module_text("AVSync.AudioEarly");
-	text_draw(&ts, verdict, AVS_W / 2.0f, 104.0f, 12.0f, ok ? 0xFF80F080 : 0xFFFFC060, TEXT_ALIGN_CENTER,
+	text_draw(&ts, verdict, AVS_W / 2.0f, 104.0f, 12.0f, ok ? cm_ok_color() : cm_warn_color(), TEXT_ALIGN_CENTER,
 		  TEXT_VALIGN_MIDDLE);
 	// what to set: OBS delays the audio by its Sync Offset
 	if (!ok) {

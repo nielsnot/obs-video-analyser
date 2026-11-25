@@ -18,6 +18,10 @@ static void set_defaults(obs_data_t *d)
 	obs_data_set_default_string(d, "snap_dir", dir.c_str());
 	obs_data_set_default_string(d, "snap_template", "{source} {date} {time}");
 	obs_data_set_default_bool(d, "snap_autosave", false);
+	obs_data_set_default_bool(d, "menu_groups", true);
+	obs_data_set_default_bool(d, "colorblind", false);
+	obs_data_set_default_int(d, "grat_tint", 0);
+	obs_data_set_default_bool(d, "large_icons", false);
 }
 
 std::string va_config_dir()

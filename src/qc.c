@@ -1070,8 +1070,8 @@ static void polyline(const float *xs, const float *ys, const bool *valid, int n,
 
 #define COLOR_TEXT 0xFFE6E6EA
 #define COLOR_DIM 0xFF8D8D96
-#define COLOR_OK 0xFF6FCF86
-#define COLOR_BAD 0xFFFF5A50
+#define COLOR_OK cm_ok_color()
+#define COLOR_BAD cm_bad_color()
 #define COLOR_WARN 0xFFFFC040
 
 /* Timeline: luma maximum, average (APL) and minimum over the chosen time, with the stretches

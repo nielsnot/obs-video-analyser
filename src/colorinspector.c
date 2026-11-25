@@ -308,7 +308,7 @@ static void ci_render(void *data, gs_effect_t *effect)
 			const bool ok = fabsf(st[i].dhue) <= 5.0f;
 			snprintf(buf, sizeof(buf), "%s %+.1f\xc2\xb0   sat %.0f%%",
 				 obs_module_text("ColorInspector.Hue"), st[i].dhue, st[i].sat);
-			text_draw(&ts, buf, tx + 14.0f, ty, 9.0f, ok ? 0xFF80F080 : 0xFFFFC040, TEXT_ALIGN_LEFT,
+			text_draw(&ts, buf, tx + 14.0f, ty, 9.0f, ok ? cm_ok_color() : cm_warn_color(), TEXT_ALIGN_LEFT,
 				  TEXT_VALIGN_TOP);
 			ty += 15.0f * ts.uy;
 		} else {

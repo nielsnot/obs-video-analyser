@@ -20,6 +20,9 @@
 #include <QDir>
 #include <QDateTime>
 #include <QStandardPaths>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QGroupBox>
 #include <util/platform.h>
 #include "common.h"
 #include "va-config.hpp"
@@ -481,6 +484,17 @@ void scope_docks_factory_reset_dialog(QWidget *)
 				 T("Settings.Reset.Done").arg(QDir::toNativeSeparators(file)));
 }
 
+/* The display settings of all docks and scopes, from the plugin settings. */
+static void apply_display_settings()
+{
+	obs_data_t *c = va_config();
+	cm_colorblind = obs_data_get_bool(c, "colorblind");
+	cm_grat_tint = (int)obs_data_get_int(c, "grat_tint");
+	if (docks)
+		for (ScopeWidget *w : *docks)
+			w->applyDisplaySettings();
+}
+
 static void open_settings_dialog()
 {
 	auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -497,6 +511,42 @@ static void open_settings_dialog()
 	auto *btnBackups = new QPushButton(T("Settings.Backups"), dlg);
 	auto *btnReset = new QPushButton(T("Settings.Reset"), dlg);
 	auto *btnClose = new QPushButton(T("Close"), dlg);
+	// display: how the docks and the scopes look, for all docks
+	{
+		auto *box = new QGroupBox(T("Settings.Display"), dlg);
+		auto *bv = new QVBoxLayout(box);
+		obs_data_t *c = va_config();
+		auto add_check = [&](const char *key, const char *text) {
+			auto *cb = new QCheckBox(T(text), box);
+			cb->setChecked(obs_data_get_bool(c, key));
+			const std::string k = key;
+			QObject::connect(cb, &QCheckBox::toggled, box, [k](bool on) {
+				obs_data_set_bool(va_config(), k.c_str(), on);
+				va_config_save();
+				apply_display_settings();
+			});
+			bv->addWidget(cb);
+		};
+		add_check("menu_groups", "Settings.MenuGroups");
+		add_check("colorblind", "Settings.Colorblind");
+		add_check("large_icons", "Settings.LargeIcons");
+		auto *row = new QHBoxLayout();
+		row->addWidget(new QLabel(T("Settings.Graticule"), box));
+		auto *combo = new QComboBox(box);
+		combo->addItem(T("Settings.Graticule.Own"), 0);
+		combo->addItem(T("Settings.Graticule.White"), 1);
+		combo->addItem(T("Settings.Graticule.Amber"), 2);
+		combo->addItem(T("Settings.Graticule.Green"), 3);
+		combo->setCurrentIndex((int)obs_data_get_int(c, "grat_tint"));
+		QObject::connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), box, [](int i) {
+			obs_data_set_int(va_config(), "grat_tint", i);
+			va_config_save();
+			apply_display_settings();
+		});
+		row->addWidget(combo, 1);
+		bv->addLayout(row);
+		v->addWidget(box);
+	}
 	for (QPushButton *b : {btnExport, btnImport, btnBackups, btnReset})
 		v->addWidget(b);
 	v->addStretch(1);
@@ -543,7 +593,7 @@ static void open_settings_dialog()
 	});
 	QObject::connect(btnReset, &QPushButton::clicked, dlg, [dlg]() { scope_docks_factory_reset_dialog(dlg); });
 	QObject::connect(btnClose, &QPushButton::clicked, dlg, &QDialog::close);
-	dlg->resize(420, 300);
+	dlg->resize(440, 460);
 	dlg->show();
 }
 
@@ -566,6 +616,7 @@ static void frontend_event(enum obs_frontend_event event, void *)
 void scope_docks_init()
 {
 	docks = new std::vector<ScopeWidget *>;
+	apply_display_settings();
 	hotkeys_register();
 	obs_frontend_add_save_callback(save_load_scope_docks, NULL);
 	obs_frontend_add_event_callback(frontend_event, nullptr);

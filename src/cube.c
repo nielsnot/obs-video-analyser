@@ -412,7 +412,7 @@ static void render_hist3d(struct cb_source *src, const float m[9], float scale, 
 		const float fade = 1.0f - 0.75f * v;
 		const uint32_t a = (uint32_t)(255 * fade);
 		gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"),
-				    (a << 24) | (age == 0 ? 0xFFFFFF : 0xFFD060));
+				    (a << 24) | (age == 0 ? 0xFFFFFF : 0x60D0FF));
 		while (gs_effect_loop(solid, "Solid")) {
 			gs_render_start(false);
 			for (int i = 0; i + 1 < HIST_BINS; i++) {

@@ -160,6 +160,18 @@ void cm_tick(void *data, float unused);
 void cm_request(struct cm_source *src, cm_surface_cb_t callback, void *data);
 /* False when the scope limits its updates (max_fps) and the last one is too recent; true marks an update now. */
 bool cm_update_due(struct cm_source *src);
+
+/* Status colors (0xAARRGGBB) for ok, a warning and an error; with the color blind setting blue, yellow and
+ * vermilion (Okabe and Ito) instead of green, orange and red. */
+extern volatile bool cm_colorblind;
+uint32_t cm_ok_color(void);
+uint32_t cm_warn_color(void);
+uint32_t cm_bad_color(void);
+
+/* Graticule color for all scopes: 0 each scope's own, 1 white, 2 amber, 3 green. cm_grat() turns a graticule color
+ * (0xAARRGGBB) into the chosen one, keeping its alpha and brightness. */
+extern volatile int cm_grat_tint;
+uint32_t cm_grat(uint32_t argb);
 void cm_set_mask_params(gs_effect_t *effect, const struct cm_mask *mask);
 /* Sets the uniforms that encode the captured picture (hdr_mode, sdr_white_over_max). */
 void cm_set_signal_params(gs_effect_t *effect, int colorspace);

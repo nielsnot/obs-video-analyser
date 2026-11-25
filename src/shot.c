@@ -347,7 +347,7 @@ static void shot_render(void *data, gs_effect_t *effect)
 	hints[CK_GAMUT] = lights[CK_GAMUT] == L_GREEN ? obs_module_text("Shot.Hint.Ok")
 						      : obs_module_text("Shot.Hint.Gamut");
 
-	static const uint32_t light_col[4] = {0xFF505050, 0xFF50D060, 0xFFFFB030, 0xFFF04040};
+	const uint32_t light_col[4] = {0xFF505050, cm_ok_color(), cm_warn_color(), cm_bad_color()};
 	enum light worst = L_GREEN;
 	int shown = 0;
 	for (int i = 0; i < N_CHECKS; i++)

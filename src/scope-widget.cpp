@@ -1358,65 +1358,103 @@ static QString scope_tip(const char *key)
 	return text && k != text ? QString::fromUtf8(text) : QString();
 }
 
+void ScopeWidget::addScopeMenuEntry(QMenu *menu, int t)
+{
+	if (!strcmp(scope_types[t].key, "info")) {
+		// one line per tile: timecode, clock, date, video format, text, or all of them stacked
+		QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+		sub->menuAction()->setToolTip(scope_tip(scope_types[t].key));
+		sub->setToolTipsVisible(true);
+		static const char *items[][2] = {
+			{"timecode", "Info.Prop.Timecode"}, {"clock", "Info.Prop.Clock"}, {"date", "Info.Prop.Date"},
+			{"video", "Info.Prop.Video"},       {"text", "Info.Prop.Text"},   {"all", "Info.Prop.All"},
+		};
+		for (const auto &it : items) {
+			QAction *act = sub->addAction(QString::fromUtf8(obs_module_text(it[1])));
+			const std::string item = it[0];
+			connect(act, &QAction::triggered, this, [this, t, item]() {
+				OBSDataAutoRelease d = obs_data_create();
+				obs_data_set_string(d, "item", item.c_str());
+				addScope(t, d);
+			});
+		}
+		return;
+	}
+	if (!strcmp(scope_types[t].key, "view3d")) {
+		// the 3D views are the 3D scope with the picture in depth
+		QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+		sub->menuAction()->setToolTip(scope_tip(scope_types[t].key));
+		static const struct
+		{
+			int model;
+			const char *name;
+		} items[] = {{4, "Cube.Model.Wave3D"}, {5, "Cube.Model.Picture3D"}, {6, "Cube.Model.Hist3D"}};
+		for (const auto &it : items) {
+			QAction *act = sub->addAction(QString::fromUtf8(obs_module_text(it.name)));
+			const int model = it.model;
+			connect(act, &QAction::triggered, this, [this, t, model]() {
+				OBSDataAutoRelease d = obs_data_create();
+				obs_data_set_int(d, "cube_model", model);
+				obs_data_set_double(d, "spin", 0.0);
+				addScope(t, d);
+			});
+		}
+		return;
+	}
+	QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+	act->setToolTip(scope_tip(scope_types[t].key));
+	connect(act, &QAction::triggered, this, [this, t]() {
+		// the HectorScope is the 3D cube in Y'CbCr
+		if (!strcmp(scope_types[t].key, "hector")) {
+			OBSDataAutoRelease d = obs_data_create();
+			obs_data_set_int(d, "cube_model", 1);
+			addScope(t, d);
+		} else {
+			addScope(t);
+		}
+	});
+}
+
+/* The groups of the + Scope menu (Settings: group the menu), by scope key. */
+static const struct
+{
+	const char *name_key;
+	const char *keys[10];
+} scope_groups[] = {
+	{"Group.Levels", {"waveform", "histogram", "lineplot", "channelplot", "satlum", "data"}},
+	{"Group.Color",
+	 {"vectorscope", "colorinspector", "balance", "quadbalance", "cie", "diamond", "skintone", "chart"}},
+	{"Group.Exposure", {"falsecolor", "zebra", "focuspeaking", "faces"}},
+	{"Group.3D", {"cube", "hector", "view3d"}},
+	{"Group.Checks", {"qc", "shot", "avsync"}},
+	{"Group.Audio", {"audio", "rta"}},
+};
+
 void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 {
 	menu->setToolTipsVisible(true);
-	for (int t = 0; t < N_TYPES; t++) {
-		if (!strcmp(scope_types[t].key, "info")) {
-			// one line per tile: timecode, clock, date, video format, text, or all of them stacked
-			QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
-			sub->menuAction()->setToolTip(scope_tip(scope_types[t].key));
-			sub->setToolTipsVisible(true);
-			static const char *items[][2] = {
-				{"timecode", "Info.Prop.Timecode"}, {"clock", "Info.Prop.Clock"},
-				{"date", "Info.Prop.Date"},         {"video", "Info.Prop.Video"},
-				{"text", "Info.Prop.Text"},         {"all", "Info.Prop.All"},
-			};
-			for (const auto &it : items) {
-				QAction *act = sub->addAction(QString::fromUtf8(obs_module_text(it[1])));
-				const std::string item = it[0];
-				connect(act, &QAction::triggered, this, [this, t, item]() {
-					OBSDataAutoRelease d = obs_data_create();
-					obs_data_set_string(d, "item", item.c_str());
-					addScope(t, d);
-				});
-			}
-			continue;
-		}
-		if (!strcmp(scope_types[t].key, "view3d")) {
-			// the 3D views are the 3D scope with the picture in depth
-			QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
-			sub->menuAction()->setToolTip(scope_tip(scope_types[t].key));
-			static const struct
-			{
-				int model;
-				const char *name;
-			} items[] = {{4, "Cube.Model.Wave3D"}, {5, "Cube.Model.Picture3D"}, {6, "Cube.Model.Hist3D"}};
-			for (const auto &it : items) {
-				QAction *act = sub->addAction(QString::fromUtf8(obs_module_text(it.name)));
-				const int model = it.model;
-				connect(act, &QAction::triggered, this, [this, t, model]() {
-					OBSDataAutoRelease d = obs_data_create();
-					obs_data_set_int(d, "cube_model", model);
-					obs_data_set_double(d, "spin", 0.0);
-					addScope(t, d);
-				});
-			}
-			continue;
-		}
-		QAction *act = menu->addAction(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
-		act->setToolTip(scope_tip(scope_types[t].key));
-		connect(act, &QAction::triggered, this, [this, t]() {
-			// the HectorScope is the 3D cube in Y'CbCr
-			if (!strcmp(scope_types[t].key, "hector")) {
-				OBSDataAutoRelease d = obs_data_create();
-				obs_data_set_int(d, "cube_model", 1);
-				addScope(t, d);
-			} else {
-				addScope(t);
-			}
-		});
+	if (!obs_data_get_bool(va_config(), "menu_groups")) {
+		for (int t = 0; t < N_TYPES; t++)
+			addScopeMenuEntry(menu, t);
+		return;
 	}
+	std::vector<bool> placed(N_TYPES, false);
+	for (const auto &g : scope_groups) {
+		QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(g.name_key)));
+		sub->setToolTipsVisible(true);
+		for (const char *key : g.keys) {
+			const int t = key ? type_from_key(key) : -1;
+			if (t < 0 || placed[t])
+				continue;
+			addScopeMenuEntry(sub, t);
+			placed[t] = true;
+		}
+	}
+	menu->addSeparator();
+	// the rest (Info and anything new) at the top level
+	for (int t = 0; t < N_TYPES; t++)
+		if (!placed[t])
+			addScopeMenuEntry(menu, t);
 }
 
 /* ---------- toolbar ---------- */
@@ -1471,7 +1509,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 
 	auto *btnAdd = make_tool_button(toolbar, "dock.toolbar.add", "dock.toolbar.add.tip", false);
 	auto *addMenu = new QMenu(btnAdd);
-	fillAddScopeMenu(addMenu);
+	addScopeMenu = addMenu;
 	btnAdd->setMenu(addMenu);
 	btnAdd->setPopupMode(QToolButton::InstantPopup);
 
@@ -1565,7 +1603,22 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 
 	toolbar->setVisible(toolbarVisible);
 	updatePause();
+	applyDisplaySettings();
 	return toolbar;
+}
+
+void ScopeWidget::applyDisplaySettings()
+{
+	if (addScopeMenu) {
+		addScopeMenu->clear();
+		fillAddScopeMenu(addScopeMenu);
+	}
+	if (toolbar) {
+		QString style = QString::fromUtf8(toolbar_style);
+		if (obs_data_get_bool(va_config(), "large_icons"))
+			style += QStringLiteral("QToolButton { font-size: 15px; min-height: 30px; padding: 4px 9px; }");
+		toolbar->setStyleSheet(style);
+	}
 }
 
 /* The automatic text size follows the screen the dock is on: its height in points over 1080. */

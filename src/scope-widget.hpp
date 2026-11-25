@@ -53,6 +53,8 @@ private:
 	qint64 lastContextMs = 0;
 	bool openMenu(QMouseEvent *event);
 	void fillAddScopeMenu(class QMenu *menu);
+	void addScopeMenuEntry(class QMenu *menu, int type);
+	class QMenu *addScopeMenu = nullptr;
 	void closeProperties();
 	void clearActive();
 	void loadActive(obs_data_t *state);
@@ -112,6 +114,8 @@ public:
 	void load_properties(obs_data_t *);
 	/* A dock command from a hotkey: view_next, view_prev, view_1..view_9, snapshot, compare. */
 	void dockCommand(const char *cmd);
+	/* The display settings from the plugin settings: groups in the + Scope menu, large toolbar buttons. */
+	void applyDisplaySettings();
 	/* Shows the pause state (cm_get_paused()) on the toolbar button. */
 	void updatePause();
 	/* The signal path of the dock as HTML: source, raw signal, project, capture, LUT, selection. */

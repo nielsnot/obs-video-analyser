@@ -810,7 +810,7 @@ static void create_graticule_vbuf(struct wvs_source *src)
 static void wvs_render_graticule(struct wvs_source *src)
 {
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), 0x30FFFFFF); // quiet grey lines
+	gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), cm_grat(0x30FFFFFF)); // quiet grey lines
 	while (gs_effect_loop(effect, "Solid")) {
 		bool stack = src->display == DISP_STACK;
 		bool parade = src->display == DISP_PARADE;
@@ -836,7 +836,7 @@ static void wvs_render_graticule(struct wvs_source *src)
 	const int n_par = src->display == DISP_PARADE ? (int)n_components(src) : 1;
 	const float w = (float)src->tex_buf_width[src->r_tex_buf];
 	if (n_par > 1 && w > 0.0f) {
-		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), 0x50FFFFFF);
+		gs_effect_set_color(gs_effect_get_param_by_name(effect, "color"), cm_grat(0x50FFFFFF));
 		while (gs_effect_loop(effect, "Solid")) {
 			gs_render_start(false);
 			for (int i = 1; i < n_par; i++) {
@@ -1036,7 +1036,7 @@ static void wvs_render_scale(struct wvs_source *src, float width, float height)
 					gs_vertex2f(xo + tw + pad * 2.0f, y0 + px * ts.uy);
 					gs_render_stop(GS_TRISTRIP);
 				}
-				text_draw(&ts, buf, xo + pad, y, px, 0xA0E8E8E8, TEXT_ALIGN_LEFT, valign);
+				text_draw(&ts, buf, xo + pad, y, px, cm_grat(0xA0E8E8E8), TEXT_ALIGN_LEFT, valign);
 			}
 		}
 

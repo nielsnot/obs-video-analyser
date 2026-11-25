@@ -212,8 +212,8 @@ static void qb_render(void *data, gs_effect_t *effect)
 			text_draw(&ts, buf, x0 + 4.0f * ts.ux, y0 + 3.0f * ts.uy, 10.0f, 0xFFFFFFFF, TEXT_ALIGN_LEFT,
 				  TEXT_VALIGN_TOP);
 			snprintf(buf, sizeof(buf), "%+.1f", dl);
-			text_draw(&ts, buf, x1 - 4.0f * ts.ux, y0 + 3.0f * ts.uy, 10.0f, l_ok ? 0xFF80F080 : 0xFFFFB040,
-				  TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
+			text_draw(&ts, buf, x1 - 4.0f * ts.ux, y0 + 3.0f * ts.uy, 10.0f,
+				  l_ok ? cm_ok_color() : cm_warn_color(), TEXT_ALIGN_RIGHT, TEXT_VALIGN_TOP);
 			snprintf(buf, sizeof(buf), "%.1f%%", dc);
 			text_draw(&ts, buf, x1 - 4.0f * ts.ux, y1 - 3.0f * ts.uy, 9.0f, c_ok ? 0xC0FFFFFF : 0xFFFFC040,
 				  TEXT_ALIGN_RIGHT, TEXT_VALIGN_BOTTOM);
@@ -223,7 +223,7 @@ static void qb_render(void *data, gs_effect_t *effect)
 			 obs_module_text("QuadBalance.LumaSpread"), lmax - lmin,
 			 obs_module_text("QuadBalance.ColorSpread"), cmax, all.luma);
 		const bool ok = lmax - lmin <= src->luma_tol * 2.0f && cmax <= src->color_tol;
-		text_draw(&ts, buf, 4.0f * ts.ux, QB_H - 3.0f * ts.uy, 10.0f, ok ? 0xFF80F080 : 0xFFFFB040,
+		text_draw(&ts, buf, 4.0f * ts.ux, QB_H - 3.0f * ts.uy, 10.0f, ok ? cm_ok_color() : cm_warn_color(),
 			  TEXT_ALIGN_LEFT, TEXT_VALIGN_BOTTOM);
 	}
 }
