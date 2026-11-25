@@ -50,7 +50,16 @@ def dock_data():
         scope('falsecolor', 'Gamut', {'fc_gamut': 1}),
         scope('audio', 'Audio'),
         scope('cube', 'Cube'),
+        scope('balance', 'Balance'),
+        scope('quadbalance', 'Quad'),
+        scope('colorinspector', 'Inspector'),
+        scope('avsync', 'AV'),
+        scope('rta', 'RTA'),
+        scope('shot', 'Shot'),
+        scope('view3d', '3D', {'cube_model': 4}),
     ]
+    for s in scopes:
+        s['show_status'] = True
     return {
         'docks': [{
             'name': 'New scopes',
@@ -115,12 +124,14 @@ class NewScopesTest(obstest.OBSTest):
             kinds.setdefault(kind, i['inputName'])
         for kind in ('qc_source', 'satlum_source', 'lineplot_source', 'info_source', 'waveform_source',
                      'vectorscope_source', 'audio_source', 'cube_source', 'channelplot_source', 'data_source',
-                     'skintone_source'):
+                     'skintone_source', 'balance_source', 'quadbalance_source', 'colorinspector_source', 'avsync_source',
+                     'rta_source', 'shot_source'):
             self.assertIn(PREFIX + kind, kinds, f'{kind} was not created')
 
         for kind in ('satlum_source', 'lineplot_source', 'info_source', 'waveform_source', 'vectorscope_source',
                      'audio_source', 'cube_source', 'channelplot_source', 'data_source',
-                     'skintone_source'):
+                     'skintone_source', 'balance_source', 'quadbalance_source', 'colorinspector_source', 'avsync_source',
+                     'rta_source', 'shot_source'):
             img = self.screenshot(cl, kinds[PREFIX + kind])
             lit = sum(1 for x in range(0, img.width, 4) for y in range(0, img.height, 4)
                       if sum(img.getpixel((x, y))) > 60)

@@ -39,6 +39,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QImage>
+#include <QClipboard>
 #include <QStandardPaths>
 #include <QWidgetAction>
 #include <QDockWidget>
@@ -113,6 +114,7 @@ static const scope_type_s scope_types[] = {
 	{ID_PREFIX "avsync_source", "avsync", "AVSync", FIT_ASPECT},
 	{ID_PREFIX "rta_source", "rta", "RTA", FIT_ASPECT},
 	{ID_PREFIX "shot_source", "shot", "Shot", FIT_ASPECT},
+	{ID_PREFIX "cube_source", "view3d", "View3D", FIT_SQUARE},
 };
 #define N_TYPES ((int)(sizeof(scope_types) / sizeof(scope_types[0])))
 enum {
@@ -192,6 +194,7 @@ struct scope_entry
 	// name shown on the scope (guarded by the widget mutex; read while drawing)
 	std::string label;
 	bool show_label = true;
+	bool show_status = false; // a line at the bottom with what the scope measures
 
 	// what the scope analyzes: the dock's ROI selection, or a source of its own
 	bool use_roi = true;
@@ -484,6 +487,36 @@ static void choose_grid(const scope_widget_s *data, const std::vector<int> &tile
 static void draw_quickbar(scope_widget_s *data, int tile);
 static void qb_fill(float x0, float y0, float x1, float y1, uint32_t color);
 
+/* The status line of a tile: the source it measures and its size. */
+static std::string status_text(const scope_widget_s *data, const scope_entry *e)
+{
+	std::string name;
+	if (e->use_roi && data->roi) {
+		OBSDataAutoRelease s = obs_source_get_settings(data->roi);
+		name = obs_data_get_string(s, "target_name");
+	} else {
+		name = e->target;
+	}
+	uint32_t w = 0, h = 0;
+	if (name.empty()) {
+		struct obs_video_info ovi;
+		if (obs_get_video_info(&ovi)) {
+			w = ovi.base_width;
+			h = ovi.base_height;
+		}
+		name = obs_module_text("Status.Program");
+	} else {
+		OBSSourceAutoRelease s = obs_get_source_by_name(name.c_str());
+		if (s) {
+			w = obs_source_get_width(s);
+			h = obs_source_get_height(s);
+		}
+	}
+	char buf[48];
+	snprintf(buf, sizeof(buf), "  %ux%u", w, h);
+	return name + buf;
+}
+
 static void draw(void *param, uint32_t cx_, uint32_t cy_)
 {
 	auto *data = (struct scope_widget_s *)param;
@@ -626,6 +659,26 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 				}
 				text_draw(&ts, e->label.c_str(), 9.0f, 6.0f, px, 0xE6FFFFFF, TEXT_ALIGN_LEFT,
 					  TEXT_VALIGN_TOP);
+			}
+			if (e->show_status && !(data->arranging && data->layout == SCOPE_LAYOUT_FREE)) {
+				gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+				const struct text_scale ts = text_scale_from_viewport((float)w, (float)h);
+				const std::string st = status_text(data, e);
+				const float px = std::min(13.0f, std::max(9.0f, h / 18.0f));
+				const float tw = text_width(&ts, st.c_str(), px);
+				const float fh = (float)h;
+				gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+				gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0x99000000);
+				while (gs_effect_loop(solid, "Solid")) {
+					gs_render_start(false);
+					gs_vertex2f(4.0f, fh - px - 8.0f);
+					gs_vertex2f(tw + 14.0f, fh - px - 8.0f);
+					gs_vertex2f(4.0f, fh - 4.0f);
+					gs_vertex2f(tw + 14.0f, fh - 4.0f);
+					gs_render_stop(GS_TRISTRIP);
+				}
+				text_draw(&ts, st.c_str(), 9.0f, fh - 6.0f, px, 0xC8FFFFFF, TEXT_ALIGN_LEFT,
+					  TEXT_VALIGN_BOTTOM);
 			}
 		}
 
@@ -1184,6 +1237,7 @@ void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, 
 			e->label = obs_data_get_string(meta, "label");
 		if (obs_data_has_user_value(meta, "show_label"))
 			e->show_label = obs_data_get_bool(meta, "show_label");
+		e->show_status = obs_data_get_bool(meta, "show_status");
 		if (obs_data_has_user_value(meta, "use_roi"))
 			e->use_roi = obs_data_get_bool(meta, "use_roi");
 		e->target = obs_data_get_string(meta, "target");
@@ -1198,6 +1252,13 @@ void ScopeWidget::insertScope(int type, obs_data_t *settings, obs_data_t *meta, 
 	}
 
 	OBSDataAutoRelease prop = settings ? obs_data_create_from_json(obs_data_get_json(settings)) : obs_data_create();
+	if (!settings && !strcmp(st.key, "view3d")) {
+		// a 3D view starts as the 3D waveform, standing still
+		obs_data_set_int(prop, "cube_model", 4);
+		obs_data_set_double(prop, "spin", 0.0);
+	} else if (!settings && !strcmp(st.key, "hector")) {
+		obs_data_set_int(prop, "cube_model", 1);
+	}
 	obs_data_set_string(prop, "target_name", e->use_roi ? roi_name_of(this).c_str() : e->target.c_str());
 
 	std::string name;
@@ -1231,6 +1292,7 @@ static void entry_meta(const scope_entry *e, obs_data_t *meta)
 {
 	obs_data_set_string(meta, "label", e->label.c_str());
 	obs_data_set_bool(meta, "show_label", e->show_label);
+	obs_data_set_bool(meta, "show_status", e->show_status);
 	obs_data_set_bool(meta, "use_roi", e->use_roi);
 	obs_data_set_string(meta, "target", e->target.c_str());
 	obs_data_set_int(meta, "aspect", e->aspect);
@@ -1316,6 +1378,27 @@ void ScopeWidget::fillAddScopeMenu(QMenu *menu)
 				connect(act, &QAction::triggered, this, [this, t, item]() {
 					OBSDataAutoRelease d = obs_data_create();
 					obs_data_set_string(d, "item", item.c_str());
+					addScope(t, d);
+				});
+			}
+			continue;
+		}
+		if (!strcmp(scope_types[t].key, "view3d")) {
+			// the 3D views are the 3D scope with the picture in depth
+			QMenu *sub = menu->addMenu(QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+			sub->menuAction()->setToolTip(scope_tip(scope_types[t].key));
+			static const struct
+			{
+				int model;
+				const char *name;
+			} items[] = {{4, "Cube.Model.Wave3D"}, {5, "Cube.Model.Picture3D"}, {6, "Cube.Model.Hist3D"}};
+			for (const auto &it : items) {
+				QAction *act = sub->addAction(QString::fromUtf8(obs_module_text(it.name)));
+				const int model = it.model;
+				connect(act, &QAction::triggered, this, [this, t, model]() {
+					OBSDataAutoRelease d = obs_data_create();
+					obs_data_set_int(d, "cube_model", model);
+					obs_data_set_double(d, "spin", 0.0);
 					addScope(t, d);
 				});
 			}
@@ -2396,6 +2479,47 @@ static void add_quick_properties(QWidget *owner, QMenu *menu, obs_source_t *src,
 
 /* ---------- context menu ---------- */
 
+/* One scope rendered at its own size, for the clipboard. */
+static QImage render_source_image(obs_source_t *src)
+{
+	const uint32_t w = obs_source_get_width(src), h = obs_source_get_height(src);
+	if (!w || !h || w > 8192 || h > 8192)
+		return QImage();
+	QImage image((int)w, (int)h, QImage::Format_RGBA8888);
+	image.fill(Qt::black);
+	bool ok = false;
+	obs_enter_graphics();
+	gs_texrender_t *tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	if (tr && gs_texrender_begin(tr, w, h)) {
+		struct vec4 black;
+		vec4_set(&black, 0.0f, 0.0f, 0.0f, 1.0f);
+		gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
+		gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+		obs_source_video_render(src);
+		gs_texrender_end(tr);
+		gs_stagesurf_t *stage = gs_stagesurface_create(w, h, GS_RGBA);
+		if (stage) {
+			gs_stage_texture(stage, gs_texrender_get_texture(tr));
+			uint8_t *ptr;
+			uint32_t linesize;
+			if (gs_stagesurface_map(stage, &ptr, &linesize)) {
+				for (uint32_t y = 0; y < h; y++) {
+					uint8_t *dst = image.scanLine((int)y);
+					memcpy(dst, ptr + (size_t)linesize * y, (size_t)w * 4);
+					for (uint32_t x = 0; x < w; x++)
+						dst[x * 4 + 3] = 255;
+				}
+				gs_stagesurface_unmap(stage);
+				ok = true;
+			}
+			gs_stagesurface_destroy(stage);
+		}
+	}
+	gs_texrender_destroy(tr);
+	obs_leave_graphics();
+	return ok ? image : QImage();
+}
+
 bool ScopeWidget::openMenu(QMouseEvent *)
 {
 	QMenu popup(this);
@@ -2454,7 +2578,47 @@ bool ScopeWidget::openMenu(QMouseEvent *)
 			connect(
 				act, &QAction::triggered, this, [this, tile]() { removeScope(tile); },
 				Qt::QueuedConnection);
+
+			// replace this scope by another type, in the same place with the same source
+			QMenu *replaceMenu = popup.addMenu(QString::fromUtf8(obs_module_text("dock.menu.replace")));
+			for (int t = 0; t < N_TYPES; t++) {
+				if (t == type)
+					continue;
+				act = replaceMenu->addAction(
+					QString::fromUtf8(obs_module_text(scope_types[t].name_key)));
+				connect(
+					act, &QAction::triggered, this, [this, tile, t]() { changeScopeType(tile, t); },
+					Qt::QueuedConnection);
+			}
 		}
+
+		act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.copyimage")));
+		connect(
+			act, &QAction::triggered, this,
+			[this, tile]() {
+				if (obs_source_t *s = tile_source(data, tile)) {
+					const QImage image = render_source_image(s);
+					if (!image.isNull())
+						QGuiApplication::clipboard()->setImage(image);
+				}
+			},
+			Qt::QueuedConnection);
+
+		act = popup.addAction(QString::fromUtf8(obs_module_text("dock.menu.capture")));
+		connect(
+			act, &QAction::triggered, this,
+			[this, tile]() {
+				obs_source_t *s = tile_source(data, tile);
+				if (!s)
+					return;
+				uint8_t stack[64];
+				calldata_t cd;
+				calldata_init_fixed(&cd, stack, sizeof(stack));
+				proc_handler_call(obs_source_get_proc_handler(s), "va_snapshot", &cd);
+				if (btnCompare && !btnCompare->isChecked())
+					btnCompare->setChecked(true);
+			},
+			Qt::QueuedConnection);
 
 		popup.addSeparator();
 	} else if (data->solo >= 0) {
@@ -3397,6 +3561,14 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 			pthread_mutex_unlock(&data->mutex);
 		});
 		vbox->addWidget(show);
+		auto *status = new QCheckBox(QString::fromUtf8(obs_module_text("Options.ShowStatus")), panel);
+		status->setChecked(e->show_status);
+		connect(status, &QCheckBox::toggled, this, [this, e](bool on) {
+			pthread_mutex_lock(&data->mutex);
+			e->show_status = on;
+			pthread_mutex_unlock(&data->mutex);
+		});
+		vbox->addWidget(status);
 	}
 
 	// source: the dock's ROI selection, or a source of the scope's own
