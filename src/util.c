@@ -24,6 +24,21 @@ obs_property_t *properties_add_colorspace(obs_properties_t *props, const char *n
 	return prop;
 }
 
+void properties_add_trace(obs_properties_t *props)
+{
+	obs_property_t *prop = obs_properties_add_list(props, "trace_curve", obs_module_text("Trace.Curve"),
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("Trace.Curve.Linear"), 0);
+	obs_property_list_add_int(prop, obs_module_text("Trace.Curve.Soft"), 1);
+	obs_property_list_add_int(prop, obs_module_text("Trace.Curve.Log"), 2);
+	obs_property_set_long_description(prop, obs_module_text("Trace.Curve.Tip"));
+	prop = obs_properties_add_int_slider(props, "trace_smooth", obs_module_text("Trace.Smooth"), 0, 3, 1);
+	obs_property_set_long_description(prop, obs_module_text("Trace.Smooth.Tip"));
+	prop = obs_properties_add_int_slider(props, "persistence", obs_module_text("Trace.Persistence"), 0, 90, 5);
+	obs_property_int_set_suffix(prop, " %");
+	obs_property_set_long_description(prop, obs_module_text("Trace.Persistence.Tip"));
+}
+
 int calc_colorspace(int colorspace)
 {
 	if (1 <= colorspace && colorspace <= CM_CS_2100_PQ)

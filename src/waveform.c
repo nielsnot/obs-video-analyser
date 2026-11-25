@@ -60,8 +60,21 @@ struct wvs_source
 	bool tex_wv_alpha;
 	uint8_t *tex_buf[2];
 	uint32_t tex_buf_width[2];
+	bool tex_processed[2]; // curve and intensity applied already (draw with intensity 1)
 	volatile int w_tex_buf;
 	int r_tex_buf;
+
+	// how the trace is drawn
+	int trace_curve;   // 0 linear, 1 soft, 2 log
+	int trace_smooth;  // 0..3 pixels
+	float persistence; // 0..0.9
+	float *acc;        // running average of the counts, for persistence
+	size_t acc_size;
+	bool acc_valid;
+	uint32_t acc_key; // components and display the running average belongs to
+	float *blur_tmp;
+	size_t blur_size;
+	bool ref_processed;
 
 	gs_vertbuffer_t *graticule_line_vbuf;
 
@@ -208,6 +221,8 @@ static void wvs_destroy(void *data)
 
 	bfree(src->tex_buf[0]);
 	bfree(src->tex_buf[1]);
+	bfree(src->acc);
+	bfree(src->blur_tmp);
 	cm_markers_free(&src->markers);
 
 	bfree(src);
@@ -246,6 +261,10 @@ static void wvs_update(void *data, obs_data_t *settings)
 	if (src->intensity < 1)
 		src->intensity = 1;
 
+	src->trace_curve = (int)obs_data_get_int(settings, "trace_curve");
+	src->trace_smooth = (int)obs_data_get_int(settings, "trace_smooth");
+	src->persistence = (float)obs_data_get_int(settings, "persistence") / 100.0f;
+
 	src->graticule_lines = (int)obs_data_get_int(settings, "graticule_lines");
 	src->scale_labels = (int)obs_data_get_int(settings, "scale_labels");
 	src->scale_all_parts = obs_data_get_bool(settings, "scale_all_parts");
@@ -257,6 +276,9 @@ static void wvs_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "intensity", 51);
 	obs_data_set_default_int(settings, "components", COMP_RGB);
 	obs_data_set_default_int(settings, "graticule_lines", 10);
+	obs_data_set_default_int(settings, "trace_curve", 1);
+	obs_data_set_default_int(settings, "trace_smooth", 1);
+	obs_data_set_default_int(settings, "persistence", 0);
 	obs_data_set_default_int(settings, "scale_labels", SCALE_PERCENT);
 	obs_data_set_default_bool(settings, "out_highlight", true);
 	obs_data_set_default_double(settings, "out_hi", 100.0);
@@ -311,6 +333,7 @@ static obs_properties_t *wvs_get_properties(void *data)
 	properties_add_colorspace(props, "colorspace", obs_module_text("Color space"));
 
 	obs_properties_add_int(props, "intensity", obs_module_text("Intensity"), 1, 255, 1);
+	properties_add_trace(props);
 	prop = obs_properties_add_list(props, "graticule_lines", obs_module_text("Graticule"), OBS_COMBO_TYPE_LIST,
 				       OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(prop, obs_module_text("None"), 0);
@@ -513,6 +536,88 @@ static inline void wvs_draw_waveform(struct wvs_source *src, uint8_t *dbuf, cons
 	}
 }
 
+/* The look of the trace: persistence over frames, smoothing and a density curve with the intensity, written back as
+ * 0..255 to be drawn with intensity 1. Returns false when nothing was asked (linear, no smoothing, no persistence):
+ * the counts are drawn as before then. Colorize keeps its colors in B, G, R: only the count in A is shaped. */
+static bool wvs_post_process(struct wvs_source *src, uint8_t *buf, uint32_t width)
+{
+	const int curve = src->trace_curve;
+	const int smooth = src->colorize ? 0 : (src->trace_smooth > 3 ? 3 : src->trace_smooth);
+	const float keep = fminf(fmaxf(src->persistence, 0.0f), 0.9f);
+	if (curve == 0 && smooth == 0 && keep <= 0.0f) {
+		src->acc_valid = false;
+		return false;
+	}
+	const size_t n = (size_t)width * WV_SIZE * 4;
+	if (src->acc_size != n) {
+		bfree(src->acc);
+		src->acc = bzalloc(n * sizeof(float));
+		src->acc_size = n;
+		src->acc_valid = false;
+	}
+	const uint32_t key = src->components * 16 + (uint32_t)src->display * 2 + (src->colorize ? 1 : 0);
+	if (key != src->acc_key)
+		src->acc_valid = false;
+	src->acc_key = key;
+	const int c0 = src->colorize ? 3 : 0;
+	const float add = src->acc_valid ? 1.0f - keep : 1.0f, old = src->acc_valid ? keep : 0.0f;
+	for (size_t i = 0; i < n; i += 4)
+		for (int c = c0; c < 4; c++)
+			src->acc[i + c] = src->acc[i + c] * old + buf[i + c] * add;
+	src->acc_valid = true;
+
+	const float *val = src->acc;
+	if (smooth > 0) {
+		// a box blur across columns and levels, per channel
+		if (src->blur_size != n) {
+			bfree(src->blur_tmp);
+			src->blur_tmp = bzalloc(n * 2 * sizeof(float));
+			src->blur_size = n;
+		}
+		float *tmp = src->blur_tmp, *out = src->blur_tmp + n;
+		const int w = (int)width, r = smooth;
+		const float norm = 1.0f / (2 * r + 1);
+		for (int y = 0; y < WV_SIZE; y++)
+			for (int c = 0; c < 4; c++) {
+				const float *row = src->acc + (size_t)y * w * 4 + c;
+				float sum = 0.0f;
+				for (int x = -r; x <= r; x++)
+					sum += row[(x < 0 ? 0 : x >= w ? w - 1 : x) * 4];
+				for (int x = 0; x < w; x++) {
+					tmp[((size_t)y * w + x) * 4 + c] = sum * norm;
+					const int xo = x - r, xi = x + r + 1;
+					sum += row[(xi >= w ? w - 1 : xi) * 4] - row[(xo < 0 ? 0 : xo) * 4];
+				}
+			}
+		for (int x = 0; x < w; x++)
+			for (int c = 0; c < 4; c++) {
+				float sum = 0.0f;
+				for (int y = -r; y <= r; y++)
+					sum += tmp[((size_t)(y < 0 ? 0 : y) * w + x) * 4 + c];
+				for (int y = 0; y < WV_SIZE; y++) {
+					out[((size_t)y * w + x) * 4 + c] = sum * norm;
+					const int yo = y - r, yi = y + r + 1;
+					sum += tmp[((size_t)(yi >= WV_SIZE ? WV_SIZE - 1 : yi) * w + x) * 4 + c] -
+					       tmp[((size_t)(yo < 0 ? 0 : yo) * w + x) * 4 + c];
+				}
+			}
+		val = out;
+	}
+	// a blurred point spreads its count: scale up so a lone line keeps about its brightness
+	const float spread = smooth > 0 ? (float)(2 * smooth + 1) * 0.6f : 1.0f;
+	const float k = src->intensity / 255.0f * spread;
+	const float log_norm = 1.0f / logf(17.0f);
+	for (size_t i = 0; i < n; i += 4)
+		for (int c = c0; c < 4; c++) {
+			const float x = val[i + c] * k;
+			float v = curve == 1 ? 1.0f - expf(-x) : curve == 2 ? logf(1.0f + 16.0f * x) * log_norm : x;
+			if (v > 1.0f)
+				v = 1.0f;
+			buf[i + c] = (uint8_t)(v * 255.0f + 0.5f);
+		}
+	return true;
+}
+
 static void wvs_set_image(struct wvs_source *src, const uint8_t *tex_buf, uint32_t width)
 {
 	// YRGB keeps luma in the fourth channel, so it needs a texture with alpha.
@@ -541,22 +646,6 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		return;
 
 	ensure_tex_buf_size(src, surface_data->width, src->w_tex_buf);
-	if (surface_data->yuv_data) {
-		static uint64_t last_log;
-		const uint64_t now = os_gettime_ns();
-		if (now - last_log > 3000000000ULL) {
-			last_log = now;
-			uint64_t n = 0, masked = 0;
-			for (uint32_t y = 0; y < surface_data->height; y += 4)
-				for (uint32_t x = 0; x < surface_data->width; x += 4, n++)
-					masked +=
-						surface_data->yuv_data[(size_t)surface_data->linesize * y + x * 4 + 3] ==
-						0;
-			blog(LOG_INFO, "[" PLUGIN_NAME "] waveform input %ux%u, %.0f%% masked", surface_data->width,
-			     surface_data->height, n ? 100.0 * masked / n : 0.0);
-		}
-	}
-
 	const bool ext = surface_data->ext_data && !(src->components & COMP_UV);
 	if (ext)
 		snprintf(src->ext_desc, sizeof(src->ext_desc), "%s",
@@ -636,6 +725,7 @@ static void wvs_surface_cb(void *data, struct cm_surface_data *surface_data)
 		}
 		src->w_side ^= 1;
 	}
+	src->tex_processed[src->w_tex_buf] = wvs_post_process(src, src->tex_buf[src->w_tex_buf], surface_data->width);
 	src->w_tex_buf ^= 1;
 }
 
@@ -721,6 +811,7 @@ static void wvs_take_snapshot(struct wvs_source *src)
 		src->ref_width = width;
 	}
 	memcpy(src->ref_buf, cur, size);
+	src->ref_processed = src->tex_processed[src->r_tex_buf];
 	src->ref_alpha = is_yrgb(src->components);
 	src->ref_dirty = true;
 }
@@ -748,7 +839,8 @@ static void render_reference(struct wvs_source *src)
 		mode = 2.0f;
 	}
 	gs_effect_set_texture(gs_effect_get_param_by_name(e, "ref_image"), src->tex_ref);
-	gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"), (float)src->intensity);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"),
+			    src->ref_processed ? 1.0f : (float)src->intensity);
 	gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_mode"), mode);
 	gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_n"), (float)n);
 	gs_effect_set_float(gs_effect_get_param_by_name(e, "ref_yrgb"), src->ref_alpha ? 1.0f : 0.0f);
@@ -763,7 +855,8 @@ static void render_waveform(struct wvs_source *src)
 {
 	gs_effect_t *effect = src->effect ? src->effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), src->tex_wv);
-	gs_effect_set_float(gs_effect_get_param_by_name(effect, "intensity"), (float)src->intensity);
+	gs_effect_set_float(gs_effect_get_param_by_name(effect, "intensity"),
+			    src->tex_processed[src->r_tex_buf] ? 1.0f : (float)src->intensity);
 	const char *name = "Draw";
 	int w = src->tex_wv_width;
 	int h = WV_SIZE;

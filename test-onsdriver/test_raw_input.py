@@ -28,7 +28,7 @@ def notice(msg):
 def dock_data(target=SOURCE):
     'A dock on the clip with a luma waveform, without graticule, labels or min/max lines.'
     scopes = [{'type': 'waveform', 'label': 'Waveform', 'show_label': False, 'use_roi': True, 'target': '',
-               'prop': {'target_scale': 2, 'components': 0x20, 'display': 0, 'intensity': 255,
+               'prop': {'target_scale': 2, 'components': 0x20, 'trace_curve': 0, 'trace_smooth': 0, 'display': 0, 'intensity': 255,
                         'graticule_lines': 0, 'scale_labels': 0, 'minmax': False, 'out_highlight': False, 'hdr_ref': False,
                         'ext_guides': False}}]
     return {'docks': [{

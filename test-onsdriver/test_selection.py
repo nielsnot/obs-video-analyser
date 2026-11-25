@@ -33,7 +33,7 @@ def dock_data():
             'type': 'vectorscope',
             'label': 'VS', 'show_label': False, 'use_roi': True, 'target': '',
             'prop': {'graticule': 0, 'ring_scale': False, 'hue_ring': False, 'vs_style': 0,
-                     'intensity': 255, 'color_type': 0, 'target_scale': 2},
+                     'intensity': 255, 'color_type': 0, 'target_scale': 2, 'trace_curve': 0, 'trace_smooth': 0},
         },
         {
             'type': 'falsecolor',

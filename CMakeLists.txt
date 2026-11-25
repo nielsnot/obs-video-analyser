@@ -65,6 +65,7 @@ set(PLUGIN_SOURCES
 	src/datascope.c
 	src/skintone.c
 	src/vectorscope.c
+	src/vs-trace.c
 	src/waveform.c
 	src/histogram.c
 	src/zebra.c

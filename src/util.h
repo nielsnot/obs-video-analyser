@@ -8,6 +8,9 @@ extern "C" {
 
 void property_list_add_sources(obs_property_t *prop, obs_source_t *self);
 obs_property_t *properties_add_colorspace(obs_properties_t *props, const char *name, const char *description);
+/* How a trace is drawn (waveform, vectorscope): density curve (trace_curve), smoothing (trace_smooth, 0..3 pixels)
+ * and persistence (persistence, 0..90 % of the previous frames). */
+void properties_add_trace(obs_properties_t *props);
 
 /* Color spaces of the analyzed signal. 1 and 2 are SDR R'G'B' with that matrix;
  * CM_CS_2100_HLG captures in linear float and encodes to Rec. 2100 HLG with Rec. 2020 primaries

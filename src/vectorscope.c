@@ -9,6 +9,7 @@
 #include "util.h"
 #include "text-render.h"
 #include "markers.h"
+#include "vs-trace.h"
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -58,9 +59,21 @@ struct vss_source
 	struct cm_source cm;
 
 	gs_texture_t *tex_vs;
-	uint8_t *tex_buf[2];
+	uint32_t *tex_buf[2];   // RGBA trace, built on the capture thread
+	uint8_t *bright_buf[2]; // its brightness, for a snapshot
 	int tex_cs[2];
 	volatile int w_tex_buf;
+	struct vst_state trace;
+
+	// how the trace is shown
+	int projection;    // vst_projection
+	int layout;        // vst_layout
+	float hue_rot;     // degrees
+	bool expand_low;   // low saturations larger
+	int trace_curve;   // vst_curve
+	int trace_smooth;  // 0..3 pixels
+	float persistence; // 0..0.9
+	bool color_bg;     // the tinted background
 
 	struct cm_image graticule_img;
 	gs_vertbuffer_t *graticule_vbuf;
@@ -178,6 +191,9 @@ static void vss_destroy(void *data)
 
 	bfree(src->tex_buf[0]);
 	bfree(src->tex_buf[1]);
+	bfree(src->bright_buf[0]);
+	bfree(src->bright_buf[1]);
+	vst_free(&src->trace);
 	bfree(src->ref_buf);
 	cm_markers_free(&src->markers);
 	bfree(src);
@@ -221,6 +237,14 @@ static void vss_update(void *data, obs_data_t *settings)
 	src->sat_alert = (int)obs_data_get_int(settings, "sat_alert");
 	src->sat_max_ring = obs_data_get_bool(settings, "sat_max_ring");
 	src->luma_range = (int)obs_data_get_int(settings, "luma_range");
+	src->projection = (int)obs_data_get_int(settings, "vs_projection");
+	src->layout = (int)obs_data_get_int(settings, "vs_layout");
+	src->hue_rot = (float)obs_data_get_int(settings, "hue_rot");
+	src->expand_low = obs_data_get_bool(settings, "expand_low");
+	src->trace_curve = (int)obs_data_get_int(settings, "trace_curve");
+	src->trace_smooth = (int)obs_data_get_int(settings, "trace_smooth");
+	src->persistence = (float)obs_data_get_int(settings, "persistence") / 100.0f;
+	src->color_bg = obs_data_get_bool(settings, "color_bg");
 
 	int graticule_skintone_color = (int)obs_data_get_int(settings, "graticule_skintone_color") & 0xFFFFFF;
 	if (graticule_skintone_color != src->graticule_skintone_color) {
@@ -247,6 +271,10 @@ static void vss_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "targets_100", true);
 	obs_data_set_default_int(settings, "sat_alert", 0);
 	obs_data_set_default_bool(settings, "sat_max_ring", false);
+	obs_data_set_default_int(settings, "trace_curve", VST_SOFT);
+	obs_data_set_default_int(settings, "trace_smooth", 1);
+	obs_data_set_default_int(settings, "persistence", 0);
+	obs_data_set_default_bool(settings, "color_bg", true);
 }
 
 static obs_properties_t *vss_get_properties(void *data)
@@ -259,6 +287,23 @@ static obs_properties_t *vss_get_properties(void *data)
 	cm_get_properties(&src->cm, props);
 
 	obs_properties_add_int(props, "intensity", obs_module_text("Intensity"), 1, 255, 1);
+	properties_add_trace(props);
+
+	prop = obs_properties_add_list(props, "vs_projection", obs_module_text("VS.Prop.Projection"),
+				       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Projection.CbCr"), VST_CBCR);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Projection.HSV"), VST_HSV);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Projection.Opponent"), VST_OPPONENT);
+	prop = obs_properties_add_list(props, "vs_layout", obs_module_text("VS.Prop.Layout"), OBS_COMBO_TYPE_LIST,
+				       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Layout.Circle"), VST_CIRCLE);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Layout.Semicircle"), VST_SEMICIRCLE);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Layout.Rectangle"), VST_RECTANGLE);
+	obs_property_list_add_int(prop, obs_module_text("VS.Prop.Layout.Quadrant"), VST_QUADRANT);
+	prop = obs_properties_add_int_slider(props, "hue_rot", obs_module_text("VS.Prop.HueRot"), -180, 180, 1);
+	obs_property_int_set_suffix(prop, "\xc2\xb0");
+	obs_properties_add_bool(props, "expand_low", obs_module_text("VS.Prop.ExpandLow"));
+	obs_properties_add_bool(props, "color_bg", obs_module_text("VS.Prop.ColorBg"));
 
 	prop = obs_properties_add_list(props, "color_type", obs_module_text("VS.Prop.ColorType"), OBS_COMBO_TYPE_LIST,
 				       OBS_COMBO_FORMAT_INT);
@@ -323,46 +368,23 @@ static uint32_t vss_get_height(void *data)
 	return src->cm.bypass ? cm_bypass_get_height(&src->cm) : VS_SIZE;
 }
 
-static inline float vss_draw_vectorscope(uint8_t *dbuf, struct cm_surface_data *surface_data, int luma_range)
+static void vss_params(const struct vss_source *src, int colorspace, struct vst_params *p)
 {
-	int max_d2 = 0;
-	for (int i = 0; i < VS_SIZE * VS_SIZE; i++)
-		dbuf[i] = 0;
-
-	const uint32_t height = surface_data->height;
-	const uint32_t width = surface_data->width;
-	uint8_t *vd = surface_data->yuv_data;
-	uint32_t vd_add = surface_data->linesize - width * 4;
-	for (uint32_t y = 0; y < height; y++) {
-		for (uint32_t x = 0; x < width; x++) {
-			const uint8_t u = *vd++;
-			const uint8_t luma = *vd++;
-			const uint8_t v = *vd++;
-			const uint8_t a = *vd++;
-			if (!a)
-				continue; // outside the selection mask
-			if ((luma_range == luma_range_lows && luma >= LUMA_LOW_MAX) ||
-			    (luma_range == luma_range_mids && (luma < LUMA_LOW_MAX || luma >= LUMA_HIGH_MIN)) ||
-			    (luma_range == luma_range_highs && luma < LUMA_HIGH_MIN))
-				continue;
-			uint8_t *c = dbuf + (u + VS_SIZE * (255 - v));
-			if (*c < 255)
-				++*c;
-			const int du = u - 128, dv = v - 128;
-			if (du * du + dv * dv > max_d2)
-				max_d2 = du * du + dv * dv;
-		}
-		vd += vd_add;
-	}
-	return sqrtf((float)max_d2) / 127.0f;
+	p->projection = src->projection;
+	p->layout = src->layout;
+	p->hue_rot = src->hue_rot;
+	p->expand = src->expand_low;
+	p->colorspace = colorspace;
+	p->luma = src->luma_range;
 }
 
-static void vss_set_image(struct vss_source *src, const uint8_t *tex_buf)
+static void vss_set_image(struct vss_source *src, const uint32_t *tex_buf)
 {
+	const uint8_t *data = (const uint8_t *)tex_buf;
 	if (!src->tex_vs)
-		src->tex_vs = gs_texture_create(VS_SIZE, VS_SIZE, GS_R8, 1, &tex_buf, GS_DYNAMIC);
+		src->tex_vs = gs_texture_create(VS_SIZE, VS_SIZE, GS_RGBA, 1, &data, GS_DYNAMIC);
 	else
-		gs_texture_set_image(src->tex_vs, tex_buf, VS_SIZE, false);
+		gs_texture_set_image(src->tex_vs, data, VS_SIZE * 4, false);
 }
 
 static void vss_surface_cb(void *data, struct cm_surface_data *surface_data)
@@ -372,14 +394,25 @@ static void vss_surface_cb(void *data, struct cm_surface_data *surface_data)
 	if (!surface_data->yuv_data)
 		return;
 
-	if (!src->tex_buf[src->w_tex_buf])
-		src->tex_buf[src->w_tex_buf] = bzalloc(VS_SIZE * VS_SIZE);
+	const int w = src->w_tex_buf;
+	if (!src->tex_buf[w])
+		src->tex_buf[w] = bzalloc(VS_SIZE * VS_SIZE * 4);
+	if (!src->bright_buf[w])
+		src->bright_buf[w] = bzalloc(VS_SIZE * VS_SIZE);
 
 	PROFILE_START(prof_draw_vectorscope_name);
-	src->max_sat = vss_draw_vectorscope(src->tex_buf[src->w_tex_buf], surface_data, src->luma_range);
+	struct vst_params p;
+	vss_params(src, surface_data->colorspace, &p);
+	vst_accumulate(&src->trace, &p, surface_data->yuv_data, surface_data->width, surface_data->height,
+		       surface_data->linesize, src->persistence);
+	vst_build(&src->trace, src->trace_curve, (float)src->intensity, src->trace_smooth,
+		  src->color_type == color_type_uv);
+	memcpy(src->tex_buf[w], src->trace.rgba, VS_SIZE * VS_SIZE * 4);
+	memcpy(src->bright_buf[w], src->trace.bright, VS_SIZE * VS_SIZE);
+	src->max_sat = src->trace.max_sat;
 	PROFILE_END(prof_draw_vectorscope_name);
 
-	src->tex_cs[src->w_tex_buf] = surface_data->colorspace;
+	src->tex_cs[w] = surface_data->colorspace;
 
 	src->w_tex_buf ^= 1;
 }
@@ -754,6 +787,162 @@ static void draw_modern_graticule(struct vss_source *src, int colorspace)
 	}
 }
 
+/* ---------- other projections and layouts ---------- */
+
+/* The hue at a direction of the projection, as a full color. */
+static void angle_rgb(const struct vst_params *p, float a, float *r, float *g, float *b)
+{
+	if (p->projection == VST_CBCR) {
+		hue_rgb(p->colorspace, a, r, g, b);
+		return;
+	}
+	float rr, gg, bb;
+	if (p->projection == VST_HSV) {
+		float h = fmodf((a - 103.0f * (float)M_PI / 180.0f) / ((float)M_PI / 3.0f), 6.0f);
+		if (h < 0.0f)
+			h += 6.0f;
+		const float x = 1.0f - fabsf(fmodf(h, 2.0f) - 1.0f);
+		const int k = (int)h;
+		rr = k == 0 || k == 5 ? 1.0f : k == 1 || k == 4 ? x : 0.0f;
+		gg = k == 1 || k == 2 ? 1.0f : k == 0 || k == 3 ? x : 0.0f;
+		bb = k == 3 || k == 4 ? 1.0f : k == 2 || k == 5 ? x : 0.0f;
+	} else {
+		// opponent: R-G across, (R+G)/2-B up
+		const float x = cosf(a), y = sinf(a);
+		rr = y + 0.5f * x, gg = y - 0.5f * x, bb = 0.0f;
+	}
+	const float mn = fminf(rr, fminf(gg, bb)), mx = fmaxf(rr, fmaxf(gg, bb));
+	const float d = fmaxf(mx - mn, 1e-4f);
+	*r = (rr - mn) / d, *g = (gg - mn) / d, *b = (bb - mn) / d;
+}
+
+#define N_ANGLES 144
+
+/* The tinted background of a layout, darker in the middle, in the hue of every direction. */
+static void draw_generic_background(const struct vst_params *p)
+{
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFFFFFFF);
+	while (gs_effect_loop(solid, "SolidColored")) {
+		gs_render_start(false);
+		for (int i = 0; i < N_ANGLES; i++) {
+			const float a0 = (float)i * 2.0f * (float)M_PI / N_ANGLES;
+			const float a1 = (float)(i + 1) * 2.0f * (float)M_PI / N_ANGLES;
+			float x00, y00, x01, y01, x10, y10, x11, y11;
+			const bool v0 = vst_map(p, a0, 0.999f, &x01, &y01), v1 = vst_map(p, a1, 0.999f, &x11, &y11);
+			vst_map(p, a0, 0.0f, &x00, &y00);
+			vst_map(p, a1, 0.0f, &x10, &y10);
+			if (!v0 || !v1 || fabsf(x11 - x01) > 40.0f)
+				continue;
+			float r, g, b;
+			angle_rgb(p, (a0 + a1) * 0.5f, &r, &g, &b);
+			const uint32_t outer = abgr(0.03f + r * 0.2f, 0.03f + g * 0.2f, 0.03f + b * 0.2f, 0xFF);
+			const uint32_t inner = 0xFF060607;
+			gs_color(inner), gs_vertex2f(x00, y00);
+			gs_color(outer), gs_vertex2f(x01, y01);
+			gs_color(outer), gs_vertex2f(x11, y11);
+			gs_color(inner), gs_vertex2f(x00, y00);
+			gs_color(outer), gs_vertex2f(x11, y11);
+			gs_color(inner), gs_vertex2f(x10, y10);
+		}
+		gs_render_stop(GS_TRIS);
+	}
+}
+
+/* A ring at a saturation: line pieces between the visible directions. */
+static void generic_ring(const struct vst_params *p, float radius)
+{
+	gs_render_start(false);
+	for (int i = 0; i < N_ANGLES; i++) {
+		const float a0 = (float)i * 2.0f * (float)M_PI / N_ANGLES;
+		const float a1 = (float)(i + 1) * 2.0f * (float)M_PI / N_ANGLES;
+		float x0, y0, x1, y1;
+		if (!vst_map(p, a0, radius, &x0, &y0) || !vst_map(p, a1, radius, &x1, &y1) || fabsf(x1 - x0) > 40.0f)
+			continue;
+		gs_vertex2f(x0, y0);
+		gs_vertex2f(x1, y1);
+	}
+	gs_render_stop(GS_LINES);
+}
+
+/* Rings at 25 to 100 %, the skin tone line and the 75 % color targets, wherever the projection and layout put
+ * them. */
+static void draw_generic_graticule(const struct vss_source *src, const struct vst_params *p)
+{
+	const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_eparam_t *col = gs_effect_get_param_by_name(solid, "color");
+	gs_effect_set_color(col, 0x40FFFFFF);
+	while (gs_effect_loop(solid, "Solid"))
+		for (int r = 1; r <= 3; r++)
+			generic_ring(p, r / 4.0f);
+	gs_effect_set_color(col, 0x70FFFFFF);
+	while (gs_effect_loop(solid, "Solid")) {
+		generic_ring(p, 0.999f);
+		// the straight edges of a semicircle, quadrant or rectangle
+		gs_render_start(false);
+		switch (p->layout) {
+		case VST_SEMICIRCLE:
+			gs_vertex2f(5.0f, 250.0f), gs_vertex2f(250.0f, 250.0f);
+			break;
+		case VST_QUADRANT:
+			gs_vertex2f(6.0f, 6.0f), gs_vertex2f(6.0f, 250.0f);
+			gs_vertex2f(6.0f, 250.0f), gs_vertex2f(250.0f, 250.0f);
+			break;
+		case VST_RECTANGLE:
+			gs_vertex2f(2.0f, 4.0f), gs_vertex2f(254.0f, 4.0f);
+			gs_vertex2f(254.0f, 4.0f), gs_vertex2f(254.0f, 252.0f);
+			gs_vertex2f(254.0f, 252.0f), gs_vertex2f(2.0f, 252.0f);
+			gs_vertex2f(2.0f, 252.0f), gs_vertex2f(2.0f, 4.0f);
+			break;
+		default:
+			gs_vertex2f(0.0f, 0.0f), gs_vertex2f(0.0f, 0.0f);
+		}
+		gs_render_stop(GS_LINES);
+	}
+
+	// skin tone line
+	{
+		const int c = src->graticule_skintone_color;
+		float a, rad, x0, y0, x1, y1;
+		vst_polar_rgb(p, (c & 0xFF) / 255.0f, (c >> 8 & 0xFF) / 255.0f, (c >> 16 & 0xFF) / 255.0f, &a, &rad);
+		vst_map(p, a, 0.0f, &x0, &y0);
+		if (vst_map(p, a, 0.999f, &x1, &y1)) {
+			gs_effect_set_color(col, 0x80FFFFFF);
+			while (gs_effect_loop(solid, "Solid")) {
+				gs_render_start(false);
+				gs_vertex2f(x0, y0);
+				gs_vertex2f(x1, y1);
+				gs_render_stop(GS_LINES);
+			}
+		}
+	}
+
+	// the 75 % color targets
+	static const char *names[6] = {"R", "Y", "G", "C", "B", "M"};
+	static const float bars[6][3] = {{1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}, {1, 0, 1}};
+	for (int i = 0; i < 6; i++) {
+		float a, rad, x, y;
+		vst_polar_rgb(p, bars[i][0] * 0.75f, bars[i][1] * 0.75f, bars[i][2] * 0.75f, &a, &rad);
+		if (!vst_map(p, a, rad, &x, &y))
+			continue;
+		const uint32_t argb = 0xFF000000 | (uint32_t)(bars[i][0] * 200 + 55) << 16 |
+				      (uint32_t)(bars[i][1] * 200 + 55) << 8 | (uint32_t)(bars[i][2] * 200 + 55);
+		gs_effect_set_color(col, argb);
+		const float h = 3.5f;
+		while (gs_effect_loop(solid, "Solid")) {
+			gs_render_start(false);
+			gs_vertex2f(x - h, y - h), gs_vertex2f(x + h, y - h);
+			gs_vertex2f(x + h, y - h), gs_vertex2f(x + h, y + h);
+			gs_vertex2f(x + h, y + h), gs_vertex2f(x - h, y + h);
+			gs_vertex2f(x - h, y + h), gs_vertex2f(x - h, y - h);
+			gs_render_stop(GS_LINES);
+		}
+		text_draw(&ts, names[i], x + 6.0f * ts.ux, y - 6.0f * ts.uy, 10.0f, argb, TEXT_ALIGN_LEFT,
+			  TEXT_VALIGN_BOTTOM);
+	}
+}
+
 /* The skin tone line's direction (radians) from its color, or a negative value when it has none. */
 static float skin_angle(const struct vss_source *src, int colorspace)
 {
@@ -904,79 +1093,55 @@ static void vss_render(void *data, gs_effect_t *effect)
 
 	cm_render_target(&src->cm);
 
+	const int r_tex_buf = src->w_tex_buf ^ 1;
+	const int cs = src->tex_cs[r_tex_buf];
+	struct vst_params params;
+	vss_params(src, cs, &params);
+	const bool plain = vst_is_plain(&params);
 	const bool modern = src->style == VS_STYLE_MODERN;
-	if (modern)
-		draw_modern_disc(src->tex_cs[src->w_tex_buf ^ 1]);
+	if (plain && modern && src->color_bg)
+		draw_modern_disc(cs);
+	else if (!plain && src->color_bg)
+		draw_generic_background(&params);
 
 	const bool b_zoom = src->zoom > 1.01f;
 	if (b_zoom) {
-		float zoom = src->zoom;
-		float ofst = 127.5f * (1.0f - zoom);
+		// magnify around the middle of the layout (the corner of a quadrant, the bottom of a semicircle)
+		float ox = 127.5f, oy = 127.5f;
+		vst_map(&params, 0.0f, 0.0f, &ox, &oy);
+		const float zoom = src->zoom;
 		struct matrix4 tr = {
 			{.ptr = {zoom, 0.0f, 0.0f, 0.0f}},
 			{.ptr = {0.0f, zoom, 0.0f, 0.0f}},
 			{.ptr = {0.0f, 0.0f, 1.0f, 0.0f}},
-			{.ptr = {ofst, ofst, 0.0f, 1.0f}},
+			{.ptr = {ox * (1.0f - zoom), oy * (1.0f - zoom), 0.0f, 1.0f}},
 		};
 		gs_matrix_push();
 		gs_matrix_mul(&tr);
 	}
 
 	PROFILE_START(prof_draw_name);
-	int r_tex_buf = src->w_tex_buf ^ 1;
 	if (src->want_snapshot) {
 		src->want_snapshot = false;
-		if (src->tex_buf[r_tex_buf]) {
+		if (src->bright_buf[r_tex_buf]) {
 			if (!src->ref_buf)
 				src->ref_buf = bmalloc(VS_SIZE * VS_SIZE);
-			memcpy(src->ref_buf, src->tex_buf[r_tex_buf], VS_SIZE * VS_SIZE);
+			memcpy(src->ref_buf, src->bright_buf[r_tex_buf], VS_SIZE * VS_SIZE);
 			src->ref_dirty = true;
 		}
 	}
-	if (src->tex_buf[r_tex_buf] && src->effect) {
+	if (src->tex_buf[r_tex_buf]) {
 		vss_set_image(src, src->tex_buf[r_tex_buf]);
-
-		gs_effect_t *effect = src->effect;
-		gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), src->tex_vs);
-		gs_effect_set_float(gs_effect_get_param_by_name(effect, "intensity"), (float)src->intensity);
-
-		switch (src->color_type) {
-		case color_type_uv:
-			if (src->tex_cs[r_tex_buf] == 1) /* BT.601 */ {
-				const struct vec4 color = {{{0.5f, 0.5f, 0.5f, 1.0f}}};
-				const struct vec3 color_u = {{{0.0f, -0.3441f, +1.772f, 0.0f}}};
-				const struct vec3 color_v = {{{+1.402f, -0.7141f, 0.0f, 0.0f}}};
-				gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
-				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_u"), &color_u);
-				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_v"), &color_v);
-			} else if (cm_cs_is_hdr(src->tex_cs[r_tex_buf])) /* BT.2020 */ {
-				const struct vec4 color = {{{0.5f, 0.5f, 0.5f, 1.0f}}};
-				const struct vec3 color_u = {{{0.0f, -0.16455f, +1.8814f, 0.0f}}};
-				const struct vec3 color_v = {{{+1.4746f, -0.57135f, 0.0f, 0.0f}}};
-				gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
-				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_u"), &color_u);
-				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_v"), &color_v);
-			} else /* BT.709 */ {
-				const struct vec4 color = {{{0.5f, 0.5f, 0.5f, 1.0f}}};
-				const struct vec3 color_u = {{{0.0f, -0.1873f, +1.8556f, 0.0f}}};
-				const struct vec3 color_v = {{{+1.5748f, -0.4681f, 0.0f, 0.0f}}};
-				gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
-				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_u"), &color_u);
-				gs_effect_set_vec3(gs_effect_get_param_by_name(effect, "color_v"), &color_v);
-			}
-			break;
-		case color_type_white:
-		default:
-			gs_effect_set_default(gs_effect_get_param_by_name(effect, "color"));
-		}
-
-		// over the tinted disc the trace is added, so the disc shows where there is no trace
+		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->tex_vs);
+		// over a background the trace is added, so the background shows where there is no trace
 		gs_blend_state_push();
-		if (modern)
+		if ((plain && modern && src->color_bg) || (!plain && src->color_bg))
 			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
-		while (gs_effect_loop(effect, "Draw")) {
+		else
+			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+		while (gs_effect_loop(def, "Draw"))
 			gs_draw_sprite(src->tex_vs, 0, VS_SIZE, VS_SIZE);
-		}
 		gs_blend_state_pop();
 	}
 	if (src->compare && src->ref_buf && src->effect) {
@@ -988,7 +1153,7 @@ static void vss_render(void *data, gs_effect_t *effect)
 		src->ref_dirty = false;
 		gs_effect_t *e = src->effect;
 		gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), src->tex_ref);
-		gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"), (float)src->intensity);
+		gs_effect_set_float(gs_effect_get_param_by_name(e, "intensity"), 1.0f);
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
 		while (gs_effect_loop(e, "DrawRef"))
@@ -1003,6 +1168,12 @@ static void vss_render(void *data, gs_effect_t *effect)
 		gs_matrix_pop();
 
 	PROFILE_START(prof_draw_graticule_name);
+	if (!plain) {
+		if (src->graticule)
+			draw_generic_graticule(src, &params);
+		PROFILE_END(prof_draw_graticule_name);
+		goto label;
+	}
 	if (modern && src->graticule)
 		draw_modern_graticule(src, src->tex_cs[r_tex_buf]);
 	if (!modern && src->graticule_img.loaded && src->graticule && src->effect) {
@@ -1031,9 +1202,9 @@ static void vss_render(void *data, gs_effect_t *effect)
 
 	vss_render_markers(src);
 
+label:
 	// which matrix the scope uses
 	{
-		const int cs = src->tex_cs[src->w_tex_buf ^ 1];
 		const struct text_scale ts = text_scale_from_viewport((float)VS_SIZE, (float)VS_SIZE);
 		text_draw(&ts,
 			  cs == CM_CS_601    ? "Rec. 601"
@@ -1102,6 +1273,10 @@ static void vss_mouse_click(void *data, const struct obs_mouse_event *event, int
 	struct vss_source *src = data;
 	if (!src->marker_edit || type != MOUSE_LEFT || click_count > 1)
 		return;
+	struct vst_params params;
+	vss_params(src, CM_CS_709, &params);
+	if (!vst_is_plain(&params))
+		return; // markers are placed on the plain Cb/Cr circle only
 	float hue, sat;
 	pos_to_hue_sat(event->x, event->y, &hue, &sat);
 	if (!mouse_up) {

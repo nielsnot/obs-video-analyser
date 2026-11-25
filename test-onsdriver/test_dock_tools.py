@@ -28,7 +28,7 @@ def scope(kind, label, prop=None):
 
 def dock_data():
     'A dock with two views: a waveform, and a histogram.'
-    wv = scope('waveform', 'WV', {'components': 0x20, 'display': 0, 'intensity': 255, 'graticule_lines': 0,
+    wv = scope('waveform', 'WV', {'components': 0x20, 'trace_curve': 0, 'trace_smooth': 0, 'display': 0, 'intensity': 255, 'graticule_lines': 0,
                                   'scale_labels': 0, 'minmax': False, 'out_highlight': False, 'hdr_ref': False,
                                   'ext_guides': False})
     wv['show_label'] = False
