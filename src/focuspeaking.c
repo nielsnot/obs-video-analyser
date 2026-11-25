@@ -7,6 +7,12 @@
 #include "obs-convenience.h"
 #include "common.h"
 #include "util.h"
+#include "text-render.h"
+#include "draw-util.h"
+#include <util/threading.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifdef ENABLE_PROFILE
 #define PROFILE_START(x) profile_start(x)
@@ -35,6 +41,15 @@ struct fps_source
 {
 	struct cm_source cm;
 	struct fp_source fp;
+
+	// focus meter: the strength of the sharpest edges, and the best seen while turning the focus
+	bool meter;
+	float hold_s; // how long the best value stays
+	pthread_mutex_t mutex;
+	float focus;      // smoothed, 0..100
+	float best;       // held best
+	uint64_t best_ns; // when the best was seen
+	bool has_focus;
 };
 
 struct fpf_source
@@ -59,12 +74,57 @@ static void fp_init(struct fp_source *src)
 	obs_leave_graphics();
 }
 
+/* The focus value of a picture: the mean of the strongest 1 % of the luma gradients, scaled so a crisp picture
+ * reads about 60..100. It depends on the subject; what counts is the peak while turning the focus. */
+static void fps_surface_cb(void *data, struct cm_surface_data *sd)
+{
+	struct fps_source *src = data;
+	if (!src->meter || !sd->yuv_data || sd->width < 3 || sd->height < 3)
+		return;
+	uint32_t hist[512] = {0};
+	uint64_t n = 0;
+	for (uint32_t y = 1; y + 1 < sd->height; y++) {
+		const uint8_t *a = sd->yuv_data + (size_t)sd->linesize * (y - 1), *m = a + sd->linesize,
+			      *c = m + sd->linesize;
+		for (uint32_t x = 1; x + 1 < sd->width; x++) {
+			const uint32_t o = x * 4 + 1;
+			if (!m[o + 2])
+				continue;
+			const int g = abs((int)m[o + 4] - (int)m[o - 4]) + abs((int)c[o] - (int)a[o]);
+			hist[g > 511 ? 511 : g]++;
+			n++;
+		}
+	}
+	if (!n)
+		return;
+	// mean of the top 1 %
+	uint64_t want = n / 100 + 1, got = 0;
+	double sum = 0.0;
+	for (int i = 511; i >= 0 && got < want; i--) {
+		const uint64_t take = hist[i] < want - got ? hist[i] : want - got;
+		sum += (double)i * take;
+		got += take;
+	}
+	const float v = fminf(100.0f, (float)(sum / got) / 1.6f);
+	const uint64_t now = os_gettime_ns();
+	pthread_mutex_lock(&src->mutex);
+	src->focus = src->has_focus ? src->focus * 0.6f + v * 0.4f : v;
+	src->has_focus = true;
+	if (src->focus >= src->best || now - src->best_ns > (uint64_t)(src->hold_s * 1e9f)) {
+		src->best = src->focus;
+		src->best_ns = now;
+	}
+	pthread_mutex_unlock(&src->mutex);
+}
+
 static void *fps_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct fps_source *src = bzalloc(sizeof(struct fps_source));
 
+	pthread_mutex_init(&src->mutex, NULL);
 	src->cm.flags = CM_FLAG_RAW_TEXTURE;
 	cm_create(&src->cm, settings, source);
+	cm_request(&src->cm, fps_surface_cb, src);
 	fp_init(&src->fp);
 
 	fps_update(src, settings);
@@ -95,6 +155,7 @@ static void fps_destroy(void *data)
 
 	cm_destroy(&src->cm);
 	fp_destroy(&src->fp);
+	pthread_mutex_destroy(&src->mutex);
 	bfree(src);
 }
 
@@ -117,6 +178,10 @@ static void fps_update(void *data, obs_data_t *settings)
 	struct fps_source *src = data;
 	cm_update(&src->cm, settings);
 	fp_update(&src->fp, settings);
+	src->meter = obs_data_get_bool(settings, "fp_meter");
+	src->hold_s = (float)obs_data_get_int(settings, "fp_hold");
+	// the meter needs the luma on the CPU; without it only the picture is captured
+	src->cm.flags = CM_FLAG_RAW_TEXTURE | (src->meter ? CM_FLAG_CONVERT_YUV : 0);
 }
 
 static void fpf_update(void *data, obs_data_t *settings)
@@ -129,6 +194,8 @@ static void fp_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "peaking_color", DEFAULT_PEAKING_COLOR);
 	obs_data_set_default_double(settings, "peaking_threshold", DEFAULT_PEAKING_THRESHOLD);
+	obs_data_set_default_bool(settings, "fp_meter", true);
+	obs_data_set_default_int(settings, "fp_hold", 5);
 }
 
 static void fp_get_properties(obs_properties_t *props)
@@ -147,6 +214,10 @@ static obs_properties_t *fps_get_properties(void *data)
 
 	cm_get_properties(&src->cm, props);
 	fp_get_properties(props);
+	obs_properties_add_bool(props, "fp_meter", obs_module_text("FocusPeaking.Prop.Meter"));
+	obs_property_t *p =
+		obs_properties_add_int_slider(props, "fp_hold", obs_module_text("FocusPeaking.Prop.Hold"), 1, 30, 1);
+	obs_property_int_set_suffix(p, " s");
 
 	return props;
 }
@@ -267,6 +338,33 @@ static void fps_render(void *data, gs_effect_t *effect)
 
 		if (src->fp.actual_size)
 			gs_matrix_pop();
+	}
+
+	if (src->meter && src->has_focus) {
+		// a bar along the bottom: the focus now, the best of the last seconds as a tick, green when at it
+		const float cx = (float)cm_bypass_get_width(&src->cm), cy = (float)cm_bypass_get_height(&src->cm);
+		if (cx > 0.0f && cy > 0.0f) {
+			float focus, best;
+			pthread_mutex_lock(&src->mutex);
+			focus = src->focus;
+			best = src->best;
+			pthread_mutex_unlock(&src->mutex);
+			const struct text_scale ts = text_scale_from_viewport(cx, cy);
+			const float h = 18.0f * ts.uy, y0 = cy - h - 6.0f * ts.uy, x0 = 8.0f * ts.ux;
+			const float x1 = cx * 0.5f, w = x1 - x0;
+			const bool at_best = best > 1.0f && focus >= best * 0.95f;
+			du_fill_rect(x0 - 4.0f * ts.ux, y0 - 4.0f * ts.uy, cx - 8.0f * ts.ux, y0 + h + 4.0f * ts.uy,
+				     0xA0000000);
+			du_fill_rect(x0, y0, x0 + w * focus / 100.0f, y0 + h, at_best ? 0xFF40D060 : 0xFFE0E0E0);
+			du_fill_rect(x0 + w * best / 100.0f - 1.5f * ts.ux, y0 - 2.0f * ts.uy,
+				     x0 + w * best / 100.0f + 1.5f * ts.ux, y0 + h + 2.0f * ts.uy, 0xFFFFC040);
+			char buf[96];
+			snprintf(buf, sizeof(buf), "%s %.0f  \xe2\x96\xb2 %.0f%s",
+				 obs_module_text("FocusPeaking.Meter"), focus, best,
+				 at_best ? obs_module_text("FocusPeaking.Meter.Best") : "");
+			text_draw(&ts, buf, x1 + 8.0f * ts.ux, y0 + h * 0.5f, 12.0f, 0xFFFFFFFF, TEXT_ALIGN_LEFT,
+				  TEXT_VALIGN_MIDDLE);
+		}
 	}
 
 	PROFILE_END(prof_render_name);
