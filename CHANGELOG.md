@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.2 (in progress)
+## 0.9.2
 
 - Plug and play with SDI cards: the raw signal of a DeckLink or AJA card is read as video range (the SDI standard),
   also when the source in OBS is set to Full range, so superwhite and sub-black are no longer squeezed into
