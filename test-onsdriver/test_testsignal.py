@@ -50,7 +50,7 @@ class TestSignalTest(obstest.OBSTest):
             json.dump(collection, fw)
         self.obs.run()
 
-    def rows(self, cl, name):
+    def rows(self, cl, name, done=lambda r: r[0] <= 3 and r[-1] >= 251):
         '''The lit rows of the waveform, after it settled. Only the left 60 % of the width: the raw signal label sits
         at the bottom right.'''
         from PIL import Image  # pylint: disable=import-outside-toplevel
@@ -65,7 +65,7 @@ class TestSignalTest(obstest.OBSTest):
             img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
             rows = [y for y in range(img.height)
                     if any(sum(img.getpixel((x, y))) > 90 for x in range(0, img.width * 6 // 10, 4))]
-            if rows and rows[0] <= 3 and rows[-1] >= 251:
+            if rows and done(rows):
                 break
         if img:
             os.makedirs('screenshots', exist_ok=True)
@@ -107,17 +107,17 @@ class TestSignalTest(obstest.OBSTest):
         self.assertLessEqual(rows[0], 3, f'109 % superwhite not at the top: row {rows[0]}')
         self.assertGreaterEqual(rows[-1], 251, f'-7 % sub-black not at the bottom: row {rows[-1]}')
 
-        cl.send('SetInputSettings', {'inputName': SOURCE, 'inputSettings': {'pattern': 3}})
-        settings = cl.send('GetInputSettings', {'inputName': SOURCE}).input_settings
-        notice(f'test signal settings after the switch: {settings}')
-        time.sleep(3.0)
-        rows = self.rows(cl, name)
+
+    def test_steps(self):
+        'The grey steps reach 109 % at the top but nothing below 0 %'
+        cl = self.obs.get_obsws()
+        cl.send('CreateInput', {'sceneName': 'Scene', 'inputName': SOURCE, 'inputKind': PREFIX + 'test_signal',
+                                'inputSettings': {'pattern': 3, 'resolution': 1080, 'fps': 25}})
+        name = [i['inputName'] for i in cl.send('GetInputList').inputs
+                if i['inputKind'].startswith(PREFIX + 'waveform_source')][0]
+        rows = self.rows(cl, name, lambda r: r[0] <= 3 and 230 <= r[-1] <= 246)
         notice(f'test signal steps: waveform rows {rows[:3]}..{rows[-3:]}')
-        self.dump(cl, SOURCE)
-        for i in cl.send('GetInputList').inputs:
-            if 'roi' in i['inputKind']:
-                notice(f"roi input {i['inputName']} {i['inputKind']}")
-                self.dump(cl, i['inputName'])
+        self.assertTrue(rows, 'the waveform draws nothing')
         self.assertLessEqual(rows[0], 3, f'the 109 % step is not at the top: row {rows[0]}')
         self.assertTrue(230 <= rows[-1] <= 246, f'the 0 % step is not at 0 %: row {rows[-1]}')
 
