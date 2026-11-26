@@ -51,8 +51,7 @@ class TestSignalTest(obstest.OBSTest):
         self.obs.run()
 
     def rows(self, cl, name, done=lambda r: r[0] <= 3 and r[-1] >= 251):
-        '''The lit rows of the waveform, after it settled. Only the left 60 % of the width: the raw signal label sits
-        at the bottom right.'''
+        'The lit rows of the waveform, after it settled.'
         from PIL import Image  # pylint: disable=import-outside-toplevel
         rows, img = [], None
         for _ in range(60):
@@ -63,8 +62,10 @@ class TestSignalTest(obstest.OBSTest):
             except Exception:  # pylint: disable=broad-except
                 continue
             img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
+            # the raw signal label sits at the bottom right: leave that corner out
             rows = [y for y in range(img.height)
-                    if any(sum(img.getpixel((x, y))) > 90 for x in range(0, img.width * 6 // 10, 4))]
+                    if any(sum(img.getpixel((x, y))) > 90 for x in range(0, img.width, 4)
+                           if not (x > img.width * 6 // 10 and y > img.height * 85 // 100))]
             if rows and done(rows):
                 break
         if img:
