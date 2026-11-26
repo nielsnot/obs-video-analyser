@@ -95,8 +95,10 @@ class TestSignalTest(obstest.OBSTest):
         cl = self.obs.get_obsws()
         cl.send('CreateInput', {'sceneName': 'Scene', 'inputName': SOURCE, 'inputKind': PREFIX + 'test_signal',
                                 'inputSettings': {'pattern': 0, 'resolution': 1080, 'fps': 25}})
-        name = [i['inputName'] for i in cl.send('GetInputList').inputs
-                if i['inputKind'].startswith(PREFIX + 'waveform_source')][0]
+        names = [i['inputName'] for i in cl.send('GetInputList').inputs
+                 if i['inputKind'].startswith(PREFIX + 'waveform_source')]
+        notice(f'waveform sources: {names}')
+        name = names[0]
         rows = self.rows(cl, name)
         filters = [f['filterKind'] for f in cl.send('GetSourceFilterList', {'sourceName': SOURCE}).filters]
         notice(f'test signal bars: filters {filters}; waveform rows {rows[:3]}..{rows[-3:]}')
