@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.4
+
+- Live and Edit mode per dock: Live shows only the scopes with Snapshot, Compare, Pause and the window buttons, no
+  quick controls on the tiles; Edit brings back every tool. The selection tools are in one *Selection* menu.
+- Window: one button (and a hotkey) takes the dock out of OBS and fills a screen; again puts it back. Right click
+  chooses the screen; the dock remembers it after a restart. F11 is full screen.
+- Signal bar under the toolbar: source, size, frame rate, raw signal or color space, LUT and pause, with a dot that
+  is green with a picture. *Compact when small* hides the toolbar, signal bar and names in a small dock.
+- Scopes between docks: *Move to dock* and *Copy to dock*, or drag a tile out of one dock onto another while
+  arranging. Ctrl+Z (or the menu) brings back a removed or replaced scope.
+- Selections: polygons, and a name for each selection shown on the picture; rename or delete them one by one.
+- Settings, Display: the + Scope menu in groups (or one list), color blind friendly status colors, one graticule
+  color for all scopes (white, amber or green) and large toolbar buttons for touch screens.
+- Update rate per scope (every frame down to 2 per second) for slower computers.
+- Waveform: the level under the pointer, and an EBU R103 low-pass filter before measuring.
+- Vectorscope: hue, saturation and the nearest color target under the pointer.
+- Zebra: stripe direction, still stripes and a skin zebra. False color: Broadcast legal (EBU R103), Cinema camera
+  style and a color blind friendly exposure preset. Fix: the PQ preset showed the custom bands.
+- Focus peaking: a focus meter with the best value of the last seconds held.
+- Audio meter: true peak (BS.1770, 4x oversampled) and loudness range (EBU Tech 3342).
+- QC: a chapter marker in the recording at every error (OBS 30.2, Hybrid MP4 / MOV) and an HTML report, on request or
+  when recording or streaming stops.
+- 3D waveform and 3D picture as lines, the 3D waveform colored by level.
+- Faces is no longer marked experimental.
+
 ## 0.9.3
 
 - Smoother traces: the waveform and the vectorscope draw with a soft response by default, so faint detail shows
