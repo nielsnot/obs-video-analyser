@@ -70,15 +70,35 @@ class TestSignalTest(obstest.OBSTest):
         if img:
             os.makedirs('screenshots', exist_ok=True)
             img.save(f'screenshots/testsignal-{int(time.time() * 1000)}.png')
+            # the picture in the log too, small, to see what the waveform drew
+            buf = io.BytesIO()
+            img.convert('L').resize((160, 128)).save(buf, 'PNG')
+            print('IMG64:' + base64.b64encode(buf.getvalue()).decode('ascii'), flush=True)
         return rows
+
+    def dump(self, cl, name):
+        'A small picture of a source in the log, to see what it shows.'
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        try:
+            data = cl.send('GetSourceScreenshot', {'sourceName': name, 'imageFormat': 'png',
+                                                   'imageWidth': 160, 'imageHeight': 90}).image_data
+        except Exception as e:  # pylint: disable=broad-except
+            notice(f'no screenshot of {name}: {e}')
+            return
+        img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, 'PNG')
+        print(f'IMG64[{name}]:' + base64.b64encode(buf.getvalue()).decode('ascii'), flush=True)
 
     def test_bars(self):
         'The bars reach 109 % and -7 % on the raw waveform; the steps reach 109 % but not below 0 %'
         cl = self.obs.get_obsws()
         cl.send('CreateInput', {'sceneName': 'Scene', 'inputName': SOURCE, 'inputKind': PREFIX + 'test_signal',
                                 'inputSettings': {'pattern': 0, 'resolution': 1080, 'fps': 25}})
-        name = [i['inputName'] for i in cl.send('GetInputList').inputs
-                if i['inputKind'].startswith(PREFIX + 'waveform_source')][0]
+        names = [i['inputName'] for i in cl.send('GetInputList').inputs
+                 if i['inputKind'].startswith(PREFIX + 'waveform_source')]
+        notice(f'waveform sources: {names}')
+        name = names[0]
         rows = self.rows(cl, name)
         filters = [f['filterKind'] for f in cl.send('GetSourceFilterList', {'sourceName': SOURCE}).filters]
         notice(f'test signal bars: filters {filters}; waveform rows {rows[:3]}..{rows[-3:]}')
@@ -88,9 +108,16 @@ class TestSignalTest(obstest.OBSTest):
         self.assertGreaterEqual(rows[-1], 251, f'-7 % sub-black not at the bottom: row {rows[-1]}')
 
         cl.send('SetInputSettings', {'inputName': SOURCE, 'inputSettings': {'pattern': 3}})
-        time.sleep(1.0)
+        settings = cl.send('GetInputSettings', {'inputName': SOURCE}).input_settings
+        notice(f'test signal settings after the switch: {settings}')
+        time.sleep(3.0)
         rows = self.rows(cl, name)
         notice(f'test signal steps: waveform rows {rows[:3]}..{rows[-3:]}')
+        self.dump(cl, SOURCE)
+        for i in cl.send('GetInputList').inputs:
+            if 'roi' in i['inputKind']:
+                notice(f"roi input {i['inputName']} {i['inputKind']}")
+                self.dump(cl, i['inputName'])
         self.assertLessEqual(rows[0], 3, f'the 109 % step is not at the top: row {rows[0]}')
         self.assertTrue(230 <= rows[-1] <= 246, f'the 0 % step is not at 0 %: row {rows[-1]}')
 

@@ -220,7 +220,11 @@ static bool render_target_to_texrender(obs_source_t *target, uint32_t target_wid
 	gs_blend_state_push();
 	if (target) {
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+		// Sources that OBS keeps in linear light (10-bit Y'CbCr such as P010, I010 and I210 in SDR) are only
+		// encoded back to sRGB when linear sRGB is on, as in a scene; without it they come out far too dark.
+		const bool previous = gs_set_linear_srgb(true);
 		obs_source_video_render(target);
+		gs_set_linear_srgb(previous);
 	} else {
 		obs_render_main_texture();
 	}

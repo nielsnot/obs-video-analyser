@@ -49,6 +49,8 @@
 - Scope menu: *Replace with* another scope type in the same place, *Copy image to clipboard*, and *Capture
   reference of this scope* (a snapshot of one scope only).
 - A status line per scope (Options): the source it measures and its size.
+- Fix: sources that OBS keeps in linear light (10-bit Y'CbCr such as P010, I010 and I210 in an SDR project, for
+  example some HDR capture cards in SDR mode) were captured far too dark for the scopes and the ROI view.
 - Tests: the test signal reaches 109 % and -7 % on the raw waveform; the A/V sync scope reads the test signal as in
   sync; all new scopes render.
 
