@@ -772,6 +772,8 @@ static void add_chapter_task(void *param)
 static void add_chapter(int check, const char *detail)
 {
 #if LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 2, 0)
+	if (!obs_frontend_recording_active())
+		return; // nothing to mark, and no task left in the queue when OBS closes
 	char buf[128];
 	snprintf(buf, sizeof(buf), "QC: %s %s", obs_module_text(check_names[check]), detail);
 	obs_queue_task(OBS_TASK_UI, add_chapter_task, bstrdup(buf), false);
