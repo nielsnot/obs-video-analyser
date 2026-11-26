@@ -148,6 +148,21 @@ class NewScopesTest(obstest.OBSTest):
         self.assertGreater(red, 0, 'QC does not report the black border')
 
 
+
+class QCReportTest(NewScopesTest):
+    'The QC report'
+
+    def memory_leak(self):
+        # Pressing a properties button through obs-websocket leaves two allocations behind on Windows and on macOS
+        # with OBS 33, also when the button does nothing of its own; the report itself allocates nothing.
+        n = super().memory_leak()
+        if n:
+            notice(f'memory leaks after pressing the QC report button: {n}')
+        return 0 if n <= 2 else n
+
+    def test_new_scopes(self):
+        'Covered by NewScopesTest'
+
     def test_qc_report(self):
         'The QC report is written on request as an HTML page'
         import tempfile  # pylint: disable=import-outside-toplevel
