@@ -1153,6 +1153,8 @@ ScopeWidget::ScopeWidget(QWidget *parent) : NorisQTDisplay(parent)
 	properties = NULL;
 	setAttribute(Qt::WA_PaintOnScreen);
 	setAcceptDrops(true); // a scope dragged from another dock
+	// a small dock can go compact (the base class keeps its resizeEvent to itself)
+	connect(this, &NorisQTDisplay::DisplayResized, this, &ScopeWidget::updateCompact);
 	setAttribute(Qt::WA_StaticContents);
 	setAttribute(Qt::WA_NoSystemBackground);
 	setAttribute(Qt::WA_OpaquePaintEvent);
@@ -2300,12 +2302,6 @@ void ScopeWidget::updateCompact()
 		toolbar->setVisible(toolbarVisible && !compact);
 	if (signalBar)
 		signalBar->setVisible(signalBarOn && !compact);
-}
-
-void ScopeWidget::resizeEvent(QResizeEvent *event)
-{
-	NorisQTDisplay::resizeEvent(event);
-	updateCompact();
 }
 
 void ScopeWidget::toggleSolo(int tile)

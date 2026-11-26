@@ -99,7 +99,6 @@ private:
 	void toggleWindow();
 	void setEditMode(bool on);
 	void updateCompact();
-	void resizeEvent(class QResizeEvent *event) override;
 	void setWindowScreen(const QString &name);
 	void updateScreenScale();
 	class QDockWidget *findDock() const;
