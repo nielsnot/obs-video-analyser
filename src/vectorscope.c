@@ -494,7 +494,7 @@ static void create_graticule_vbuf(struct vss_source *src, int colorspace)
 		}
 	}
 	const float (*pts)[2] = cm_cs_is_hdr(colorspace) ? (const float (*)[2])pp2020
-							: pp[colorspace == CM_CS_601 ? 0 : 1];
+							 : pp[colorspace == CM_CS_601 ? 0 : 1];
 
 	// label
 	for (int i = 0; i < 6; i++) {
