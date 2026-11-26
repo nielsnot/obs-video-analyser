@@ -153,8 +153,8 @@ class QCReportTest(NewScopesTest):
     'The QC report'
 
     def memory_leak(self):
-        # Pressing a properties button through obs-websocket leaves two allocations behind on Windows and on macOS
-        # with OBS 33, also when the button does nothing of its own; the report itself allocates nothing.
+        # Writing the report by pressing its button through obs-websocket leaves two allocations behind on Windows
+        # and on macOS with OBS 33 (not on Linux); the cause is not found yet. More than two still fails.
         n = super().memory_leak()
         if n:
             notice(f'memory leaks after pressing the QC report button: {n}')
