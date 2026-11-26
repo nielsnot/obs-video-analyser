@@ -138,6 +138,20 @@ class NewScopesTest(obstest.OBSTest):
             notice(f'{kind}: {lit} lit samples')
             self.assertGreater(lit, 0, f'{kind} draws nothing')
 
+        # the QC report: written on request as an HTML page
+        import tempfile  # pylint: disable=import-outside-toplevel
+        report = os.path.join(tempfile.gettempdir(), f'va-qc-report-{int(time.time())}.html')
+        qc_name = kinds[PREFIX + 'qc_source']
+        cl.send('SetInputSettings', {'inputName': qc_name, 'inputSettings': {'qc_report_file': report}})
+        time.sleep(0.5)
+        cl.send('PressInputPropertiesButton', {'inputName': qc_name, 'propertyName': 'qc_report'})
+        time.sleep(0.5)
+        self.assertTrue(os.path.exists(report), 'the QC report was not written')
+        with open(report, encoding='utf-8') as fr:
+            html = fr.read()
+        notice(f'QC report: {len(html)} bytes')
+        self.assertIn('QC report', html)
+
         img = self.screenshot(cl, kinds[PREFIX + 'qc_source'], size=(480, 400), repeat=60)
         # the status at the top right: green when all is fine, red when a check fails
         status = [img.getpixel((x, y)) for x in range(380, 476) for y in range(4, 24)]
