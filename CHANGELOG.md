@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.5
+
+- **☺ Faces** is back in the toolbar, next to *Selection*, in Live and in Edit mode, so it is easy to find. It
+  stays in the *Selection* menu too.
+
 ## 0.9.4
 
 - Live and Edit mode per dock: Live shows only the scopes with Snapshot, Compare, Pause and the window buttons, no

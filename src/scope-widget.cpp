@@ -1681,8 +1681,9 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	connect(btnView, &QToolButton::clicked, this, &ScopeWidget::addView);
 
 	// The selection tools in one menu: shapes, undo and clear, follow faces, the selection options. The single
-	// buttons stay (hidden) as the state the rest of the dock already uses.
-	for (QToolButton *b : {btnRect, btnEllipse, btnPin, btnUndo, btnReset, btnFaces})
+	// buttons stay (hidden) as the state the rest of the dock already uses; Faces stays in the bar too, to find
+	// it quickly.
+	for (QToolButton *b : {btnRect, btnEllipse, btnPin, btnUndo, btnReset})
 		b->hide();
 	btnSelect = make_tool_button(toolbar, "dock.toolbar.select", "dock.toolbar.select.tip", false);
 	auto *selMenu = new QMenu(btnSelect);
@@ -1766,6 +1767,7 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 	layout->addWidget(sep1);
 	layout->addWidget(btnAdd);
 	layout->addWidget(btnSelect);
+	layout->addWidget(btnFaces);
 	layout->addWidget(sep2);
 	layout->addWidget(btnSnap);
 	layout->addWidget(btnCompare);
