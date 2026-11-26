@@ -76,6 +76,20 @@ class TestSignalTest(obstest.OBSTest):
             print('IMG64:' + base64.b64encode(buf.getvalue()).decode('ascii'), flush=True)
         return rows
 
+    def dump(self, cl, name):
+        'A small picture of a source in the log, to see what it shows.'
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+        try:
+            data = cl.send('GetSourceScreenshot', {'sourceName': name, 'imageFormat': 'png',
+                                                   'imageWidth': 160, 'imageHeight': 90}).image_data
+        except Exception as e:  # pylint: disable=broad-except
+            notice(f'no screenshot of {name}: {e}')
+            return
+        img = Image.open(io.BytesIO(base64.b64decode(data.split(',', 1)[1]))).convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, 'PNG')
+        print(f'IMG64[{name}]:' + base64.b64encode(buf.getvalue()).decode('ascii'), flush=True)
+
     def test_bars(self):
         'The bars reach 109 % and -7 % on the raw waveform; the steps reach 109 % but not below 0 %'
         cl = self.obs.get_obsws()
@@ -97,6 +111,11 @@ class TestSignalTest(obstest.OBSTest):
         time.sleep(3.0)
         rows = self.rows(cl, name)
         notice(f'test signal steps: waveform rows {rows[:3]}..{rows[-3:]}')
+        self.dump(cl, SOURCE)
+        for i in cl.send('GetInputList').inputs:
+            if 'roi' in i['inputKind']:
+                notice(f"roi input {i['inputName']} {i['inputKind']}")
+                self.dump(cl, i['inputName'])
         self.assertLessEqual(rows[0], 3, f'the 109 % step is not at the top: row {rows[0]}')
         self.assertTrue(230 <= rows[-1] <= 246, f'the 0 % step is not at 0 %: row {rows[-1]}')
 
