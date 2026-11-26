@@ -58,6 +58,8 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCursor>
+#include <QPixmap>
+#include <QIcon>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QDesktopServices>
@@ -244,6 +246,7 @@ struct scope_widget_s
 
 	// quick controls shown on the tile under the mouse
 	volatile int hover_tile = -1;
+	volatile int active_tile = -1; // the tile clicked last, outlined
 	volatile uint64_t hover_until =
 		0;             // the quick controls stay this long after the pointer left (ns), 0 while over
 	int qb_drag_tile = -1; // dragging the intensity slider
@@ -267,6 +270,10 @@ static inline float text_factor(const scope_widget_s *data)
 	const float pct = data->text_pct > 0 ? (float)data->text_pct : 200.0f * std::max(1.0f, data->screen_k);
 	return pct / 100.0f;
 }
+
+// Display settings read while drawing (graphics thread); set from the settings dialog (applyDisplaySettings).
+static volatile bool g_quick_controls = true; // the quick controls on the tile under the pointer
+static volatile bool g_active_outline = true; // a blue edge around the scope clicked last
 
 /* Scale of the quick controls: with the display scaling and the text size, but not as large as the text. */
 static inline float qb_scale(const scope_widget_s *data)
@@ -729,7 +736,25 @@ static void draw(void *param, uint32_t cx_, uint32_t cy_)
 		data->hover_tile = -1;
 		data->hover_until = 0;
 	}
-	if (!data->arranging && !data->live && data->hover_tile > 0 && data->hover_tile < total) {
+	// the scope clicked last: a blue edge, so it is clear which one the keys and menus act on
+	const int active = data->active_tile;
+	if (g_active_outline && !data->arranging && solo < 0 && active >= 0 && active < total && total > 1) {
+		const src_rect_s *r = tile_rect(data, active);
+		if (r && r->cx1 > r->cx0) {
+			gs_projection_push();
+			gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+			const float t = 2.0f * std::max(1.0f, data->ui_scale);
+			const float x0 = (float)r->cx0, y0 = (float)r->cy0, x1 = (float)r->cx1, y1 = (float)r->cy1;
+			const uint32_t blue = 0xFF3A8DFF;
+			qb_fill(x0, y0, x1, y0 + t, blue);
+			qb_fill(x0, y1 - t, x1, y1, blue);
+			qb_fill(x0, y0, x0 + t, y1, blue);
+			qb_fill(x1 - t, y0, x1, y1, blue);
+			gs_projection_pop();
+		}
+	}
+
+	if (g_quick_controls && !data->arranging && !data->live && data->hover_tile > 0 && data->hover_tile < total) {
 		gs_projection_push();
 		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
 		draw_quickbar(data, data->hover_tile);
@@ -898,9 +923,7 @@ enum qb_kind_e {
 	QB_GAIN,
 	QB_ASPECT,
 	QB_MAX,
-	QB_MARKERS,    // marker edit mode on or off
-	QB_MK_COLOR,   // next color for the selected marker
-	QB_MK_DEL,     // delete the selected marker
+	QB_MARKERS,    // markers: an icon that opens the marker menu
 	QB_FACE_BASE,  // faces: this face is the reference look
 	QB_FACE_CLEAR, // faces: no reference look
 	QB_HELP,       // an explanation of the scope
@@ -964,11 +987,7 @@ static std::string qb_label(const scope_widget_s *data, const scope_entry *e, in
 	case QB_MAX:
 		return data->solo >= 0 ? "Back" : "Full";
 	case QB_MARKERS:
-		return e->marker_edit ? "Done" : "Markers";
-	case QB_MK_COLOR:
-		return "Recolor";
-	case QB_MK_DEL:
-		return "Delete";
+		return ""; // an icon
 	case QB_FACE_BASE:
 		return "Set reference";
 	case QB_FACE_CLEAR:
@@ -1037,13 +1056,8 @@ static std::vector<qb_item> qb_layout(const scope_widget_s *data, int tile, int 
 		add(QB_COLORS, 40);
 	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
 		add(QB_GAIN, 56);
-	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM) {
-		add(QB_MARKERS, 40);
-		if (e->marker_edit) {
-			add(QB_MK_COLOR, 40);
-			add(QB_MK_DEL, 40);
-		}
-	}
+	if (e->type == TYPE_VECTORSCOPE || e->type == TYPE_WAVEFORM)
+		add(QB_MARKERS, 34);
 	if (e->type >= 0 && e->type < N_TYPES && !strcmp(scope_types[e->type].key, "skintone")) {
 		add(QB_SKIN_FIND, 40);
 		add(QB_SKIN_APPLY, 40);
@@ -1069,6 +1083,29 @@ static void qb_fill(float x0, float y0, float x1, float y1, uint32_t color)
 		gs_vertex2f(x0, y1);
 		gs_vertex2f(x1, y1);
 		gs_render_stop(GS_TRISTRIP);
+	}
+}
+
+/* The marker icon: a level line with a diamond on it and a small arrow for the menu. */
+static void qb_marker_icon(float cx, float cy, float k)
+{
+	qb_fill(cx - 10.0f * k, cy - 0.75f * k, cx + 6.0f * k, cy + 0.75f * k, 0xFFFFD040);
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), 0xFFF4F4F6);
+	const float r = 4.5f * k, dx = -2.0f * k;
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(false);
+		gs_vertex2f(cx + dx, cy - r);
+		gs_vertex2f(cx + dx - r, cy);
+		gs_vertex2f(cx + dx + r, cy);
+		gs_vertex2f(cx + dx, cy + r);
+		gs_render_stop(GS_TRISTRIP);
+		// the menu arrow
+		gs_render_start(false);
+		gs_vertex2f(cx + 7.0f * k, cy + 2.0f * k);
+		gs_vertex2f(cx + 12.0f * k, cy + 2.0f * k);
+		gs_vertex2f(cx + 9.5f * k, cy + 5.0f * k);
+		gs_render_stop(GS_TRIS);
 	}
 }
 
@@ -1130,6 +1167,10 @@ static void draw_quickbar(scope_widget_s *data, int tile)
 		label = qb_label(data, e, it.kind);
 		const uint32_t bg = it.kind == QB_HELP ? 0xFF2D4C73 : on ? 0xFF3D5C45 : 0xFF2A2A2F;
 		qb_fill(x0, (float)y0 + 3.0f * k, x1, (float)y1 - 3.0f * k, bg);
+		if (it.kind == QB_MARKERS) {
+			qb_marker_icon((x0 + x1) * 0.5f, ym, k);
+			continue;
+		}
 		text_draw(&ts, label.c_str(), (x0 + x1) * 0.5f, ym, px, 0xFFF4F4F6, TEXT_ALIGN_CENTER,
 			  TEXT_VALIGN_MIDDLE);
 	}
@@ -1477,6 +1518,7 @@ void ScopeWidget::removeScopeEx(int tile, bool remember, bool replaced)
 	data->entries.erase(data->entries.begin() + (tile - 1));
 	data->solo = -1;
 	data->i_mouse_last = -1;
+	data->active_tile = -1;
 	pthread_mutex_unlock(&data->mutex);
 
 	if (properties && properties->getSource() == e->src)
@@ -1752,6 +1794,42 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 			if (btnFaces)
 				btnFaces->setChecked(on);
 		});
+		// auto select: skin, face skin, hair, clothing or the background as the selection
+		if (data->roi) {
+			QMenu *autoMenu = selMenu->addMenu(QString::fromUtf8(obs_module_text("dock.select.auto")));
+			autoMenu->setToolTipsVisible(true);
+			OBSDataAutoRelease rs = obs_source_get_settings(data->roi);
+			auto roiCheck = [&](const char *key, const char *text) {
+				QAction *ca = autoMenu->addAction(QString::fromUtf8(obs_module_text(text)));
+				ca->setCheckable(true);
+				ca->setChecked(obs_data_get_bool(rs, key));
+				const std::string k = key;
+				connect(ca, &QAction::toggled, this, [this, k](bool on) {
+					if (!data->roi)
+						return;
+					OBSDataAutoRelease d = obs_data_create();
+					obs_data_set_bool(d, k.c_str(), on);
+					if (on && k != "auto_sel" && k != "auto_smooth" && k != "auto_stable" &&
+					    k != "auto_show")
+						obs_data_set_bool(d, "auto_sel",
+								  true); // choosing a part switches it on
+					obs_source_update(data->roi, d);
+				});
+				return ca;
+			};
+			roiCheck("auto_sel", "dock.select.auto.on")
+				->setToolTip(QString::fromUtf8(obs_module_text("ROI.Auto.Tip")));
+			autoMenu->addSeparator();
+			roiCheck("auto_skin", "ROI.Auto.Skin");
+			roiCheck("auto_face", "ROI.Auto.FaceSkin");
+			roiCheck("auto_hair", "ROI.Auto.Hair");
+			roiCheck("auto_clothing", "ROI.Auto.Clothing");
+			roiCheck("auto_background", "ROI.Auto.Background");
+			autoMenu->addSeparator();
+			roiCheck("auto_smooth", "ROI.Auto.Smooth");
+			roiCheck("auto_stable", "ROI.Auto.Stable");
+			roiCheck("auto_show", "ROI.Auto.Show");
+		}
 		selMenu->addSeparator();
 		a = selMenu->addAction(QString::fromUtf8(obs_module_text("dock.toolbar.select.options")));
 		connect(a, &QAction::triggered, this, [this]() { openProperties(0); }, Qt::QueuedConnection);
@@ -1867,6 +1945,8 @@ QWidget *ScopeWidget::createToolbar(QWidget *parent)
 
 void ScopeWidget::applyDisplaySettings()
 {
+	g_quick_controls = obs_data_get_bool(va_config(), "quick_controls");
+	g_active_outline = obs_data_get_bool(va_config(), "active_outline");
 	if (addScopeMenu) {
 		addScopeMenu->clear();
 		fillAddScopeMenu(addScopeMenu);
@@ -2208,20 +2288,9 @@ void ScopeWidget::quickControl(int tile, const qb_item &it, int x)
 		calldata_free(&cd);
 		return;
 	}
-	case QB_MARKERS:
-	case QB_MK_COLOR:
-	case QB_MK_DEL: {
-		const char *cmd = "color";
-		if (it.kind == QB_MARKERS) {
-			e->marker_edit = !e->marker_edit;
-			cmd = e->marker_edit ? "edit_on" : "edit_off";
-		} else if (it.kind == QB_MK_DEL) {
-			cmd = "delete";
-		}
-		calldata_t cd = {0};
-		calldata_set_string(&cd, "cmd", cmd);
-		proc_handler_call(obs_source_get_proc_handler(src), "va_markers", &cd);
-		calldata_free(&cd);
+	case QB_MARKERS: {
+		const QPoint at = QCursor::pos();
+		QTimer::singleShot(0, this, [this, tile, at]() { openMarkerMenu(tile, at); });
 		return;
 	}
 	}
@@ -2470,6 +2539,14 @@ bool ScopeWidget::HandleMouseClickEvent(QMouseEvent *event)
 		return true;
 	}
 
+	if (event->button() == Qt::LeftButton && !mouseUp) {
+		const int t = tile_at(data, (int)qtPos.x(), (int)qtPos.y());
+		if (t >= 0 && t != data->active_tile) {
+			data->active_tile = t;
+			update();
+		}
+	}
+
 	if (data->arranging && data->layout == SCOPE_LAYOUT_FREE && event->button() == Qt::LeftButton) {
 		pthread_mutex_lock(&data->mutex);
 		if (mouseUp) {
@@ -2618,6 +2695,59 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 				f->x = std::clamp(snap(s0.x + dx), 0.0f, 1.0f - s0.w);
 				f->y = std::clamp(snap(s0.y + dy), 0.0f, 1.0f - s0.h);
 			}
+			// snap to the edges of the dock and of the other tiles (hold Alt to place freely)
+			if (obs_data_get_bool(va_config(), "snap_edges") && !(event->modifiers() & Qt::AltModifier)) {
+				std::vector<float> xs = {0.0f, 1.0f}, ys = {0.0f, 1.0f};
+				for (int k = 0; k < n_tiles(data); k++) {
+					const free_rect_s *o = k == t ? nullptr : tile_free(data, k);
+					if (!o || o->w <= 0.0f || (k == 0 && !data->roi_shown))
+						continue;
+					xs.push_back(o->x);
+					xs.push_back(o->x + o->w);
+					ys.push_back(o->y);
+					ys.push_back(o->y + o->h);
+				}
+				const float k_px = 8.0f * std::max(1.0f, data->ui_scale);
+				const float tx = k_px / data->last_cx, ty = k_px / data->last_cy;
+				// the nearest line within reach, or the value itself
+				auto nearest = [](float v, const std::vector<float> &lines, float reach, float *out) {
+					float best = reach;
+					bool found = false;
+					for (float l : lines) {
+						if (std::fabs(l - v) <= best) {
+							best = std::fabs(l - v);
+							*out = l;
+							found = true;
+						}
+					}
+					return found;
+				};
+				float l;
+				if (data->drag_resize) {
+					const int e = data->drag_resize;
+					float x0 = f->x, y0 = f->y, x1 = f->x + f->w, y1 = f->y + f->h;
+					if ((e & EDGE_L) && nearest(x0, xs, tx, &l) && l < x1 - 0.05f)
+						x0 = l;
+					if ((e & EDGE_R) && nearest(x1, xs, tx, &l) && l > x0 + 0.05f)
+						x1 = l;
+					if ((e & EDGE_T) && nearest(y0, ys, ty, &l) && l < y1 - 0.05f)
+						y0 = l;
+					if ((e & EDGE_B) && nearest(y1, ys, ty, &l) && l > y0 + 0.05f)
+						y1 = l;
+					f->x = x0, f->y = y0, f->w = x1 - x0, f->h = y1 - y0;
+				} else {
+					if (nearest(f->x, xs, tx, &l))
+						f->x = l;
+					else if (nearest(f->x + f->w, xs, tx, &l))
+						f->x = l - f->w;
+					if (nearest(f->y, ys, ty, &l))
+						f->y = l;
+					else if (nearest(f->y + f->h, ys, ty, &l))
+						f->y = l - f->h;
+					f->x = std::clamp(f->x, 0.0f, 1.0f - f->w);
+					f->y = std::clamp(f->y, 0.0f, 1.0f - f->h);
+				}
+			}
 		}
 		// cursor: resize over a handle, move over a tile
 		Qt::CursorShape shape = Qt::ArrowCursor;
@@ -2663,31 +2793,40 @@ bool ScopeWidget::HandleMouseMoveEvent(QMouseEvent *event)
 		if (prev != data->hover_tile)
 			update();
 		// the i button: a short explanation while hovering it
-		bool over_help = false;
+		bool over_help = false, over_markers = false;
 		int help_type = -1;
 		if (over > 0 && !data->arranging) {
 			int by0 = 0, by1 = 0;
 			pthread_mutex_lock(&data->mutex);
 			const std::vector<qb_item> items = qb_layout(data, over, &by0, &by1);
-			for (const qb_item &it : items)
-				if (it.kind == QB_HELP && y >= it.y0 && y <= it.y1 && x >= it.x0 && x <= it.x1)
-					over_help = true;
+			for (const qb_item &it : items) {
+				if (y < it.y0 || y > it.y1 || x < it.x0 || x > it.x1)
+					continue;
+				over_help = over_help || it.kind == QB_HELP;
+				over_markers = over_markers || it.kind == QB_MARKERS;
+			}
 			if (over_help)
 				help_type = data->entries[over - 1]->type;
 			pthread_mutex_unlock(&data->mutex);
 		}
 		if (over_help && help_type >= 0 && help_type < N_TYPES) {
-			if (!helpTipShown) {
+			if (helpTipShown != 1) {
 				QString tip = scope_tip(scope_types[help_type].key);
 				if (!tip.isEmpty())
 					tip += QStringLiteral("\n\n");
 				tip += QString::fromUtf8(obs_module_text("Help.Button.tip"));
 				QToolTip::showText(QCursor::pos(), tip, this);
-				helpTipShown = true;
+				helpTipShown = 1;
+			}
+		} else if (over_markers) {
+			if (helpTipShown != 2) {
+				QToolTip::showText(QCursor::pos(), QString::fromUtf8(obs_module_text("Markers.Tip")),
+						   this);
+				helpTipShown = 2;
 			}
 		} else if (helpTipShown) {
 			QToolTip::hideText();
-			helpTipShown = false;
+			helpTipShown = 0;
 		}
 	}
 
@@ -2759,7 +2898,11 @@ void ScopeWidget::openContextAt(const QPointF &widgetPos, const QPoint &globalPo
 	lastContextMs = now;
 
 	data->i_menu = tile_at(data, (int)widgetPos.x(), (int)widgetPos.y());
-	if (data->i_menu >= 0 && tile_source(data, data->i_menu))
+	if (data->i_menu >= 0)
+		data->active_tile = data->i_menu;
+	if (data->i_menu > 0 && tile_source(data, data->i_menu) && obs_data_get_bool(va_config(), "tile_menu"))
+		openTileMenu(data->i_menu, globalPos);
+	else if (data->i_menu >= 0 && tile_source(data, data->i_menu))
 		openOptions(data->i_menu, globalPos);
 	else
 		openMenu(nullptr);
@@ -3675,6 +3818,97 @@ static QDoubleSpinBox *marker_spin(QWidget *parent, double lo, double hi, double
 	return spin;
 }
 
+/* The marker menu of a waveform or vectorscope tile (the marker icon in its quick controls). */
+void ScopeWidget::openMarkerMenu(int tile, const QPoint &globalPos)
+{
+	auto T = [](const char *key) { return QString::fromUtf8(obs_module_text(key)); };
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return;
+	scope_entry *e = data->entries[tile - 1];
+	obs_source_t *src = e->src;
+	const bool vectorscope = e->type == TYPE_VECTORSCOPE;
+	auto send = [src](const char *cmd) {
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "cmd", cmd);
+		proc_handler_call(obs_source_get_proc_handler(src), "va_markers", &cd);
+		calldata_free(&cd);
+	};
+	auto setEdit = [e, send](bool on) {
+		e->marker_edit = on;
+		send(on ? "edit_on" : "edit_off");
+	};
+
+	QMenu menu(this);
+	QAction *a = menu.addAction(T("Markers.Move"));
+	a->setCheckable(true);
+	a->setChecked(e->marker_edit);
+	connect(a, &QAction::toggled, this, [setEdit](bool on) { setEdit(on); });
+
+	a = menu.addAction(T("Markers.Add"));
+	connect(a, &QAction::triggered, this, [src, vectorscope, setEdit]() {
+		std::vector<marker_ui> v = load_markers(src);
+		marker_ui m;
+		m.name = QString::fromUtf8(obs_module_text("Markers.Default")).arg(v.size() + 1).toStdString();
+		m.kind = vectorscope ? 1 : 0;
+		m.color = marker_palette[v.size() % (sizeof(marker_palette) / sizeof(marker_palette[0]))];
+		v.push_back(m);
+		save_markers(src, v);
+		setEdit(true); // ready to drag it into place
+	});
+
+	const std::vector<marker_ui> markers = load_markers(src);
+	if (!markers.empty()) {
+		menu.addSeparator();
+		for (size_t i = 0; i < markers.size(); i++) {
+			const marker_ui &m = markers[i];
+			QPixmap swatch(12, 12);
+			swatch.fill(QColor::fromRgba(m.color));
+			const QString name = m.name.empty() ? T("Markers.Default").arg(i + 1)
+							    : QString::fromStdString(m.name);
+			QMenu *one = menu.addMenu(QIcon(swatch), name);
+			QAction *ca = one->addAction(T("Markers.Recolor"));
+			connect(ca, &QAction::triggered, this, [src, i]() {
+				std::vector<marker_ui> v = load_markers(src);
+				if (i >= v.size())
+					return;
+				const size_t np = sizeof(marker_palette) / sizeof(marker_palette[0]);
+				size_t k = 0;
+				while (k < np && marker_palette[k] != v[i].color)
+					k++;
+				v[i].color = marker_palette[(k + 1) % np];
+				save_markers(src, v);
+			});
+			QAction *la = one->addAction(T("Markers.ShowLabel"));
+			la->setCheckable(true);
+			la->setChecked(m.show_label);
+			connect(la, &QAction::toggled, this, [src, i](bool on) {
+				std::vector<marker_ui> v = load_markers(src);
+				if (i >= v.size())
+					return;
+				v[i].show_label = on;
+				save_markers(src, v);
+			});
+			QAction *da = one->addAction(T("Markers.Delete"));
+			connect(da, &QAction::triggered, this, [src, i]() {
+				std::vector<marker_ui> v = load_markers(src);
+				if (i >= v.size())
+					return;
+				v.erase(v.begin() + (long)i);
+				save_markers(src, v);
+			});
+		}
+		a = menu.addAction(T("Markers.DeleteAll"));
+		connect(a, &QAction::triggered, this, [src]() { save_markers(src, {}); });
+	}
+
+	menu.addSeparator();
+	a = menu.addAction(T("Markers.Settings"));
+	connect(
+		a, &QAction::triggered, this, [this, tile, globalPos]() { openOptions(tile, globalPos); },
+		Qt::QueuedConnection);
+	menu.exec(globalPos);
+}
+
 /* The MARKERS section of the options panel: a card per marker and an Add button. */
 void ScopeWidget::addMarkerControls(QWidget *panel, QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
 				    const std::function<void()> &reopen)
@@ -4261,6 +4495,220 @@ void ScopeWidget::openOptions(int tile, const QPoint &globalPos)
 
 /* ---------- arranging ---------- */
 
+/* Free layout: a tile drawn over the others (front) or under them (back, still above the picture). */
+void ScopeWidget::raiseScope(int tile, bool front)
+{
+	const int i = tile - 1;
+	pthread_mutex_lock(&data->mutex);
+	if (i < 0 || i >= (int)data->entries.size()) {
+		pthread_mutex_unlock(&data->mutex);
+		return;
+	}
+	scope_entry *e = data->entries[i];
+	data->entries.erase(data->entries.begin() + i);
+	if (front)
+		data->entries.push_back(e);
+	else
+		data->entries.insert(data->entries.begin(), e);
+	const int now = front ? (int)data->entries.size() : 1;
+	data->solo = -1;
+	data->hover_tile = -1;
+	data->i_mouse_last = -1;
+	data->active_tile = now;
+	pthread_mutex_unlock(&data->mutex);
+}
+
+/* Right click on a scope: what you do with that one scope, in one short menu. The options panel and the dock
+ * menu are in it too. Settings > Display can switch it off (the options panel opens directly then). */
+void ScopeWidget::openTileMenu(int tile, const QPoint &globalPos)
+{
+	auto T = [](const char *key) { return QString::fromUtf8(obs_module_text(key)); };
+	if (tile <= 0 || tile > (int)data->entries.size())
+		return;
+	const scope_entry *e = data->entries[tile - 1];
+	const int type = e->type;
+	const QString label = e->label.empty() ? T(scope_types[type].name_key) : QString::fromStdString(e->label);
+
+	QMenu menu(this);
+	QAction *a = menu.addAction(label);
+	a->setEnabled(false);
+	menu.addSeparator();
+
+	a = menu.addAction(T("dock.tile.rename"));
+	connect(
+		a, &QAction::triggered, this,
+		[this, tile, label, T]() {
+			bool ok = false;
+			const QString text = QInputDialog::getText(this, T("dock.tile.rename.title"),
+								   T("dock.select.name"), QLineEdit::Normal, label,
+								   &ok);
+			if (!ok || tile > (int)data->entries.size())
+				return;
+			pthread_mutex_lock(&data->mutex);
+			data->entries[tile - 1]->label = text.trimmed().toStdString();
+			data->entries[tile - 1]->show_label = true;
+			pthread_mutex_unlock(&data->mutex);
+		},
+		Qt::QueuedConnection);
+
+	QMenu *replaceMenu = menu.addMenu(T("dock.menu.replace"));
+	for (int t = 0; t < N_TYPES; t++) {
+		if (t == type)
+			continue;
+		a = replaceMenu->addAction(T(scope_types[t].name_key));
+		connect(
+			a, &QAction::triggered, this, [this, tile, t]() { changeScopeType(tile, t); },
+			Qt::QueuedConnection);
+	}
+
+	a = menu.addAction(T(data->solo >= 0 ? "dock.menu.solo.exit" : "dock.menu.solo"));
+	connect(a, &QAction::triggered, this, [this, tile]() { toggleSolo(data->solo >= 0 ? -1 : tile); });
+	menu.addSeparator();
+
+	a = menu.addAction(T("dock.menu.copyimage"));
+	connect(
+		a, &QAction::triggered, this,
+		[this, tile]() {
+			if (obs_source_t *s = tile_source(data, tile)) {
+				const QImage image = render_source_image(s);
+				if (!image.isNull())
+					QGuiApplication::clipboard()->setImage(image);
+			}
+		},
+		Qt::QueuedConnection);
+	a = menu.addAction(T("dock.tile.saveimage"));
+	connect(
+		a, &QAction::triggered, this,
+		[this, tile, label, T]() {
+			obs_source_t *s = tile_source(data, tile);
+			if (!s)
+				return;
+			const QImage image = render_source_image(s);
+			if (image.isNull())
+				return;
+			const QString dir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+			const QString file =
+				QFileDialog::getSaveFileName(this, T("dock.tile.saveimage"),
+							     dir + QStringLiteral("/") + label + QStringLiteral(".png"),
+							     QStringLiteral("PNG (*.png)"));
+			if (!file.isEmpty())
+				image.save(file, "PNG");
+		},
+		Qt::QueuedConnection);
+	a = menu.addAction(T("dock.menu.capture"));
+	connect(
+		a, &QAction::triggered, this,
+		[this, tile]() {
+			obs_source_t *s = tile_source(data, tile);
+			if (!s)
+				return;
+			uint8_t stack[64];
+			calldata_t cd;
+			calldata_init_fixed(&cd, stack, sizeof(stack));
+			proc_handler_call(obs_source_get_proc_handler(s), "va_snapshot", &cd);
+			if (btnCompare && !btnCompare->isChecked())
+				btnCompare->setChecked(true);
+		},
+		Qt::QueuedConnection);
+	menu.addSeparator();
+
+	a = menu.addAction(T("Options.ShowName"));
+	a->setCheckable(true);
+	a->setChecked(e->show_label);
+	connect(a, &QAction::toggled, this, [this, tile](bool on) {
+		pthread_mutex_lock(&data->mutex);
+		if (tile <= (int)data->entries.size())
+			data->entries[tile - 1]->show_label = on;
+		pthread_mutex_unlock(&data->mutex);
+	});
+	a = menu.addAction(T("dock.tile.status"));
+	a->setCheckable(true);
+	a->setChecked(e->show_status);
+	connect(a, &QAction::toggled, this, [this, tile](bool on) {
+		pthread_mutex_lock(&data->mutex);
+		if (tile <= (int)data->entries.size())
+			data->entries[tile - 1]->show_status = on;
+		pthread_mutex_unlock(&data->mutex);
+	});
+	auto configCheck = [&](const char *key, const char *text) {
+		QAction *ca = menu.addAction(T(text));
+		ca->setCheckable(true);
+		ca->setChecked(obs_data_get_bool(va_config(), key));
+		const std::string k = key;
+		connect(ca, &QAction::toggled, this, [k](bool on) {
+			obs_data_set_bool(va_config(), k.c_str(), on);
+			va_config_save();
+			for (ScopeWidget *w : scope_docks_all())
+				w->applyDisplaySettings();
+		});
+	};
+	configCheck("quick_controls", "Settings.QuickControls");
+
+	if (data->layout == SCOPE_LAYOUT_FREE) {
+		menu.addSeparator();
+		a = menu.addAction(T("dock.tile.front"));
+		a->setEnabled(tile < (int)data->entries.size());
+		connect(a, &QAction::triggered, this, [this, tile]() { raiseScope(tile, true); });
+		a = menu.addAction(T("dock.tile.back"));
+		a->setEnabled(tile > 1);
+		connect(a, &QAction::triggered, this, [this, tile]() { raiseScope(tile, false); });
+		configCheck("snap_edges", "Settings.SnapEdges");
+	}
+	menu.addSeparator();
+
+	std::vector<ScopeWidget *> others;
+	for (ScopeWidget *w : scope_docks_all())
+		if (w != this)
+			others.push_back(w);
+	if (!others.empty()) {
+		QMenu *moveMenu = menu.addMenu(T("dock.menu.moveto"));
+		QMenu *copyMenu = menu.addMenu(T("dock.menu.copyto"));
+		for (ScopeWidget *w : others) {
+			QDockWidget *d = w->findDock();
+			const QString title = d ? d->windowTitle() : QString::fromStdString(w->name);
+			QPointer<ScopeWidget> wp(w);
+			a = moveMenu->addAction(title);
+			connect(
+				a, &QAction::triggered, this,
+				[this, tile, wp]() {
+					if (wp)
+						sendScopeTo(tile, wp, true);
+				},
+				Qt::QueuedConnection);
+			a = copyMenu->addAction(title);
+			connect(
+				a, &QAction::triggered, this,
+				[this, tile, wp]() {
+					if (wp)
+						sendScopeTo(tile, wp, false);
+				},
+				Qt::QueuedConnection);
+		}
+	}
+	a = menu.addAction(T("dock.menu.remove"));
+	connect(a, &QAction::triggered, this, [this, tile]() { removeScope(tile); }, Qt::QueuedConnection);
+	menu.addSeparator();
+
+	a = menu.addAction(T("dock.tile.options"));
+	connect(
+		a, &QAction::triggered, this, [this, tile, globalPos]() { openOptions(tile, globalPos); },
+		Qt::QueuedConnection);
+	a = menu.addAction(T("dock.menu.settings"));
+	connect(a, &QAction::triggered, this, [this, tile]() { openProperties(tile); }, Qt::QueuedConnection);
+	a = menu.addAction(T("dock.tile.help"));
+	connect(a, &QAction::triggered, this, [this, type]() { showHelp(type); }, Qt::QueuedConnection);
+	a = menu.addAction(T("dock.tile.dockmenu"));
+	connect(
+		a, &QAction::triggered, this,
+		[this, tile]() {
+			data->i_menu = tile;
+			openMenu(nullptr);
+		},
+		Qt::QueuedConnection);
+
+	menu.exec(globalPos);
+}
+
 void ScopeWidget::moveScope(int tile, int delta)
 {
 	const int i = tile - 1;
@@ -4271,6 +4719,10 @@ void ScopeWidget::moveScope(int tile, int delta)
 	std::swap(data->entries[i], data->entries[j]);
 	if (data->solo == tile)
 		data->solo = j + 1;
+	if (data->active_tile == tile)
+		data->active_tile = j + 1;
+	else if (data->active_tile == j + 1)
+		data->active_tile = tile;
 	pthread_mutex_unlock(&data->mutex);
 }
 
@@ -5116,7 +5568,9 @@ QString ScopeWidget::signalPathHtml()
 	const int shapes = (int)r->shapes.num, pins = (int)r->pins.num;
 	pthread_mutex_unlock(&r->shapes_mutex);
 	QStringList sel;
-	if (r->face_follow)
+	if (r->auto_sel)
+		sel << T("SignalPath.Sel.Auto");
+	else if (r->face_follow)
 		sel << T("SignalPath.Sel.Faces");
 	else if (shapes)
 		sel << T("SignalPath.Sel.Shapes").arg(shapes);
@@ -5127,7 +5581,7 @@ QString ScopeWidget::signalPathHtml()
 	if (pins)
 		sel << T("SignalPath.Sel.Pins").arg(pins);
 	row(T("SignalPath.Selection"), esc(sel.join(QStringLiteral(", "))));
-	if (r->face_follow || shapes || r->mask.qualifier)
+	if (r->auto_sel || r->face_follow || shapes || r->mask.qualifier)
 		path << T("SignalPath.Flow.Selection");
 
 	// the scopes of this view

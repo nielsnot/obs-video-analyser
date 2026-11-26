@@ -601,6 +601,10 @@ static void open_settings_dialog()
 		add_check("menu_groups", "Settings.MenuGroups");
 		add_check("colorblind", "Settings.Colorblind");
 		add_check("large_icons", "Settings.LargeIcons");
+		add_check("tile_menu", "Settings.TileMenu");
+		add_check("active_outline", "Settings.ActiveOutline");
+		add_check("snap_edges", "Settings.SnapEdges");
+		add_check("quick_controls", "Settings.QuickControls");
 		auto *row = new QHBoxLayout();
 		row->addWidget(new QLabel(T("Settings.Graticule"), box));
 		auto *combo = new QComboBox(box);

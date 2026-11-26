@@ -4,6 +4,19 @@
 
 - **☺ Faces** is back in the toolbar, next to *Selection*, in Live and in Edit mode, so it is easy to find. It
   stays in the *Selection* menu too.
+- **Auto select** (*Selection* menu): the selection becomes the skin, the face skin, the hair, the clothing or the
+  background, found by itself from the faces in the picture and the colors around them. Choose one or more parts;
+  options for smooth edges, stabilizing (no flicker) and darkening the rest on the picture. Off by default.
+- **Markers in their own menu**: the waveform and vectorscope quick controls have a marker icon (a tip says what it
+  is) that opens a menu: add, move with the mouse, per marker next color, show name or delete, delete all, and the
+  marker settings. The separate Markers / Recolor / Delete buttons are gone.
+- **Scope menu on right click**: rename, replace with another scope, full size, copy or save the image, capture a
+  reference, show name and status line, quick controls on or off, move or copy to another dock, remove, and the
+  options panel, settings, help and dock menu. *Settings > Display* switches it back to the options panel.
+- **The scope clicked last has a blue edge.** Can be switched off in *Settings > Display*.
+- **Arranging snaps to edges**: a tile snaps to the edges of the dock and of the other tiles (hold Alt to place it
+  freely); *Bring to front* and *Send to back* put an overlapping tile over or under the others. Snapping can be
+  switched off.
 
 ## 0.9.4
 

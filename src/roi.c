@@ -33,6 +33,7 @@ static const char *prof_render_name = "roi_render";
 
 static void roi_update(void *, obs_data_t *);
 static void roi_surface_cb(void *data, struct cm_surface_data *surface_data);
+static void draw_auto_overlay(struct roi_source *src, float w, float h);
 
 static inline int min_int(int a, int b)
 {
@@ -117,8 +118,12 @@ static void roi_destroy(void *data)
 	obs_enter_graphics();
 	gs_texture_destroy(src->mask_tex);
 	gs_texture_destroy(src->ref_tex);
+	gs_texture_destroy(src->auto_tex);
 	obs_leave_graphics();
 	bfree(src->mask_buf);
+	auto_select_free(&src->as);
+	bfree(src->auto_view);
+	bfree(src->auto_rgba);
 	bfree(src->ref_load_path);
 
 	da_free(src->shapes);
@@ -262,11 +267,28 @@ static void roi_update(void *data, obs_data_t *settings)
 	src->guide_title_pct = (float)obs_data_get_double(settings, "guide_title_pct") / 100.0f;
 	src->guide_action_pct = (float)obs_data_get_double(settings, "guide_action_pct") / 100.0f;
 	const bool follow = obs_data_get_bool(settings, "face_follow");
-	if (follow && !src->fd)
+	const bool autosel = obs_data_get_bool(settings, "auto_sel");
+	if ((follow || autosel) && !src->fd)
 		src->fd = face_detector_create();
-	if (follow != src->face_follow)
+	if (follow != src->face_follow || autosel != src->auto_sel)
 		src->shapes_dirty = true;
 	src->face_follow = follow;
+	int classes = 0;
+	if (obs_data_get_bool(settings, "auto_skin"))
+		classes |= AS_SKIN;
+	if (obs_data_get_bool(settings, "auto_face"))
+		classes |= AS_FACE_SKIN;
+	if (obs_data_get_bool(settings, "auto_hair"))
+		classes |= AS_HAIR;
+	if (obs_data_get_bool(settings, "auto_clothing"))
+		classes |= AS_CLOTHING;
+	if (obs_data_get_bool(settings, "auto_background"))
+		classes |= AS_BACKGROUND;
+	src->auto_classes = classes;
+	src->auto_smooth = obs_data_get_bool(settings, "auto_smooth");
+	src->auto_stable = obs_data_get_bool(settings, "auto_stable");
+	src->auto_show = obs_data_get_bool(settings, "auto_show");
+	src->auto_sel = autosel;
 
 	shapes_load(src, settings);
 
@@ -304,6 +326,11 @@ static void roi_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "compare_pos", 50.0);
 	obs_data_set_default_double(settings, "compare_alpha", 50.0);
 	obs_data_set_default_double(settings, "guide_action_pct", 95.0);
+	obs_data_set_default_bool(settings, "auto_sel", false);
+	obs_data_set_default_bool(settings, "auto_skin", true);
+	obs_data_set_default_bool(settings, "auto_smooth", true);
+	obs_data_set_default_bool(settings, "auto_stable", true);
+	obs_data_set_default_bool(settings, "auto_show", true);
 }
 
 static obs_properties_t *roi_get_properties(void *data)
@@ -314,6 +341,20 @@ static obs_properties_t *roi_get_properties(void *data)
 
 	obs_properties_add_int(props, "interleave", obs_module_text("Interleave"), 0, 1, 1);
 	obs_properties_add_bool(props, "face_follow", obs_module_text("ROI.FaceFollow"));
+	{
+		obs_properties_t *ap = obs_properties_create();
+		obs_properties_add_bool(ap, "auto_skin", obs_module_text("ROI.Auto.Skin"));
+		obs_properties_add_bool(ap, "auto_face", obs_module_text("ROI.Auto.FaceSkin"));
+		obs_properties_add_bool(ap, "auto_hair", obs_module_text("ROI.Auto.Hair"));
+		obs_properties_add_bool(ap, "auto_clothing", obs_module_text("ROI.Auto.Clothing"));
+		obs_properties_add_bool(ap, "auto_background", obs_module_text("ROI.Auto.Background"));
+		obs_properties_add_bool(ap, "auto_smooth", obs_module_text("ROI.Auto.Smooth"));
+		obs_properties_add_bool(ap, "auto_stable", obs_module_text("ROI.Auto.Stable"));
+		obs_properties_add_bool(ap, "auto_show", obs_module_text("ROI.Auto.Show"));
+		obs_property_t *g = obs_properties_add_group(props, "auto_sel", obs_module_text("ROI.Auto"),
+							     OBS_GROUP_CHECKABLE, ap);
+		obs_property_set_long_description(g, obs_module_text("ROI.Auto.Tip"));
+	}
 	obs_property_t *za = obs_properties_add_list(props, "zoom_anchor", obs_module_text("ROI.ZoomAnchor"),
 						     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(za, obs_module_text("ROI.ZoomAnchor.Face"), ROI_ZOOM_FACE);
@@ -487,6 +528,13 @@ static void update_mask_texture(struct roi_source *src)
 
 	if (!src->shapes_dirty && !resized)
 		return;
+
+	// auto select: the pixels are chosen on the analyzed copy (roi_surface_cb), no shapes on the capture
+	if (src->auto_sel) {
+		src->shapes_dirty = false;
+		src->mask.tex = NULL;
+		return;
+	}
 
 	pthread_mutex_lock(&src->shapes_mutex);
 	src->shapes_dirty = false;
@@ -951,6 +999,9 @@ static void roi_render(void *data, gs_effect_t *effect)
 		}
 	}
 
+	if (src->auto_sel && src->auto_show)
+		draw_auto_overlay(src, w, h);
+
 	// comparing: the reference frame fills the left half, with a divider line
 	const bool comparing = src->compare && src->ref_tex && src->ref_w == src->cm.texrender_width &&
 			       src->ref_h == src->cm.texrender_height;
@@ -1021,8 +1072,8 @@ static void roi_render(void *data, gs_effect_t *effect)
 	pthread_mutex_lock(&src->shapes_mutex);
 	for (size_t i = 0; i < src->shapes.num; i++) {
 		const struct roi_shape *s = src->shapes.array + i;
-		if (src->face_follow)
-			break; // the faces are the selection now
+		if (src->face_follow || src->auto_sel)
+			break; // the faces or the auto selection are the selection now
 		if (s->type == ROI_SHAPE_POLYGON)
 			draw_polygon_outline(s->px, s->py, s->n_pts, w, h, true, COLOR_SHAPE);
 		else
@@ -1031,7 +1082,7 @@ static void roi_render(void *data, gs_effect_t *effect)
 	pthread_mutex_unlock(&src->shapes_mutex);
 
 	// faces being followed
-	for (int i = 0; src->face_follow && i < src->n_faces; i++) {
+	for (int i = 0; src->face_follow && !src->auto_sel && i < src->n_faces; i++) {
 		const struct face_box *f = src->faces + i;
 		draw_shape_outline(ROI_SHAPE_ELLIPSE, (f->x - f->w * 0.05f) * w, (f->y - f->h * 0.05f) * h,
 				   (f->x + f->w * 1.05f) * w, (f->y + f->h * 1.05f) * h, COLOR_FACE);
@@ -1064,7 +1115,7 @@ static void roi_render(void *data, gs_effect_t *effect)
 	const struct text_scale ts = text_scale_from_viewport(w, h);
 	// the names of the selections, at their top left corner
 	pthread_mutex_lock(&src->shapes_mutex);
-	for (size_t i = 0; !src->face_follow && i < src->shapes.num; i++) {
+	for (size_t i = 0; !src->face_follow && !src->auto_sel && i < src->shapes.num; i++) {
 		const struct roi_shape *s = src->shapes.array + i;
 		if (!s->name[0])
 			continue;
@@ -1174,6 +1225,78 @@ static void read_pins(struct roi_source *src, const struct cm_surface_data *sd)
 	pthread_mutex_unlock(&src->shapes_mutex);
 }
 
+/* Auto select: classify the analyzed copy and mark the pixels outside the chosen parts (alpha 0). The map
+ * is kept for the view. */
+static void auto_select_frame(struct roi_source *src, struct cm_surface_data *sd)
+{
+	struct face_box faces[FACE_MAX];
+	const int n_faces = face_detector_get(src->fd, faces, FACE_MAX);
+	struct auto_select *as = &src->as;
+	auto_select_run(as, sd->rgb_data, sd->width, sd->height, sd->linesize, faces, n_faces, src->auto_classes,
+			src->auto_smooth, src->auto_stable);
+	if (!as->map || !as->block)
+		return;
+	const uint32_t w = sd->width, h = sd->height, B = as->block;
+	for (uint32_t y = 0; y < h; y++) {
+		const uint8_t *row = as->map + (size_t)(y / B) * as->bw;
+		uint8_t *rgb = sd->rgb_data + (size_t)sd->linesize * y;
+		uint8_t *yuv = sd->yuv_data ? sd->yuv_data + (size_t)sd->linesize * y : NULL;
+		for (uint32_t x = 0; x < w; x++) {
+			if (row[x / B])
+				continue;
+			rgb[x * 4 + 3] = 0;
+			if (yuv)
+				yuv[x * 4 + 3] = 0;
+		}
+	}
+	pthread_mutex_lock(&src->shapes_mutex);
+	const size_t n = (size_t)as->bw * as->bh;
+	if (src->auto_vw != as->bw || src->auto_vh != as->bh || !src->auto_view) {
+		bfree(src->auto_view);
+		src->auto_view = bmalloc(n);
+		src->auto_vw = as->bw;
+		src->auto_vh = as->bh;
+	}
+	memcpy(src->auto_view, as->map, n);
+	src->auto_view_dirty = true;
+	pthread_mutex_unlock(&src->shapes_mutex);
+}
+
+/* Auto select in the view: the parts not chosen are darkened, like outside a drawn selection. */
+static void draw_auto_overlay(struct roi_source *src, float w, float h)
+{
+	pthread_mutex_lock(&src->shapes_mutex);
+	const uint32_t vw = src->auto_vw, vh = src->auto_vh;
+	if (src->auto_view_dirty && src->auto_view && vw && vh) {
+		src->auto_view_dirty = false;
+		if (vw != src->auto_tw || vh != src->auto_th || !src->auto_rgba) {
+			bfree(src->auto_rgba);
+			src->auto_rgba = bmalloc((size_t)vw * vh * 4);
+		}
+		for (size_t i = 0; i < (size_t)vw * vh; i++) {
+			uint8_t *p = src->auto_rgba + i * 4;
+			p[0] = p[1] = p[2] = 0;
+			p[3] = src->auto_view[i] ? 0 : 128; // premultiplied black
+		}
+		if (src->auto_tex && vw == src->auto_tw && vh == src->auto_th) {
+			gs_texture_set_image(src->auto_tex, src->auto_rgba, vw * 4, false);
+		} else {
+			gs_texture_destroy(src->auto_tex);
+			const uint8_t *d = src->auto_rgba;
+			src->auto_tex = gs_texture_create(vw, vh, GS_RGBA, 1, &d, GS_DYNAMIC);
+			src->auto_tw = vw;
+			src->auto_th = vh;
+		}
+	}
+	pthread_mutex_unlock(&src->shapes_mutex);
+	if (!src->auto_tex)
+		return;
+	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), src->auto_tex);
+	while (gs_effect_loop(def, "Draw"))
+		gs_draw_sprite(src->auto_tex, 0, (uint32_t)w, (uint32_t)h);
+}
+
 static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 {
 	struct roi_source *src = data;
@@ -1181,13 +1304,16 @@ static void roi_surface_cb(void *data, struct cm_surface_data *surface_data)
 	if (src->pins.num)
 		read_pins(src, surface_data);
 	os_atomic_inc_long(&roi_frames_seen);
-	if (src->face_follow && src->fd && surface_data->rgb_data)
+	if ((src->face_follow || src->auto_sel) && src->fd && surface_data->rgb_data)
 		face_detector_submit(src->fd, surface_data->rgb_data, surface_data->width, surface_data->height,
 				     surface_data->linesize);
 
+	if (src->auto_sel && surface_data->rgb_data)
+		auto_select_frame(src, surface_data);
+
 	// Following faces: the scopes measure only the faces. The pixels outside them are marked here, on the
 	// analyzed copy, so it does not depend on the mask texture having reached the capture in time.
-	if (src->face_follow) {
+	if (src->face_follow && !src->auto_sel) {
 		struct roi_shape shapes[FACE_MAX];
 		pthread_mutex_lock(&src->shapes_mutex);
 		const int n = src->n_follow_shapes;
@@ -1603,7 +1729,7 @@ static void roi_send_range(struct roi_source *src)
 	pthread_mutex_lock(&src->shapes_mutex);
 	// Following faces: the whole picture, so the detector keeps seeing it all and its boxes stay in
 	// picture coordinates; the face mask selects the pixels. Drawn shapes do not count then.
-	if (src->shapes.num && !src->pins.num && !src->face_follow && w > 0 && h > 0) {
+	if (src->shapes.num && !src->pins.num && !src->face_follow && !src->auto_sel && w > 0 && h > 0) {
 		float bx0 = 1.0f, by0 = 1.0f, bx1 = 0.0f, by1 = 0.0f;
 		for (size_t i = 0; i < src->shapes.num; i++) {
 			const struct roi_shape *s = src->shapes.array + i;
@@ -1648,8 +1774,8 @@ static void roi_tick(void *data, float unused)
 		src->cm.flags |= cm->flags & (CM_FLAG_CONVERT_RGB | CM_FLAG_CONVERT_YUV | CM_FLAG_EXT);
 	}
 	pthread_mutex_unlock(&src->sources_mutex);
-	if (src->pins.num || src->face_follow)
-		src->cm.flags |= CM_FLAG_CONVERT_RGB; // the face detector looks at the colors
+	if (src->pins.num || src->face_follow || src->auto_sel)
+		src->cm.flags |= CM_FLAG_CONVERT_RGB; // the face detector and auto select look at the colors
 
 	roi_send_range(src);
 }

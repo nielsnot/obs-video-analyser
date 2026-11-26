@@ -103,6 +103,9 @@ private:
 	void updateScreenScale();
 	class QDockWidget *findDock() const;
 	void quickControl(int tile, const struct qb_item &it, int x);
+	void openMarkerMenu(int tile, const QPoint &globalPos);
+	void openTileMenu(int tile, const QPoint &globalPos);
+	void raiseScope(int tile, bool front);
 	void addMarkerControls(class QWidget *panel, class QVBoxLayout *vbox, obs_source_t *src, bool vectorscope,
 			       const std::function<void()> &reopen);
 	void insertScope(int type, obs_data_t *prop, obs_data_t *meta, int index);
@@ -160,7 +163,7 @@ public:
 	/* The signal path of the dock as HTML: source, raw signal, project, capture, LUT, selection. */
 	QString signalPathHtml();
 
-	bool helpTipShown = false;
+	int helpTipShown = 0; // which quick control tip is shown: 1 the i button, 2 the markers
 	void showHelp(int type);
 
 	friend class ScopeWidgetProperties;

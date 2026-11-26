@@ -3,6 +3,7 @@
 #include <util/darray.h>
 #include "common.h"
 #include "face.h"
+#include "autoselect.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,6 +102,18 @@ struct roi_source
 	// the face ellipses, for masking the analyzed pixels on the pipeline thread (shapes_mutex)
 	struct roi_shape follow_shapes[FACE_MAX];
 	int n_follow_shapes;
+	// auto select: the selection is a part of the people in the picture (skin, hair, clothing) or the
+	// background; it replaces the drawn shapes and follow faces while it is on
+	volatile bool auto_sel;
+	volatile int auto_classes; // auto_select_class_e bits
+	volatile bool auto_smooth, auto_stable, auto_show;
+	struct auto_select as; // pipeline thread
+	uint8_t *auto_view;    // the last map, for the view (shapes_mutex)
+	uint32_t auto_vw, auto_vh;
+	bool auto_view_dirty;
+	gs_texture_t *auto_tex; // graphics thread
+	uint32_t auto_tw, auto_th;
+	uint8_t *auto_rgba;
 	volatile bool panning;
 	int pan_mouse_x, pan_mouse_y; // view coordinates where the pan started
 	float pan_view_x, pan_view_y;

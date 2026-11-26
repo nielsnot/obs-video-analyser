@@ -22,6 +22,10 @@ static void set_defaults(obs_data_t *d)
 	obs_data_set_default_bool(d, "colorblind", false);
 	obs_data_set_default_int(d, "grat_tint", 0);
 	obs_data_set_default_bool(d, "large_icons", false);
+	obs_data_set_default_bool(d, "tile_menu", true);
+	obs_data_set_default_bool(d, "active_outline", true);
+	obs_data_set_default_bool(d, "snap_edges", true);
+	obs_data_set_default_bool(d, "quick_controls", true);
 }
 
 std::string va_config_dir()

@@ -79,6 +79,7 @@ set(PLUGIN_SOURCES
 	src/zebra.c
 	src/focuspeaking.c
 	src/roi.c
+	src/autoselect.c
 	src/common.c
 	src/util.c
 	src/util-cpp.cc
