@@ -1624,6 +1624,8 @@ QWidget#VAToolbar QTabBar::tab:selected { color: #ffffff; border-bottom-color: #
 QWidget#VAToolbar QFrame#Sep { background: #34343a; min-width: 1px; max-width: 1px; border: none; margin: 4px 4px; }
 )";
 
+static struct roi_source *widget_roi(struct scope_widget_s *data);
+
 static QFrame *toolbar_separator(QWidget *parent)
 {
 	auto *f = new QFrame(parent);
