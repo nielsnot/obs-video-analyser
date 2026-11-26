@@ -138,10 +138,23 @@ class NewScopesTest(obstest.OBSTest):
             notice(f'{kind}: {lit} lit samples')
             self.assertGreater(lit, 0, f'{kind} draws nothing')
 
-        # the QC report: written on request as an HTML page
+        img = self.screenshot(cl, kinds[PREFIX + 'qc_source'], size=(480, 400), repeat=60)
+        # the status at the top right: green when all is fine, red when a check fails
+        status = [img.getpixel((x, y)) for x in range(380, 476) for y in range(4, 24)]
+        red = sum(1 for r, g, b in status if r > 180 and g < 120)
+        green = sum(1 for r, g, b in status if g > 160 and r < 160)
+        notice(f'qc status pixels: red {red} green {green}')
+        # the right half is black, so a black border is reported
+        self.assertGreater(red, 0, 'QC does not report the black border')
+
+
+    def test_qc_report(self):
+        'The QC report is written on request as an HTML page'
         import tempfile  # pylint: disable=import-outside-toplevel
+        cl = self.obs.get_obsws()
+        qc_name = [i['inputName'] for i in cl.send('GetInputList').inputs
+                   if i['inputKind'].startswith(PREFIX + 'qc_source')][0]
         report = os.path.join(tempfile.gettempdir(), f'va-qc-report-{int(time.time())}.html')
-        qc_name = kinds[PREFIX + 'qc_source']
         cl.send('SetInputSettings', {'inputName': qc_name, 'inputSettings': {'qc_report_file': report}})
         time.sleep(0.5)
         cl.send('PressInputPropertiesButton', {'inputName': qc_name, 'propertyName': 'qc_report'})
@@ -151,15 +164,6 @@ class NewScopesTest(obstest.OBSTest):
             html = fr.read()
         notice(f'QC report: {len(html)} bytes')
         self.assertIn('QC report', html)
-
-        img = self.screenshot(cl, kinds[PREFIX + 'qc_source'], size=(480, 400), repeat=60)
-        # the status at the top right: green when all is fine, red when a check fails
-        status = [img.getpixel((x, y)) for x in range(380, 476) for y in range(4, 24)]
-        red = sum(1 for r, g, b in status if r > 180 and g < 120)
-        green = sum(1 for r, g, b in status if g > 160 and r < 160)
-        notice(f'qc status pixels: red {red} green {green}')
-        # the right half is black, so a black border is reported
-        self.assertGreater(red, 0, 'QC does not report the black border')
 
 
 if __name__ == '__main__':

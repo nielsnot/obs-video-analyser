@@ -450,6 +450,8 @@ jobs:
       - name: 'Report OBS log problems'
         if: failure()
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python - <<'PY'
           import glob, re
